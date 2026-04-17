@@ -1,0 +1,28 @@
+{
+    "filename": "04 transient treble [2025-12-29-22-19-46].wav",
+    "duration": "44.29s",
+    "patterns": [
+        {
+            "name": "Sustained Harmonic Resonance",
+            "description": "The audio is overwhelmingly harmonic (Ratio 10.49). It exhibits long-form resonance with stable tonal centers.",
+            "prominence": 0.95
+        },
+        {
+            "name": "Dominant Pitch Constellation",
+            "description": "Strong energy concentration in A#, D#, C#. Fundamental frequencies are anchored around 463.0Hz and 473.7Hz.",
+            "prominence": 0.9
+        },
+        {
+            "name": "Broadband Spectral Complexity",
+            "description": "The sound contains significant noise or complex, dense frequency distributions (stochastic patterns).",
+            "prominence": 0.7
+        }
+    ],
+    "metrics": {
+        "crest_factor": "5.36",
+        "avg_centroid": "638.4 Hz",
+        "harmonic_ratio": "10.49",
+        "spectral_flatness": "0.3136"
+    },
+    "output_dir": "analysis_04 transient treble [2025-12-29-22-19-46]"
+}

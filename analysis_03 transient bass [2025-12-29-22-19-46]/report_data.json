@@ -1,0 +1,28 @@
+{
+    "filename": "03 transient bass [2025-12-29-22-19-46].wav",
+    "duration": "44.29s",
+    "patterns": [
+        {
+            "name": "Sustained Harmonic Resonance",
+            "description": "The audio is overwhelmingly harmonic (Ratio 2.79). It exhibits long-form resonance with stable tonal centers.",
+            "prominence": 0.95
+        },
+        {
+            "name": "Dominant Pitch Constellation",
+            "description": "Strong energy concentration in G#, D#, G. Fundamental frequencies are anchored around 107.7Hz and 96.9Hz.",
+            "prominence": 0.9
+        },
+        {
+            "name": "Broadband Spectral Complexity",
+            "description": "The sound contains significant noise or complex, dense frequency distributions (stochastic patterns).",
+            "prominence": 0.7
+        }
+    ],
+    "metrics": {
+        "crest_factor": "4.02",
+        "avg_centroid": "1503.1 Hz",
+        "harmonic_ratio": "2.79",
+        "spectral_flatness": "0.1186"
+    },
+    "output_dir": "analysis_03 transient bass [2025-12-29-22-19-46]"
+}
