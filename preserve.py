@@ -37,9 +37,10 @@ def silence_wave_file(filepath):
                 # 16, 24, 32-bit signed PCM: 0 is silence
                 silence_data = b'\x00' * (n_frames * nchannels * sampwidth)
             wav_out.writeframes(silence_data)
-        print(f"Silenced: {filepath}")
+        return True
     except Exception as e:
         print(f"Error silencing {filepath}: {e}")
+        return False
 
 def process_file(filepath):
     if not os.path.exists(filepath):
@@ -51,53 +52,53 @@ def process_file(filepath):
     filename = os.path.basename(abs_filepath)
     name, ext = os.path.splitext(filename)
 
-    # 1. Prefix
-    next_prefix = get_next_prefix(directory)
-
-    new_name = name
-    if re.match(r'^\d{2}(?!\d)', name):
-        # Replace double-digit
-        new_name = re.sub(r'^\d{2}', next_prefix, name, count=1)
-    else:
-        # Prepend double-digit + space (covers single digit or no digit)
-        new_name = f"{next_prefix} {name}"
-
-    # 2. Timestamp
     now = datetime.now()
     timestamp_str = now.strftime("%Y-%m-%d %H%M%S")
-
-    # Patterns: [yyyy-mm-dd HHmmss] or [yyyy-m-d-h-m-s]
-    # We'll use a combined regex that looks for these specifically
     ts_pattern = r'\[\d{4}-\d{1,2}-\d{1,2}(?: \d{6}|-\d{1,2}-\d{1,2}-\d{1,2})\]'
 
-    if re.search(ts_pattern, new_name):
-        new_name = re.sub(ts_pattern, f"[{timestamp_str}]", new_name)
-    else:
-        # Append before extension
-        new_name = f"{new_name} [{timestamp_str}]"
+    # 1. Prefix for the copy
+    next_prefix = get_next_prefix(directory)
 
-    new_filepath = os.path.join(directory, new_name + ext)
+    copy_name = name
+    if re.match(r'^\d{2}(?!\d)', name):
+        copy_name = re.sub(r'^\d{2}', next_prefix, name, count=1)
+    else:
+        copy_name = f"{next_prefix} {name}"
+
+    # 2. Timestamp for the copy
+    # "it should not actually update the timestamp... unless that timestamp is being added for the first time"
+    if not re.search(ts_pattern, copy_name):
+        copy_name = f"{copy_name} [{timestamp_str}]"
+
+    new_filepath = os.path.join(directory, copy_name + ext)
 
     # Perform copy
     shutil.copy2(abs_filepath, new_filepath)
-    print(f"Copied: {filepath} -> {new_filepath}")
+    print(f"Copied: {filename} -> {copy_name + ext}")
 
-    # 3. Silencing original
-    # "if the original file that was copied begins with either a double or single digit number that is four or less"
+    # 3. Silencing and renaming original
     match = re.match(r'^(\d{1,2})(?!\d)', filename)
     if match:
         original_num = int(match.group(1))
         if original_num <= 4:
-            silence_wave_file(abs_filepath)
+            if silence_wave_file(abs_filepath):
+                print(f"Silenced: {filename}")
+
+                # Update timestamp on original file name
+                if re.search(ts_pattern, name):
+                    original_new_name = re.sub(ts_pattern, f"[{timestamp_str}]", name)
+                else:
+                    original_new_name = f"{name} [{timestamp_str}]"
+
+                original_new_path = os.path.join(directory, original_new_name + ext)
+                if abs_filepath != original_new_path:
+                    os.rename(abs_filepath, original_new_path)
+                    print(f"Renamed original: {filename} -> {original_new_name + ext}")
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 preserve.py <file1> <file2> ...")
         sys.exit(1)
-
-    # We should probably collect all new prefixes upfront if we want to be consistent,
-    # but the prompt says "scan the folder... finding any filenames... and then edit the new copy... one greater than the largest found in the folder prior."
-    # This implies we should re-scan for each file if we want them to increment.
 
     for arg in sys.argv[1:]:
         process_file(arg)
