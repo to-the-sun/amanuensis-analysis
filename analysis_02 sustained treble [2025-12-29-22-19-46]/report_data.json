@@ -1,0 +1,28 @@
+{
+    "filename": "02 sustained treble [2025-12-29-22-19-46].wav",
+    "duration": "44.29s",
+    "patterns": [
+        {
+            "name": "Sustained Harmonic Resonance",
+            "description": "The audio is overwhelmingly harmonic (Ratio 46.99). It exhibits long-form resonance with stable tonal centers.",
+            "prominence": 0.95
+        },
+        {
+            "name": "Dominant Pitch Constellation",
+            "description": "Strong energy concentration in G#, A#, D#. Fundamental frequencies are anchored around 409.1Hz and 419.9Hz.",
+            "prominence": 0.9
+        },
+        {
+            "name": "Broadband Spectral Complexity",
+            "description": "The sound contains significant noise or complex, dense frequency distributions (stochastic patterns).",
+            "prominence": 0.7
+        }
+    ],
+    "metrics": {
+        "crest_factor": "3.82",
+        "avg_centroid": "696.5 Hz",
+        "harmonic_ratio": "46.99",
+        "spectral_flatness": "0.0650"
+    },
+    "output_dir": "analysis_02 sustained treble [2025-12-29-22-19-46]"
+}

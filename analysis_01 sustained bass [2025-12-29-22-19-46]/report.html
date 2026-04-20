@@ -1,0 +1,88 @@
+
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Pattern Analysis Report - 01 sustained bass [2025-12-29-22-19-46].wav</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 1100px; margin: 0 auto; padding: 40px; background: #fafafa; }
+            .container { background: #fff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+            h1 { color: #1a2a3a; border-bottom: 3px solid #3498db; padding-bottom: 15px; margin-top: 0; }
+            h2 { color: #2c3e50; margin-top: 40px; border-left: 5px solid #3498db; padding-left: 15px; }
+            .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0; }
+            .metric-box { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #eee; }
+            .metric-value { font-size: 1.4em; font-weight: bold; color: #e67e22; }
+            .metric-label { font-size: 0.85em; color: #7f8c8d; text-transform: uppercase; }
+            .pattern-card { background: #fff; border: 1px solid #e0e0e0; padding: 20px; margin-bottom: 20px; border-radius: 8px; transition: transform 0.2s; }
+            .pattern-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+            .pattern-name { font-weight: bold; font-size: 1.25em; color: #2c3e50; margin-bottom: 10px; }
+            .pattern-prominence { float: right; background: #3498db; color: #fff; padding: 3px 12px; border-radius: 20px; font-size: 0.8em; }
+            .visualizations { display: grid; grid-template-columns: 1fr; gap: 30px; margin-top: 30px; }
+            .vis-item { background: #fff; padding: 15px; border: 1px solid #eee; border-radius: 8px; }
+            .vis-item img { width: 100%; height: auto; border-radius: 4px; }
+            .vis-caption { font-size: 0.9em; color: #666; margin-top: 10px; font-style: italic; }
+            footer { margin-top: 60px; text-align: center; color: #95a5a6; font-size: 0.9em; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Audio Pattern Report: 01 sustained bass [2025-12-29-22-19-46].wav</h1>
+
+            <div class="metrics-grid">
+                <div class="metric-box"><div class="metric-value">44.29s</div><div class="metric-label">Duration</div></div>
+                <div class="metric-box"><div class="metric-value">343.3 Hz</div><div class="metric-label">Spectral Center</div></div>
+                <div class="metric-box"><div class="metric-value">2.98</div><div class="metric-label">Crest Factor</div></div>
+                <div class="metric-box"><div class="metric-value">7.51</div><div class="metric-label">Harmonicity</div></div>
+            </div>
+
+            <h2>Prominent Patterns & Observations</h2>
+
+            <div class="pattern-card">
+                <span class="pattern-prominence">Prominence: 95%</span>
+                <div class="pattern-name">Sustained Harmonic Resonance</div>
+                <div class="pattern-description">The audio is overwhelmingly harmonic (Ratio 7.51). It exhibits long-form resonance with stable tonal centers.</div>
+            </div>
+
+            <div class="pattern-card">
+                <span class="pattern-prominence">Prominence: 90%</span>
+                <div class="pattern-name">Dominant Pitch Constellation</div>
+                <div class="pattern-description">Strong energy concentration in G#, A#, D#. Fundamental frequencies are anchored around 107.7Hz and 96.9Hz.</div>
+            </div>
+
+            <div class="pattern-card">
+                <span class="pattern-prominence">Prominence: 70%</span>
+                <div class="pattern-name">Broadband Spectral Complexity</div>
+                <div class="pattern-description">The sound contains significant noise or complex, dense frequency distributions (stochastic patterns).</div>
+            </div>
+
+
+            <h2>Technical Visualizations</h2>
+            <div class="visualizations">
+                <div class="vis-item">
+                    <h3>Temporal & Dynamic Envelope</h3>
+                    <img src="temporal.png">
+                    <div class="vis-caption">Displays the raw waveform separated into harmonic (blue) and percussive (red) components, with the overall loudness envelope below.</div>
+                </div>
+                <div class="vis-item">
+                    <h3>Spectral Density (Mel-Scale)</h3>
+                    <img src="spectrogram.png">
+                    <div class="vis-caption">Heatmap of energy across the frequency spectrum. The white line tracks the 'center of mass' of the sound (Spectral Centroid).</div>
+                </div>
+                <div class="vis-item">
+                    <h3>Spectral Contrast Peaks</h3>
+                    <img src="contrast.png">
+                    <div class="vis-caption">Highlights the difference between spectral peaks and valleys, revealing the 'sharpness' of the tonal content across frequency bands.</div>
+                </div>
+                <div class="vis-item">
+                    <h3>Structural Recurrence</h3>
+                    <img src="recurrence.png">
+                    <div class="vis-caption">A map of temporal self-similarity. Diagonals and blocks indicate repeating patterns or stable textures over the course of the recording.</div>
+                </div>
+            </div>
+
+            <footer>
+                Analyzed by Jules AI • Sound Pattern Recognition Engine
+            </footer>
+        </div>
+    </body>
+    </html>
