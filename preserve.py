@@ -92,7 +92,7 @@ def process_file(filepath):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 copy_audio.py <file1> <file2> ...")
+        print("Usage: python3 preserve.py <file1> <file2> ...")
         sys.exit(1)
 
     # We should probably collect all new prefixes upfront if we want to be consistent,
