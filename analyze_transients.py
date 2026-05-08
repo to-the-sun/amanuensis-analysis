@@ -4,6 +4,7 @@ import scipy.signal
 import json
 import os
 import argparse
+import asyncio
 
 def analyze_audio(file_path):
     """
@@ -39,10 +40,46 @@ def analyze_audio(file_path):
         print(f"Error analyzing {file_path}: {e}")
         return None
 
+async def generate_screenshot(html_path, output_png):
+    """
+    Uses Playwright to capture a screenshot of the generated HTML.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        print("Playwright not found. Automatic screenshot generation is disabled.")
+        print("To enable, install with: pip install playwright && playwright install chromium")
+        return
+
+    print(f"Generating screenshot: {output_png}...")
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(args=["--no-sandbox", "--disable-setuid-sandbox"])
+            page = await browser.new_page(viewport={'width': 1200, 'height': 630})
+            # Use absolute path for file:// URL
+            abs_path = os.path.abspath(html_path)
+            await page.goto(f"file://{abs_path}", wait_until="networkidle")
+            # Wait for Plotly to render
+            try:
+                await page.wait_for_selector("#graph .js-plotly-plot", timeout=10000)
+            except:
+                print("Warning: Plotly graph selector not found, attempting screenshot anyway.")
+            # Small delay to ensure everything is stable
+            await asyncio.sleep(2)
+            await page.screenshot(path=output_png)
+            await browser.close()
+            print(f"Screenshot saved to {output_png}")
+    except Exception as e:
+        print(f"Error generating screenshot: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a transient analysis report for audio files in a directory.")
     parser.add_argument("--dir", default=".", help="Directory containing audio files (default: current directory)")
     parser.add_argument("--output", default="transient_analysis.html", help="Output HTML file name (default: transient_analysis.html)")
+    parser.add_argument("--base-url", default="", help="Base URL where the report and audio files will be hosted (required for Discord embeds)")
+    parser.add_argument("--title", default="Transient Analysis Report", help="Title for the report and Discord embed")
+    parser.add_argument("--description", default="Interactive transient analysis of audio files.", help="Description for the Discord embed")
+    parser.add_argument("--no-screenshot", action="store_true", help="Disable automatic screenshot generation")
     args = parser.parse_args()
 
     # Supported audio extensions
@@ -65,29 +102,61 @@ def main():
         print("No valid audio data was processed.")
         return
 
+    # Prepare meta tags data
+    page_title = args.title
+    page_description = args.description
+
+    # Placeholder for image and audio URLs
+    image_url = ""
+    audio_url = ""
+
+    if args.base_url:
+        base_url = args.base_url.rstrip('/')
+        image_filename = os.path.splitext(args.output)[0] + ".png"
+        image_url = f"{base_url}/{image_filename}"
+
+        # Pick the first audio file as default for og:audio if available
+        if audio_files:
+            audio_url = f"{base_url}/{audio_files[0]}"
+
     html_template = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Transient Analysis Report</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TITLE_PLACEHOLDER</title>
+
+    <!-- Open Graph / Discord Meta Tags -->
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="TITLE_PLACEHOLDER">
+    <meta property="og:description" content="DESCRIPTION_PLACEHOLDER">
+    <meta property="og:image" content="IMAGE_URL_PLACEHOLDER">
+    <meta property="og:audio" content="AUDIO_URL_PLACEHOLDER">
+
+    <!-- Twitter Meta Tags -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="TITLE_PLACEHOLDER">
+    <meta name="twitter:description" content="DESCRIPTION_PLACEHOLDER">
+    <meta name="twitter:image" content="IMAGE_URL_PLACEHOLDER">
+
     <!-- Using Plotly.js for interactive visualizations -->
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 40px; line-height: 1.6; color: #333; background-color: #f9f9f9; }
-        .container { max-width: 1200px; margin: auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #2c3e50; text-align: center; }
-        .controls { margin-bottom: 30px; padding: 20px; background: #ecf0f1; border-radius: 5px; }
-        .controls label { font-weight: bold; display: block; margin-bottom: 10px; }
-        #file-select { width: 100%; padding: 10px; font-size: 16px; border-radius: 4px; border: 1px solid #ccc; }
-        #audio-player { width: 100%; margin-top: 20px; }
-        #graph { width: 100%; height: 600px; margin-top: 20px; }
-        .footer { margin-top: 40px; font-size: 12px; text-align: center; color: #7f8c8d; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; line-height: 1.6; color: #333; background-color: #f9f9f9; }
+        .container { max-width: 1200px; min-height: 630px; margin: 0 auto; background: white; padding: 20px; box-sizing: border-box; }
+        h1 { color: #2c3e50; text-align: center; margin-top: 0; font-size: 24px; }
+        .controls { margin-bottom: 15px; padding: 15px; background: #ecf0f1; border-radius: 5px; }
+        .controls label { font-weight: bold; display: block; margin-bottom: 5px; font-size: 14px; }
+        #file-select { width: 100%; padding: 8px; font-size: 14px; border-radius: 4px; border: 1px solid #ccc; }
+        #audio-player { width: 100%; margin-top: 10px; height: 35px; }
+        #graph { width: 100%; height: 420px; margin-top: 10px; }
+        .footer { margin-top: 20px; font-size: 11px; text-align: center; color: #7f8c8d; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Transient Analysis Report</h1>
+        <h1>TITLE_PLACEHOLDER</h1>
 
         <div class="controls">
             <label for="file-select">Select Audio File:</label>
@@ -210,14 +279,23 @@ def main():
 </html>
     """
 
-    # Injecting data as JSON. Using json.dumps ensures proper escaping.
+    # Injecting data and meta tags
     report_content = html_template.replace("DATA_PLACEHOLDER", json.dumps(all_data))
+    report_content = report_content.replace("TITLE_PLACEHOLDER", page_title)
+    report_content = report_content.replace("DESCRIPTION_PLACEHOLDER", page_description)
+    report_content = report_content.replace("IMAGE_URL_PLACEHOLDER", image_url)
+    report_content = report_content.replace("AUDIO_URL_PLACEHOLDER", audio_url)
 
     output_path = args.output
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report_content)
 
     print(f"Report generated successfully: {os.path.abspath(output_path)}")
+
+    # Generate screenshot
+    if not args.no_screenshot:
+        screenshot_filename = os.path.splitext(output_path)[0] + ".png"
+        asyncio.run(generate_screenshot(output_path, screenshot_filename))
 
 if __name__ == "__main__":
     main()
