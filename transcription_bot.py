@@ -22,77 +22,59 @@ logger = logging.getLogger(__name__)
 logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
 logging.getLogger('discord.ext.voice_recv.opus').setLevel(logging.ERROR)
 
-# --- ADVANCED CONNECTION PATCHES ---
+# --- DEEP DIAGNOSTIC PATCHES ---
 
-# Check for AEAD support in PyNaCl
-try:
-    import nacl.secret
-    HAS_AEAD = hasattr(nacl.secret, "Aead")
-    if not HAS_AEAD:
-        logger.warning("Your PyNaCl version does NOT support AEAD (XChaCha20). Audio will likely be garbled if Discord forces it.")
-    else:
-        logger.info("PyNaCl AEAD support detected.")
-except ImportError:
-    HAS_AEAD = False
-    logger.error("PyNaCl not found!")
-
-# 1. Update supported modes
-# We EXCLUDE 'aead_aes256_gcm_rtpsize' because the library doesn't have a decryptor for it.
-# We INCLUDE 'aead_xchacha20_poly1305_rtpsize' as a last resort if PyNaCl supports it.
-all_known_modes = [
+# 1. Block the problematic AES mode definitively
+stable_modes = [
     'xsalsa20_poly1305_lite',
     'xsalsa20_poly1305_suffix',
     'xsalsa20_poly1305',
 ]
-if HAS_AEAD:
-    all_known_modes.append('aead_xchacha20_poly1305_rtpsize')
+aead_mode = 'aead_xchacha20_poly1305_rtpsize'
 
-voice_recv.VoiceRecvClient.supported_modes = tuple(all_known_modes)
+voice_recv.VoiceRecvClient.supported_modes = tuple(stable_modes + [aead_mode])
 from discord.ext.voice_recv.reader import PacketDecryptor
-PacketDecryptor.supported_modes = all_known_modes
+PacketDecryptor.supported_modes = stable_modes + [aead_mode]
 
-# 2. Monkey-patch the websocket handshake
+# 2. Advanced Decoder Patch with Hex Logging
+_original_decode = discord.opus.Decoder.decode
+_err_logged = 0
+
+def _deep_diagnostic_decode(self, data, fec=False):
+    global _err_logged
+    if not data:
+        return b'\x00' * 3840
+
+    try:
+        return _original_decode(self, data, fec)
+    except discord.opus.OpusError:
+        if _err_logged < 10:
+            hex_data = data.hex()[:32]
+            logger.warning(f"DECODE FAIL! First 16 bytes (hex): {hex_data} | Length: {len(data)}")
+            _err_logged += 1
+        return b'\x00' * 3840
+    except Exception:
+        return b'\x00' * 3840
+
+discord.opus.Decoder.decode = _deep_diagnostic_decode
+
+# 3. Connection Hook
 from discord.gateway import DiscordVoiceWebSocket
 _original_initial_connection = DiscordVoiceWebSocket.initial_connection
 
 async def _patched_initial_connection(self, data):
     modes = data.get('modes', [])
     logger.info(f"Discord offered encryption modes: {modes}")
-
-    # Prioritize our list
-    supported = [m for m in all_known_modes if m in modes]
-    if not supported:
-        logger.warning("None of our preferred modes were offered. Forcing first offer to avoid immediate crash.")
+    # Force AEAD XChaCha over AES if both present
+    preferred = [m for m in stable_modes + [aead_mode] if m in modes]
+    if not preferred:
         data['modes'] = modes[:1]
     else:
-        data['modes'] = supported
-
+        data['modes'] = preferred
     return await _original_initial_connection(self, data)
 
 DiscordVoiceWebSocket.initial_connection = _patched_initial_connection
-
-# 3. Patch the Decoder to catch OpusError
-_original_decode = discord.opus.Decoder.decode
-_error_count = 0
-_last_error_time = 0
-
-def _safe_decode(self, data, fec=False):
-    global _error_count, _last_error_time
-    try:
-        return _original_decode(self, data, fec)
-    except discord.opus.OpusError:
-        _error_count += 1
-        now = time.time()
-        if now - _last_error_time > 5:
-            logger.warning(f"Opus decoding errors detected: {_error_count} in the last 5 seconds. Audio is likely garbled.")
-            _error_count = 0
-            _last_error_time = now
-        return b'\x00' * 3840
-    except Exception:
-        return b'\x00' * 3840
-
-discord.opus.Decoder.decode = _safe_decode
-logger.info("Applied safety patches and diagnostic hooks.")
+logger.info("Deep diagnostic mode activated.")
 # -------------------------------
 
 # Load credentials
@@ -137,6 +119,14 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         if user is None or not data.pcm:
             return
 
+        # RTP Extension Check for DAVE (E2EE)
+        if hasattr(data.packet, 'extension_data') and data.packet.extension_data:
+             # DAVE often uses extension IDs like 11 or 12
+             if any(eid > 10 for eid in data.packet.extension_data.keys()):
+                 if not hasattr(self, '_dave_warned'):
+                     logger.warning(f"Detected unusual RTP extensions: {list(data.packet.extension_data.keys())}. E2EE (DAVE) might be active!")
+                     self._dave_warned = True
+
         with self.lock:
             self.user_buffers[user].extend(data.pcm)
             self.last_audio_time[user] = time.time()
@@ -149,8 +139,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 now = time.time()
                 with self.lock:
                     for user, buffer in list(self.user_buffers.items()):
-                        if not buffer:
-                            continue
+                        if not buffer: continue
                         buffer_duration = len(buffer) / (self.sample_rate * self.channels * 2)
                         time_since_last = now - self.last_audio_time[user]
                         if buffer_duration > 1.0 and (time_since_last > 0.6 or buffer_duration > 15.0):
@@ -198,8 +187,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
             logger.error(f"Failed to save debug wav: {e}")
 
     def _transcribe(self, audio_bytes):
-        if MODEL is None:
-             return "Model not loaded", True
+        if MODEL is None: return "Model not loaded", True
         try:
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).reshape(-1, self.channels)
             audio_float32 = audio_np.astype(np.float32) / 32768.0
