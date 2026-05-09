@@ -21,16 +21,23 @@ logger = logging.getLogger(__name__)
 logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
 logging.getLogger('discord.ext.voice_recv.opus').setLevel(logging.ERROR)
 
-# --- MONKEY PATCH FOR DECODER ---
-# The internal library thread crashes on OpusError. We patch the Decoder
-# to catch the error and return silence instead, keeping the thread alive.
+# --- SAFETY PATCHES ---
+# 1. Force a stable encryption mode (remove experimental AEAD)
+_original_supported_modes = voice_recv.VoiceRecvClient.supported_modes
+voice_recv.VoiceRecvClient.supported_modes = (
+    'xsalsa20_poly1305_lite',
+    'xsalsa20_poly1305_suffix',
+    'xsalsa20_poly1305',
+)
+logger.info("Forcing stable encryption modes (removing experimental AEAD).")
+
+# 2. Patch the Decoder to catch OpusError and return silence
 _original_decode = discord.opus.Decoder.decode
 
 def _safe_decode(self, data, fec=False):
     try:
         return _original_decode(self, data, fec)
     except discord.opus.OpusError:
-        # Return silence (960 samples * 2 channels * 2 bytes = 3840 bytes)
         return b'\x00' * 3840
     except Exception:
         return b'\x00' * 3840
@@ -79,7 +86,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
 
     def wants_opus(self) -> bool:
-        # Revert to PCM mode to let the library handle timing and buffering
         return False
 
     def write(self, user: Optional[discord.User], data: voice_recv.VoiceData):
@@ -87,7 +93,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
             return
 
         with self.lock:
-            # data.pcm is the raw PCM data (48kHz, stereo, 16-bit)
             self.user_buffers[user].extend(data.pcm)
             self.last_audio_time[user] = time.time()
 
@@ -106,7 +111,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                         buffer_duration = len(buffer) / (self.sample_rate * self.channels * 2)
                         time_since_last = now - self.last_audio_time[user]
 
-                        # Process if we have > 1 sec of audio and user paused, or if buffer is long
                         if buffer_duration > 1.0 and (time_since_last > 0.6 or buffer_duration > 15.0):
                             users_to_process.append((user, bytes(buffer)))
 
@@ -119,7 +123,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                     audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
                     rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
 
-                    # Silence threshold check
                     if rms < 400:
                         with self.lock:
                              self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
