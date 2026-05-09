@@ -42,8 +42,15 @@ The SSM allows you to see the "DNA" of the audio's rhythm. It reveals structural
 ## Usage
 
 1. **Install Dependencies:**
+   Ensure you have the following Python packages installed:
+   - `librosa`
+   - `numpy`
+   - `scipy`
+   - `matplotlib`
+
+   You can install them via pip:
    ```bash
-   pip install -r requirements.txt
+   pip install librosa numpy scipy matplotlib
    ```
 
 2. **Run the Script:**

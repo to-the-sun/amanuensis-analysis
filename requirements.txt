@@ -1,5 +1,0 @@
-librosa
-numpy
-scipy
-argparse
-matplotlib
