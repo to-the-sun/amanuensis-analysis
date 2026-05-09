@@ -6,6 +6,7 @@ import collections
 import threading
 import time
 import logging
+import wave
 from typing import Optional
 
 import discord
@@ -16,8 +17,9 @@ from faster_whisper import WhisperModel
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Suppress the RTCP packet spam from the library
+# Suppress the RTCP packet spam and jitter buffer warnings
 logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
+logging.getLogger('discord.ext.voice_recv.opus').setLevel(logging.ERROR)
 
 # Load credentials
 try:
@@ -46,21 +48,17 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         super().__init__()
         self.bot = bot
         self.text_channel_id = text_channel_id
-        # Buffers for each user: user -> bytearray of PCM data
         self.user_buffers = collections.defaultdict(bytearray)
-        # Last time audio was received from a user
         self.last_audio_time = collections.defaultdict(float)
-        # Custom decoders per user
         self.decoders = {}
-        # Statistics for debugging
         self.stats = collections.defaultdict(lambda: {"decoded": 0, "corrupted": 0})
-        # Lock for thread-safe buffer access
         self.lock = threading.Lock()
 
-        # Audio parameters
         self.sample_rate = 48000
         self.channels = 2
-        self.target_sample_rate = 16000
+
+        # Debugging
+        self.debug_saved = False
 
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
 
@@ -72,11 +70,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
             return
 
         if user.id not in self.decoders:
-            try:
-                self.decoders[user.id] = discord.opus.Decoder()
-            except Exception as e:
-                logger.error(f"Could not create Opus decoder for {user.display_name}: {e}")
-                return
+            self._create_decoder(user)
 
         try:
             pcm = self.decoders[user.id].decode(data.opus)
@@ -86,8 +80,16 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 self.stats[user.id]["decoded"] += 1
         except discord.opus.OpusError:
             self.stats[user.id]["corrupted"] += 1
+            # Reset decoder on corruption to see if it clears the state
+            self._create_decoder(user)
         except Exception as e:
             logger.debug(f"Error decoding packet from {user.display_name}: {e}")
+
+    def _create_decoder(self, user):
+        try:
+            self.decoders[user.id] = discord.opus.Decoder()
+        except Exception as e:
+            logger.error(f"Could not create Opus decoder for {user.display_name}: {e}")
 
     async def _process_buffers(self):
         while True:
@@ -99,11 +101,11 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 with self.lock:
                     for user, buffer in list(self.user_buffers.items()):
                         if not buffer:
-                            # Periodic stat report even if silent
                             if now % 10 < 1.0:
                                 s = self.stats[user.id]
                                 if s["decoded"] + s["corrupted"] > 0:
-                                    logger.info(f"Stats for {user.display_name}: {s['decoded']} ok, {s['corrupted']} corrupted")
+                                    ratio = s["corrupted"] / (s["decoded"] + s["corrupted"]) * 100
+                                    logger.info(f"Stats for {user.display_name}: {s['decoded']} ok, {s['corrupted']} corrupted ({ratio:.1f}%)")
                             continue
 
                         buffer_duration = len(buffer) / (self.sample_rate * self.channels * 2)
@@ -113,14 +115,15 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                             users_to_process.append((user, bytes(buffer)))
 
                 for user, audio_bytes in users_to_process:
-                    # Calculate volume (RMS)
+                    # Save a debug sample once
+                    if not self.debug_saved and len(audio_bytes) > (48000 * 4 * 2):
+                        self._save_debug_wav(audio_bytes)
+                        self.debug_saved = True
+
                     audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
                     rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
 
-                    # Silence threshold: 500 is very quiet background noise,
-                    # normal speech usually peaks > 3000
                     if rms < 400:
-                        logger.debug(f"Skipping silent buffer from {user.display_name} (RMS: {rms:.1f})")
                         with self.lock:
                              self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
                         continue
@@ -128,8 +131,20 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                     logger.info(f"Transcribing {len(audio_bytes)/(48000*4):.1f}s from {user.display_name} (RMS: {rms:.1f})...")
                     text, is_complete = await self.bot.loop.run_in_executor(None, self._transcribe, audio_bytes)
 
+                    # Log the raw text to console for verification
+                    if text:
+                        logger.info(f"Whisper output: \"{text.strip()}\"")
+
                     if text and text.strip():
-                        if is_complete or len(audio_bytes) > (self.sample_rate * self.channels * 2 * 14):
+                        # If corruption is high (>30%), Whisper is likely transcribing static
+                        s = self.stats[user.id]
+                        corruption_ratio = s["corrupted"] / (s["decoded"] + s["corrupted"]) if (s["decoded"] + s["corrupted"]) > 0 else 0
+
+                        if corruption_ratio > 0.4:
+                            logger.warning(f"High corruption ({corruption_ratio*100:.1f}%). Discarding potential hallucination.")
+                            text = ""
+
+                        if text and (is_complete or len(audio_bytes) > (self.sample_rate * self.channels * 2 * 14)):
                             channel = self.bot.get_channel(self.text_channel_id)
                             if channel:
                                 await channel.send(f"**{user.display_name}**: {text.strip()}")
@@ -138,11 +153,21 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                                 processed_len = len(audio_bytes)
                                 self.user_buffers[user] = self.user_buffers[user][processed_len:]
                     else:
-                        # If Whisper found nothing, clear the buffer anyway so we don't loop
                         with self.lock:
                             self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
             except Exception as e:
                 logger.error(f"Error in processing loop: {e}")
+
+    def _save_debug_wav(self, audio_bytes):
+        try:
+            with wave.open('debug_audio.wav', 'wb') as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(2)
+                wf.setframerate(self.sample_rate)
+                wf.writeframes(audio_bytes)
+            logger.info("Saved debug sample to 'debug_audio.wav'. Please listen to this file.")
+        except Exception as e:
+            logger.error(f"Failed to save debug wav: {e}")
 
     def _transcribe(self, audio_bytes):
         if MODEL is None:
@@ -154,7 +179,8 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
             audio_mono = audio_float32.mean(axis=1)
             audio_16k = audio_mono[::3]
 
-            segments, info = MODEL.transcribe(audio_16k, beam_size=5, language="en")
+            # Use a slightly more conservative threshold for the actual transcription
+            segments, info = MODEL.transcribe(audio_16k, beam_size=5, language="en", initial_prompt="Hello.")
 
             segments = list(segments)
             full_text = "".join([s.text for s in segments])
