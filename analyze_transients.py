@@ -4,10 +4,14 @@ import scipy.signal
 import json
 import os
 import argparse
+import matplotlib.pyplot as plt
+import io
+import base64
 
 def analyze_audio(file_path):
     """
     Analyzes an audio file to extract its transient envelope and identify peaks.
+    Generates a high-resolution SSM image (Base64).
     """
     print(f"Analyzing {file_path}...")
     try:
@@ -15,9 +19,10 @@ def analyze_audio(file_path):
         y, sr = librosa.load(file_path, sr=None)
 
         # Calculate onset strength (transient envelope)
-        # This represents the spectral energy flux across frames.
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr)
+        # Resolution: 20ms chunks
+        hop_length = int(sr * 0.020)
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+        times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr, hop_length=hop_length)
 
         # Find peaks in the onset strength
         # prominence=0.5 and distance=10 are heuristic values for transient detection
@@ -26,24 +31,27 @@ def analyze_audio(file_path):
         peak_times = times[peaks].tolist()
         peak_values = onset_env[peaks].tolist()
 
-        # Calculate SSM
-        # Downsample for SSM to keep it lightweight (target 400x400)
-        target_ssm_size = 400
-        if len(onset_env) > target_ssm_size:
-            downsampled_indices = np.linspace(0, len(onset_env) - 1, target_ssm_size)
-            onset_env_ssm = np.interp(downsampled_indices, np.arange(len(onset_env)), onset_env)
-            ssm_times = np.interp(downsampled_indices, np.arange(len(onset_env)), times)
-        else:
-            onset_env_ssm = onset_env
-            ssm_times = times
-
+        # Calculate SSM at full 20ms resolution
         # Compute pairwise distance matrix using broadcasting
         # SSM(i,j) = |onset_env[i] - onset_env[j]|
-        dist_matrix = np.abs(onset_env_ssm[:, np.newaxis] - onset_env_ssm[np.newaxis, :])
+        dist_matrix = np.abs(onset_env[:, np.newaxis] - onset_env[np.newaxis, :])
 
         # Convert to similarity: 1 - normalized distance
         max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1
         ssm = 1 - (dist_matrix / max_dist)
+
+        # Render SSM to image instead of storing raw JSON data
+        # This keeps the HTML report performant even at high resolution (20ms chunks)
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(ssm, cmap='viridis', origin='lower', aspect='auto')
+        ax.axis('off')
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        ssm_base64 = base64.b64encode(buf.read()).decode('utf-8')
 
         return {
             "filename": os.path.basename(file_path),
@@ -53,10 +61,8 @@ def analyze_audio(file_path):
                 "times": peak_times,
                 "values": peak_values
             },
-            "ssm": {
-                "data": ssm.tolist(),
-                "times": ssm_times.tolist()
-            }
+            "ssm_image": ssm_base64,
+            "ssm_extent": [float(times[0]), float(times[-1])]
         }
     except Exception as e:
         print(f"Error analyzing {file_path}: {e}")
@@ -202,15 +208,17 @@ def main():
 
             Plotly.newPlot(graphDiv, [traceTransient, tracePeaks], layout, config);
 
-            // Update SSM Heatmap
+            // Update SSM Visualization using Base64 Image
+            const ssmExtent = fileData.ssm_extent;
+
+            // Dummy trace to establish axes
             const ssmTrace = {
-                z: fileData.ssm.data,
-                x: fileData.ssm.times,
-                y: fileData.ssm.times,
-                type: 'heatmap',
-                colorscale: 'Viridis',
-                showscale: true,
-                name: 'Self-Similarity'
+                x: ssmExtent,
+                y: ssmExtent,
+                mode: 'markers',
+                marker: { opacity: 0 },
+                showlegend: false,
+                hoverinfo: 'none'
             };
 
             const ssmLayout = {
@@ -218,24 +226,47 @@ def main():
                     text: 'Transient Self-Similarity Matrix',
                     font: { size: 18 }
                 },
-                xaxis: { title: 'Time (seconds)' },
-                yaxis: { title: 'Time (seconds)', scaleanchor: 'x' },
+                xaxis: {
+                    title: 'Time (seconds)',
+                    range: ssmExtent,
+                    fixedrange: false
+                },
+                yaxis: {
+                    title: 'Time (seconds)',
+                    range: ssmExtent,
+                    scaleanchor: 'x',
+                    fixedrange: false
+                },
+                images: [{
+                    source: 'data:image/png;base64,' + fileData.ssm_image,
+                    xref: 'x',
+                    yref: 'y',
+                    x: ssmExtent[0],
+                    y: ssmExtent[1],
+                    sizex: ssmExtent[1] - ssmExtent[0],
+                    sizey: ssmExtent[1] - ssmExtent[0],
+                    sizing: 'stretch',
+                    opacity: 1,
+                    layer: 'below'
+                }],
                 shapes: [{
                     type: 'line',
                     x0: 0,
                     x1: 0,
-                    y0: 0,
-                    y1: 1,
-                    yref: 'paper',
+                    y0: ssmExtent[0],
+                    y1: ssmExtent[1],
+                    xref: 'x',
+                    yref: 'y',
                     line: { color: '#e67e22', width: 2, dash: 'dash' },
                     name: 'playhead-x'
                 }, {
                     type: 'line',
                     y0: 0,
                     y1: 0,
-                    x0: 0,
-                    x1: 1,
-                    xref: 'paper',
+                    x0: ssmExtent[0],
+                    x1: ssmExtent[1],
+                    xref: 'x',
+                    yref: 'y',
                     line: { color: '#e67e22', width: 2, dash: 'dash' },
                     name: 'playhead-y'
                 }]
@@ -259,19 +290,20 @@ def main():
         // Synchronize playhead on the graph with audio playback
         audioPlayer.addEventListener('timeupdate', () => {
             const currentTime = audioPlayer.currentTime;
-            const updateGraph = {
+
+            // Update Transient Graph Playhead
+            Plotly.relayout(graphDiv, {
                 'shapes[0].x0': currentTime,
                 'shapes[0].x1': currentTime
-            };
-            Plotly.relayout(graphDiv, updateGraph);
+            });
 
-            const updateSSM = {
+            // Update SSM Crosshair Playhead
+            Plotly.relayout(ssmDiv, {
                 'shapes[0].x0': currentTime,
                 'shapes[0].x1': currentTime,
                 'shapes[1].y0': currentTime,
                 'shapes[1].y1': currentTime
-            };
-            Plotly.relayout(ssmDiv, updateSSM);
+            });
         });
 
         // Initial load
