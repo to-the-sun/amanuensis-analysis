@@ -136,15 +136,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                         logger.info(f"Whisper output: \"{text.strip()}\"")
 
                     if text and text.strip():
-                        # If corruption is high (>30%), Whisper is likely transcribing static
-                        s = self.stats[user.id]
-                        corruption_ratio = s["corrupted"] / (s["decoded"] + s["corrupted"]) if (s["decoded"] + s["corrupted"]) > 0 else 0
-
-                        if corruption_ratio > 0.4:
-                            logger.warning(f"High corruption ({corruption_ratio*100:.1f}%). Discarding potential hallucination.")
-                            text = ""
-
-                        if text and (is_complete or len(audio_bytes) > (self.sample_rate * self.channels * 2 * 14)):
+                        if is_complete or len(audio_bytes) > (self.sample_rate * self.channels * 2 * 14):
                             channel = self.bot.get_channel(self.text_channel_id)
                             if channel:
                                 await channel.send(f"**{user.display_name}**: {text.strip()}")
