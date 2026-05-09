@@ -7,6 +7,7 @@ import threading
 import time
 import logging
 import wave
+import traceback
 from typing import Optional
 
 import discord
@@ -23,19 +24,34 @@ logging.getLogger('discord.ext.voice_recv.opus').setLevel(logging.ERROR)
 
 # --- ADVANCED CONNECTION PATCHES ---
 
-# 1. Update supported modes to include all possible Discord offers
+# Check for AEAD support in PyNaCl
+try:
+    import nacl.secret
+    HAS_AEAD = hasattr(nacl.secret, "Aead")
+    if not HAS_AEAD:
+        logger.warning("Your PyNaCl version does NOT support AEAD (XChaCha20). Audio will likely be garbled if Discord forces it.")
+    else:
+        logger.info("PyNaCl AEAD support detected.")
+except ImportError:
+    HAS_AEAD = False
+    logger.error("PyNaCl not found!")
+
+# 1. Update supported modes
+# We EXCLUDE 'aead_aes256_gcm_rtpsize' because the library doesn't have a decryptor for it.
+# We INCLUDE 'aead_xchacha20_poly1305_rtpsize' as a last resort if PyNaCl supports it.
 all_known_modes = [
     'xsalsa20_poly1305_lite',
     'xsalsa20_poly1305_suffix',
     'xsalsa20_poly1305',
-    'aead_xchacha20_poly1305_rtpsize',
-    'aead_aes256_gcm_rtpsize'
 ]
+if HAS_AEAD:
+    all_known_modes.append('aead_xchacha20_poly1305_rtpsize')
+
 voice_recv.VoiceRecvClient.supported_modes = tuple(all_known_modes)
 from discord.ext.voice_recv.reader import PacketDecryptor
 PacketDecryptor.supported_modes = all_known_modes
 
-# 2. Monkey-patch the websocket handshake to prevent the IndexError
+# 2. Monkey-patch the websocket handshake
 from discord.gateway import DiscordVoiceWebSocket
 _original_initial_connection = DiscordVoiceWebSocket.initial_connection
 
@@ -43,22 +59,19 @@ async def _patched_initial_connection(self, data):
     modes = data.get('modes', [])
     logger.info(f"Discord offered encryption modes: {modes}")
 
-    # We must ensure that modes[0] exists in the original function
-    # so we'll force the data['modes'] to contain at least one thing
-    # we claim to support.
-    supported = [m for m in modes if m in all_known_modes]
+    # Prioritize our list
+    supported = [m for m in all_known_modes if m in modes]
     if not supported:
-        logger.warning("None of our known modes were offered. Forcing the first offered mode to avoid crash.")
+        logger.warning("None of our preferred modes were offered. Forcing first offer to avoid immediate crash.")
         data['modes'] = modes[:1]
     else:
-        # Prioritize stable modes if available, otherwise use what's there
         data['modes'] = supported
 
     return await _original_initial_connection(self, data)
 
 DiscordVoiceWebSocket.initial_connection = _patched_initial_connection
 
-# 3. Patch the Decoder to catch OpusError and log frequency
+# 3. Patch the Decoder to catch OpusError
 _original_decode = discord.opus.Decoder.decode
 _error_count = 0
 _last_error_time = 0
@@ -71,7 +84,7 @@ def _safe_decode(self, data, fec=False):
         _error_count += 1
         now = time.time()
         if now - _last_error_time > 5:
-            logger.warning(f"Opus decoding errors detected: {_error_count} in the last 5 seconds.")
+            logger.warning(f"Opus decoding errors detected: {_error_count} in the last 5 seconds. Audio is likely garbled.")
             _error_count = 0
             _last_error_time = now
         return b'\x00' * 3840
@@ -144,7 +157,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                             users_to_process.append((user, bytes(buffer)))
 
                 for user, audio_bytes in users_to_process:
-                    if not self.debug_saved and len(audio_bytes) > (48000 * 4 * 2):
+                    if not self.debug_saved and len(audio_bytes) > (48000 * 4 * 1):
                         self._save_debug_wav(audio_bytes)
                         self.debug_saved = True
 
@@ -229,6 +242,7 @@ class TranscriptionBot(discord.Client):
                 logger.info("Listening for audio...")
             except Exception as e:
                 logger.error(f"Failed to connect to voice channel: {e}")
+                traceback.print_exc()
         else:
             logger.error(f"Could not find voice channel with ID {VOICE_CHANNEL_ID}")
 
