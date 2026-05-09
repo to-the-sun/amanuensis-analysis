@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
 logging.getLogger('discord.ext.voice_recv.opus').setLevel(logging.ERROR)
 
+# --- MONKEY PATCH FOR DECODER ---
+# The internal library thread crashes on OpusError. We patch the Decoder
+# to catch the error and return silence instead, keeping the thread alive.
+_original_decode = discord.opus.Decoder.decode
+
+def _safe_decode(self, data, fec=False):
+    try:
+        return _original_decode(self, data, fec)
+    except discord.opus.OpusError:
+        # Return silence (960 samples * 2 channels * 2 bytes = 3840 bytes)
+        return b'\x00' * 3840
+    except Exception:
+        return b'\x00' * 3840
+
+discord.opus.Decoder.decode = _safe_decode
+logger.info("Applied safety patch to Opus decoder.")
+# -------------------------------
+
 # Load credentials
 try:
     with open('credentials.json', 'r') as f:
@@ -50,8 +68,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         self.text_channel_id = text_channel_id
         self.user_buffers = collections.defaultdict(bytearray)
         self.last_audio_time = collections.defaultdict(float)
-        self.decoders = {}
-        self.stats = collections.defaultdict(lambda: {"decoded": 0, "corrupted": 0})
         self.lock = threading.Lock()
 
         self.sample_rate = 48000
@@ -63,33 +79,17 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
 
     def wants_opus(self) -> bool:
-        return True
+        # Revert to PCM mode to let the library handle timing and buffering
+        return False
 
     def write(self, user: Optional[discord.User], data: voice_recv.VoiceData):
-        if user is None or not data.opus:
+        if user is None or not data.pcm:
             return
 
-        if user.id not in self.decoders:
-            self._create_decoder(user)
-
-        try:
-            pcm = self.decoders[user.id].decode(data.opus)
-            with self.lock:
-                self.user_buffers[user].extend(pcm)
-                self.last_audio_time[user] = time.time()
-                self.stats[user.id]["decoded"] += 1
-        except discord.opus.OpusError:
-            self.stats[user.id]["corrupted"] += 1
-            # Reset decoder on corruption to see if it clears the state
-            self._create_decoder(user)
-        except Exception as e:
-            logger.debug(f"Error decoding packet from {user.display_name}: {e}")
-
-    def _create_decoder(self, user):
-        try:
-            self.decoders[user.id] = discord.opus.Decoder()
-        except Exception as e:
-            logger.error(f"Could not create Opus decoder for {user.display_name}: {e}")
+        with self.lock:
+            # data.pcm is the raw PCM data (48kHz, stereo, 16-bit)
+            self.user_buffers[user].extend(data.pcm)
+            self.last_audio_time[user] = time.time()
 
     async def _process_buffers(self):
         while True:
@@ -101,16 +101,12 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 with self.lock:
                     for user, buffer in list(self.user_buffers.items()):
                         if not buffer:
-                            if now % 10 < 1.0:
-                                s = self.stats[user.id]
-                                if s["decoded"] + s["corrupted"] > 0:
-                                    ratio = s["corrupted"] / (s["decoded"] + s["corrupted"]) * 100
-                                    logger.info(f"Stats for {user.display_name}: {s['decoded']} ok, {s['corrupted']} corrupted ({ratio:.1f}%)")
                             continue
 
                         buffer_duration = len(buffer) / (self.sample_rate * self.channels * 2)
                         time_since_last = now - self.last_audio_time[user]
 
+                        # Process if we have > 1 sec of audio and user paused, or if buffer is long
                         if buffer_duration > 1.0 and (time_since_last > 0.6 or buffer_duration > 15.0):
                             users_to_process.append((user, bytes(buffer)))
 
@@ -123,6 +119,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                     audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
                     rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
 
+                    # Silence threshold check
                     if rms < 400:
                         with self.lock:
                              self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
@@ -131,7 +128,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                     logger.info(f"Transcribing {len(audio_bytes)/(48000*4):.1f}s from {user.display_name} (RMS: {rms:.1f})...")
                     text, is_complete = await self.bot.loop.run_in_executor(None, self._transcribe, audio_bytes)
 
-                    # Log the raw text to console for verification
                     if text:
                         logger.info(f"Whisper output: \"{text.strip()}\"")
 
@@ -157,7 +153,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 wf.setsampwidth(2)
                 wf.setframerate(self.sample_rate)
                 wf.writeframes(audio_bytes)
-            logger.info("Saved debug sample to 'debug_audio.wav'. Please listen to this file.")
+            logger.info("Saved debug sample to 'debug_audio.wav'.")
         except Exception as e:
             logger.error(f"Failed to save debug wav: {e}")
 
@@ -171,7 +167,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
             audio_mono = audio_float32.mean(axis=1)
             audio_16k = audio_mono[::3]
 
-            # Use a slightly more conservative threshold for the actual transcription
             segments, info = MODEL.transcribe(audio_16k, beam_size=5, language="en", initial_prompt="Hello.")
 
             segments = list(segments)
@@ -190,7 +185,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
 
     def cleanup(self):
         self.processing_task.cancel()
-        self.decoders.clear()
 
 class TranscriptionBot(discord.Client):
     def __init__(self):
