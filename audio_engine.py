@@ -79,13 +79,10 @@ def main():
     sounds_dir = os.path.join(script_dir, "sounds")
     os.makedirs(sounds_dir, exist_ok=True)
 
-    # Determine next folder number
-    existing_folders = [d for d in os.listdir(sounds_dir) if os.path.isdir(os.path.join(sounds_dir, d)) and d.isdigit()]
-    folder_numbers = [int(d) for d in existing_folders]
-    next_num = max(folder_numbers) + 1 if folder_numbers else 1
-
-    new_subfolder = os.path.join(sounds_dir, str(next_num))
-    os.makedirs(new_subfolder)
+    # Use version identifier from sound_design for subfolder naming
+    version_num = getattr(sound_design, "SOUND_DESIGN_VERSION", 1)
+    new_subfolder = os.path.join(sounds_dir, str(version_num))
+    os.makedirs(new_subfolder, exist_ok=True)
 
     parser = argparse.ArgumentParser(description="Sound Design Sandbox: Synthesize audio from MIDI and analyze.")
     parser.add_argument("--output", type=str, default="design_output.wav", help="Path to save the output WAV file.")
@@ -128,7 +125,7 @@ def main():
 
     # Analyze
     results = analyze_audio(audio, args.sr)
-
+    
     # Save results to JSON
     json_path = os.path.join(new_subfolder, "analysis.json")
     with open(json_path, 'w') as f:

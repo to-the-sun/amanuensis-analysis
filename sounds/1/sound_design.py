@@ -1,5 +1,7 @@
 import numpy as np
 
+SOUND_DESIGN_VERSION = 1
+
 def adsr_envelope(duration_samples, attack_samples, decay_samples, sustain_level, release_samples):
     """Generate an ADSR envelope."""
     # Attack
