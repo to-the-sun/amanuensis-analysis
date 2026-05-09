@@ -14,67 +14,60 @@ import discord
 from discord.ext import voice_recv
 from faster_whisper import WhisperModel
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# --- MAXIMUM LOGGING ---
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Suppress the RTCP packet spam and jitter buffer warnings
-logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
-logging.getLogger('discord.ext.voice_recv.opus').setLevel(logging.ERROR)
+# Keep some libraries at INFO to avoid absolute flooding, but keep voice-recv at DEBUG
+logging.getLogger('discord').setLevel(logging.INFO)
+logging.getLogger('discord.ext.voice_recv').setLevel(logging.DEBUG)
+logging.getLogger('faster_whisper').setLevel(logging.INFO)
 
-# --- DEEP DIAGNOSTIC PATCHES ---
+# --- TOTAL TRANSPARENCY PATCHES ---
 
-# 1. Block the problematic AES mode definitively
-stable_modes = [
+# 1. Broaden supported modes to see everything
+all_known_modes = [
     'xsalsa20_poly1305_lite',
     'xsalsa20_poly1305_suffix',
     'xsalsa20_poly1305',
+    'aead_xchacha20_poly1305_rtpsize',
+    'aead_aes256_gcm_rtpsize'
 ]
-aead_mode = 'aead_xchacha20_poly1305_rtpsize'
-
-voice_recv.VoiceRecvClient.supported_modes = tuple(stable_modes + [aead_mode])
+voice_recv.VoiceRecvClient.supported_modes = tuple(all_known_modes)
 from discord.ext.voice_recv.reader import PacketDecryptor
-PacketDecryptor.supported_modes = stable_modes + [aead_mode]
+PacketDecryptor.supported_modes = all_known_modes
 
-# 2. Advanced Decoder Patch with Hex Logging
-_original_decode = discord.opus.Decoder.decode
-_err_logged = 0
-
-def _deep_diagnostic_decode(self, data, fec=False):
-    global _err_logged
-    if not data:
-        return b'\x00' * 3840
-
-    try:
-        return _original_decode(self, data, fec)
-    except discord.opus.OpusError:
-        if _err_logged < 10:
-            hex_data = data.hex()[:32]
-            logger.warning(f"DECODE FAIL! First 16 bytes (hex): {hex_data} | Length: {len(data)}")
-            _err_logged += 1
-        return b'\x00' * 3840
-    except Exception:
-        return b'\x00' * 3840
-
-discord.opus.Decoder.decode = _deep_diagnostic_decode
-
-# 3. Connection Hook
+# 2. Log full websocket handshake
 from discord.gateway import DiscordVoiceWebSocket
 _original_initial_connection = DiscordVoiceWebSocket.initial_connection
 
 async def _patched_initial_connection(self, data):
-    modes = data.get('modes', [])
-    logger.info(f"Discord offered encryption modes: {modes}")
-    # Force AEAD XChaCha over AES if both present
-    preferred = [m for m in stable_modes + [aead_mode] if m in modes]
-    if not preferred:
-        data['modes'] = modes[:1]
-    else:
-        data['modes'] = preferred
+    # Log the ENTIRE payload from Discord
+    logger.info(f"VOICE HANDSHAKE PAYLOAD: {json.dumps(data, indent=2)}")
     return await _original_initial_connection(self, data)
 
 DiscordVoiceWebSocket.initial_connection = _patched_initial_connection
-logger.info("Deep diagnostic mode activated.")
+
+# 3. Patch the Decoder to log successes too
+_original_decode = discord.opus.Decoder.decode
+_decode_success = 0
+
+def _transparent_decode(self, data, fec=False):
+    global _decode_success
+    try:
+        res = _original_decode(self, data, fec)
+        _decode_success += 1
+        if _decode_success % 100 == 0:
+            logger.debug(f"Decoded 100 packets successfully (total: {_decode_success})")
+        return res
+    except discord.opus.OpusError:
+        logger.warning(f"OpusError on packet of length {len(data)}")
+        return b'\x00' * 3840
+    except Exception as e:
+        logger.error(f"Generic decode error: {e}")
+        return b'\x00' * 3840
+
+discord.opus.Decoder.decode = _transparent_decode
 # -------------------------------
 
 # Load credentials
@@ -94,7 +87,6 @@ MODEL_SIZE = "small"
 try:
     logger.info(f"Loading Whisper model '{MODEL_SIZE}'...")
     MODEL = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
-    logger.info("Whisper model loaded successfully.")
 except Exception as e:
     logger.error(f"Failed to load Whisper model: {e}")
     MODEL = None
@@ -116,20 +108,20 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         return False
 
     def write(self, user: Optional[discord.User], data: voice_recv.VoiceData):
-        if user is None or not data.pcm:
-            return
+        # LOG EVERY PACKET ARRIVAL
+        user_name = user.display_name if user else f"UnknownSSRC:{data.packet.ssrc}"
+        # logger.debug(f"PACKET IN: User={user_name}, SSRC={data.packet.ssrc}, PCMLen={len(data.pcm)}")
 
-        # RTP Extension Check for DAVE (E2EE)
-        if hasattr(data.packet, 'extension_data') and data.packet.extension_data:
-             # DAVE often uses extension IDs like 11 or 12
-             if any(eid > 10 for eid in data.packet.extension_data.keys()):
-                 if not hasattr(self, '_dave_warned'):
-                     logger.warning(f"Detected unusual RTP extensions: {list(data.packet.extension_data.keys())}. E2EE (DAVE) might be active!")
-                     self._dave_warned = True
+        # If user is None, it means the SSRC hasn't been mapped to a User ID yet.
+        # This is very common during the first few seconds of speech.
+        if user is None:
+             # Create a placeholder user object to at least capture the audio
+             user = collections.namedtuple('PlaceholderUser', ['id', 'display_name'])(-1, f"Guest-{data.packet.ssrc}")
 
-        with self.lock:
-            self.user_buffers[user].extend(data.pcm)
-            self.last_audio_time[user] = time.time()
+        if data.pcm:
+            with self.lock:
+                self.user_buffers[user].extend(data.pcm)
+                self.last_audio_time[user] = time.time()
 
     async def _process_buffers(self):
         while True:
@@ -140,9 +132,14 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 with self.lock:
                     for user, buffer in list(self.user_buffers.items()):
                         if not buffer: continue
-                        buffer_duration = len(buffer) / (self.sample_rate * self.channels * 2)
-                        time_since_last = now - self.last_audio_time[user]
-                        if buffer_duration > 1.0 and (time_since_last > 0.6 or buffer_duration > 15.0):
+
+                        duration = len(buffer) / (48000 * 4)
+                        time_since = now - self.last_audio_time[user]
+
+                        if duration > 0.5:
+                            logger.debug(f"Buffer Check: {user.display_name} has {duration:.2f}s audio, last seen {time_since:.2f}s ago")
+
+                        if duration > 1.0 and (time_since > 0.6 or duration > 15.0):
                             users_to_process.append((user, bytes(buffer)))
 
                 for user, audio_bytes in users_to_process:
@@ -153,27 +150,30 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                     audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
                     rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
 
-                    if rms < 400:
+                    logger.info(f"Volume check for {user.display_name}: RMS={rms:.2f}")
+
+                    if rms < 100: # Super low threshold for total transparency
+                        logger.debug(f"Skipping silent buffer (RMS={rms:.2f})")
                         with self.lock:
                              self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
                         continue
 
-                    logger.info(f"Transcribing {len(audio_bytes)/(48000*4):.1f}s from {user.display_name} (RMS: {rms:.1f})...")
+                    logger.info(f"Transcribing {len(audio_bytes)/(48000*4):.1f}s from {user.display_name}...")
                     text, is_complete = await self.bot.loop.run_in_executor(None, self._transcribe, audio_bytes)
 
                     if text:
-                        logger.info(f"Whisper output: \"{text.strip()}\"")
-                        if is_complete or len(audio_bytes) > (self.sample_rate * self.channels * 2 * 14):
-                            channel = self.bot.get_channel(self.text_channel_id)
-                            if channel:
-                                await channel.send(f"**{user.display_name}**: {text.strip()}")
-                            with self.lock:
-                                self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
-                    else:
-                        with self.lock:
-                            self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
+                        logger.info(f"WHISPER RESULT [{user.display_name}]: \"{text.strip()}\"")
+                        channel = self.bot.get_channel(self.text_channel_id)
+                        if channel:
+                            await channel.send(f"**{user.display_name}**: {text.strip()}")
+
+                    # Always clear buffer after processing in total transparency mode
+                    with self.lock:
+                        processed_len = len(audio_bytes)
+                        self.user_buffers[user] = self.user_buffers[user][processed_len:]
             except Exception as e:
-                logger.error(f"Error in processing loop: {e}")
+                logger.error(f"Processing loop error: {e}")
+                traceback.print_exc()
 
     def _save_debug_wav(self, audio_bytes):
         try:
@@ -193,14 +193,10 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
             audio_float32 = audio_np.astype(np.float32) / 32768.0
             audio_mono = audio_float32.mean(axis=1)
             audio_16k = audio_mono[::3]
-            segments, info = MODEL.transcribe(audio_16k, beam_size=5, language="en", initial_prompt="Hello.")
+            segments, info = MODEL.transcribe(audio_16k, beam_size=5, language="en")
             segments = list(segments)
             full_text = "".join([s.text for s in segments])
-            is_complete = False
-            if segments:
-                last_text = segments[-1].text.strip()
-                if last_text and last_text[-1] in ('.', '!', '?'):
-                    is_complete = True
+            is_complete = any(s.text.strip().endswith(('.', '!', '?')) for s in segments) if segments else False
             return full_text, is_complete
         except Exception as e:
             logger.error(f"Transcription error: {e}")
@@ -224,21 +220,17 @@ class TranscriptionBot(discord.Client):
             logger.info(f"Connecting to {voice_channel.name}...")
             try:
                 vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
-                logger.info(f"Connected to voice. Encryption mode: {vc.mode}")
+                logger.info(f"Connected. Mode: {vc.mode}")
                 sink = WhisperTranscriptionSink(self, TEXT_CHANNEL_ID)
                 vc.listen(sink)
-                logger.info("Listening for audio...")
             except Exception as e:
-                logger.error(f"Failed to connect to voice channel: {e}")
+                logger.error(f"Connect error: {e}")
                 traceback.print_exc()
-        else:
-            logger.error(f"Could not find voice channel with ID {VOICE_CHANNEL_ID}")
 
 if __name__ == "__main__":
     if not discord.opus.is_loaded():
         try:
             discord.opus.load_opus('libopus-0.dll' if os.name == 'nt' else 'libopus.so.0')
-        except Exception:
-            pass
+        except Exception: pass
     bot = TranscriptionBot()
     bot.run(TOKEN)
