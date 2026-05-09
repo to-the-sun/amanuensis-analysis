@@ -31,6 +31,10 @@ def analyze_audio(file_path):
         peak_times = times[peaks].tolist()
         peak_values = onset_env[peaks].tolist()
 
+        # Normalize onset_env for weighting
+        max_onset = np.max(onset_env) if np.max(onset_env) > 0 else 1
+        norm_onset = onset_env / max_onset
+
         # Calculate SSM at full 20ms resolution
         # Compute pairwise distance matrix using broadcasting
         # SSM(i,j) = |onset_env[i] - onset_env[j]|
@@ -39,6 +43,11 @@ def analyze_audio(file_path):
         # Convert to similarity: 1 - normalized distance
         max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1
         ssm = 1 - (dist_matrix / max_dist)
+
+        # Weight by transient strength: multiply by the smaller of the two transiences
+        # This ensures that only points with high similarity AND high transience are vibrant.
+        transience_weight = np.minimum(norm_onset[:, np.newaxis], norm_onset[np.newaxis, :])
+        ssm = ssm * transience_weight
 
         # Render SSM to image instead of storing raw JSON data
         # This keeps the HTML report performant even at high resolution (20ms chunks)

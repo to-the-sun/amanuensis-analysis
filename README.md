@@ -26,8 +26,10 @@ A Self-Similarity Matrix (SSM) is a powerful tool for visualizing the structure 
 In this tool, we construct the SSM as follows:
 1. The transient envelope is analyzed at its full **20ms resolution**.
 2. We compute the pairwise distance between every possible pair of time points: $D_{i,j} = |x_i - x_j|$.
-3. We convert this distance into a similarity score: $S_{i,j} = 1 - \frac{D_{i,j}}{\max(D)}$.
-4. For performance and to prevent browser instability with large datasets, the SSM is rendered as a **Base64-encoded PNG image** directly in the Python script.
+3. We convert this distance into a base similarity score: $S_{i,j} = 1 - \frac{D_{i,j}}{\max(D)}$.
+4. To emphasize rhythmic activity, we calculate a **transience weight** for each pair, which is the minimum of the normalized transient strengths at those two moments: $W_{i,j} = \min(\text{norm}(x_i), \text{norm}(x_j))$.
+5. The final similarity score is the product of the base similarity and this weight: $S'_{i,j} = S_{i,j} \times W_{i,j}$. This ensures that only points with both high similarity and high transience appear vibrant, effectively filtering out "similarity" in silent or low-energy regions.
+6. For performance and to prevent browser instability with large datasets, the SSM is rendered as a **Base64-encoded PNG image** directly in the Python script.
 
 #### How to Interpret the SSM
 - **The Main Diagonal:** You will always see a bright diagonal line from the bottom-left to the top-right. This represents the signal compared to itself at the same moment ($i=j$), which always has perfect similarity.
