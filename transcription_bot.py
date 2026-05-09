@@ -21,19 +21,43 @@ logger = logging.getLogger(__name__)
 logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
 logging.getLogger('discord.ext.voice_recv.opus').setLevel(logging.ERROR)
 
-# --- SAFETY PATCHES ---
-# 1. Prioritize stable encryption modes without breaking negotiation
-# Reorder modes to put standard xsalsa20 modes at the top
-stable_modes = [
+# --- ADVANCED SAFETY PATCHES ---
+
+# 1. Force Stable Encryption and Log Offers
+# We remove the experimental AEAD mode from all known library locations
+target_modes = [
     'xsalsa20_poly1305_lite',
     'xsalsa20_poly1305_suffix',
     'xsalsa20_poly1305',
 ]
-# Get original list and reorder
-original_modes = list(voice_recv.VoiceRecvClient.supported_modes)
-new_modes = stable_modes + [m for m in original_modes if m not in stable_modes]
-voice_recv.VoiceRecvClient.supported_modes = tuple(new_modes)
-logger.info(f"Prioritizing encryption modes: {voice_recv.VoiceRecvClient.supported_modes}")
+
+# Update VoiceRecvClient
+voice_recv.VoiceRecvClient.supported_modes = tuple(target_modes)
+
+# Update PacketDecryptor in the internal reader module
+from discord.ext.voice_recv.reader import PacketDecryptor
+PacketDecryptor.supported_modes = target_modes
+
+# Monkey-patch the gateway initial_connection to log what Discord offers
+from discord.gateway import DiscordVoiceWebSocket
+_original_initial_connection = DiscordVoiceWebSocket.initial_connection
+
+async def _patched_initial_connection(self, data):
+    modes = data.get('modes', [])
+    logger.info(f"Discord offered encryption modes: {modes}")
+    # Filter to only our supported modes
+    supported = [m for m in modes if m in target_modes]
+    if not supported:
+        logger.warning("Discord did not offer any stable encryption modes! Falling back to whatever is available to prevent crash.")
+        # If we can't find a stable one, we must allow whatever Discord offered
+        # so it doesn't IndexError, but we log the warning.
+        data['modes'] = modes
+    else:
+        data['modes'] = supported
+    return await _original_initial_connection(self, data)
+
+DiscordVoiceWebSocket.initial_connection = _patched_initial_connection
+logger.info("Forcing stable encryption modes and adding offer logging.")
 
 # 2. Patch the Decoder to catch OpusError and return silence
 _original_decode = discord.opus.Decoder.decode
@@ -42,7 +66,6 @@ def _safe_decode(self, data, fec=False):
     try:
         return _original_decode(self, data, fec)
     except discord.opus.OpusError:
-        # 48kHz, stereo, 20ms frame = 960 samples * 2 channels * 2 bytes = 3840 bytes
         return b'\x00' * 3840
     except Exception:
         return b'\x00' * 3840
