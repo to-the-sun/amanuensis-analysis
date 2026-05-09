@@ -1,0 +1,16 @@
+{
+    "average_rms": 0.056686222553253174,
+    "peak_rms": 0.15255798399448395,
+    "average_spectral_centroid": 469.63195170196616,
+    "average_spectral_bandwidth": 262.1465032472165,
+    "average_spectral_flatness": 0.3344359959736293,
+    "average_zero_crossing_rate": 0.013099758918213458,
+    "estimated_tempo": 120.18531976744185,
+    "mfcc_means": [
+        -555.0562349520693,
+        82.25962739034057,
+        26.900968538271762,
+        -16.10968131813228,
+        -27.169801133314326
+    ]
+}
