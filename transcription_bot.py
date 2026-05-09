@@ -16,6 +16,9 @@ from faster_whisper import WhisperModel
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Suppress the RTCP packet spam from the library
+logging.getLogger('discord.ext.voice_recv.reader').setLevel(logging.WARNING)
+
 # Load credentials
 try:
     with open('credentials.json', 'r') as f:
@@ -30,7 +33,6 @@ TEXT_CHANNEL_ID = config.get('world_text', 0)
 
 # Whisper Configuration
 MODEL_SIZE = "small"
-# Use CPU for broader compatibility, can be changed to 'cuda' if available
 try:
     logger.info(f"Loading Whisper model '{MODEL_SIZE}'...")
     MODEL = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
@@ -48,27 +50,27 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         self.user_buffers = collections.defaultdict(bytearray)
         # Last time audio was received from a user
         self.last_audio_time = collections.defaultdict(float)
-        # Custom decoders per user to bypass library's fragile internal decoding
+        # Custom decoders per user
         self.decoders = {}
+        # Statistics for debugging
+        self.stats = collections.defaultdict(lambda: {"decoded": 0, "corrupted": 0})
         # Lock for thread-safe buffer access
         self.lock = threading.Lock()
 
         # Audio parameters
-        self.sample_rate = 48000  # Discord's default
-        self.channels = 2          # Discord's default (stereo)
-        self.target_sample_rate = 16000 # Whisper's requirement
+        self.sample_rate = 48000
+        self.channels = 2
+        self.target_sample_rate = 16000
 
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
 
     def wants_opus(self) -> bool:
-        # We request Opus data so we can decode it ourselves and handle errors gracefully
         return True
 
     def write(self, user: Optional[discord.User], data: voice_recv.VoiceData):
         if user is None or not data.opus:
             return
 
-        # Ensure we have a decoder for this user
         if user.id not in self.decoders:
             try:
                 self.decoders[user.id] = discord.opus.Decoder()
@@ -77,51 +79,68 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 return
 
         try:
-            # Decode the Opus packet to PCM
             pcm = self.decoders[user.id].decode(data.opus)
-
             with self.lock:
                 self.user_buffers[user].extend(pcm)
                 self.last_audio_time[user] = time.time()
-        except discord.opus.OpusError as e:
-            # Catch the "corrupted stream" error here so it doesn't crash the router
-            pass
+                self.stats[user.id]["decoded"] += 1
+        except discord.opus.OpusError:
+            self.stats[user.id]["corrupted"] += 1
         except Exception as e:
             logger.debug(f"Error decoding packet from {user.display_name}: {e}")
 
     async def _process_buffers(self):
         while True:
             try:
-                await asyncio.sleep(1.0) # Check every second
+                await asyncio.sleep(1.0)
 
                 users_to_process = []
                 now = time.time()
                 with self.lock:
                     for user, buffer in list(self.user_buffers.items()):
                         if not buffer:
+                            # Periodic stat report even if silent
+                            if now % 10 < 1.0:
+                                s = self.stats[user.id]
+                                if s["decoded"] + s["corrupted"] > 0:
+                                    logger.info(f"Stats for {user.display_name}: {s['decoded']} ok, {s['corrupted']} corrupted")
                             continue
 
                         buffer_duration = len(buffer) / (self.sample_rate * self.channels * 2)
                         time_since_last = now - self.last_audio_time[user]
 
-                        # Process if we have > 1 sec of audio and user paused, or if buffer is long
                         if buffer_duration > 1.0 and (time_since_last > 0.6 or buffer_duration > 15.0):
                             users_to_process.append((user, bytes(buffer)))
 
                 for user, audio_bytes in users_to_process:
+                    # Calculate volume (RMS)
+                    audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+                    rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
+
+                    # Silence threshold: 500 is very quiet background noise,
+                    # normal speech usually peaks > 3000
+                    if rms < 400:
+                        logger.debug(f"Skipping silent buffer from {user.display_name} (RMS: {rms:.1f})")
+                        with self.lock:
+                             self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
+                        continue
+
+                    logger.info(f"Transcribing {len(audio_bytes)/(48000*4):.1f}s from {user.display_name} (RMS: {rms:.1f})...")
                     text, is_complete = await self.bot.loop.run_in_executor(None, self._transcribe, audio_bytes)
 
                     if text and text.strip():
-                        # We post if it's a complete sentence OR if we've reached a timeout (15s)
                         if is_complete or len(audio_bytes) > (self.sample_rate * self.channels * 2 * 14):
                             channel = self.bot.get_channel(self.text_channel_id)
                             if channel:
                                 await channel.send(f"**{user.display_name}**: {text.strip()}")
 
-                            # Clear processed audio from buffer
                             with self.lock:
                                 processed_len = len(audio_bytes)
                                 self.user_buffers[user] = self.user_buffers[user][processed_len:]
+                    else:
+                        # If Whisper found nothing, clear the buffer anyway so we don't loop
+                        with self.lock:
+                            self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
             except Exception as e:
                 logger.error(f"Error in processing loop: {e}")
 
@@ -130,13 +149,9 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
              return "Model not loaded", True
 
         try:
-            # Convert bytes to numpy array (16-bit PCM)
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).reshape(-1, self.channels)
-            # Convert to float32 and mono
             audio_float32 = audio_np.astype(np.float32) / 32768.0
             audio_mono = audio_float32.mean(axis=1)
-
-            # Resample to 16kHz (decimation 3:1)
             audio_16k = audio_mono[::3]
 
             segments, info = MODEL.transcribe(audio_16k, beam_size=5, language="en")
@@ -174,7 +189,6 @@ class TranscriptionBot(discord.Client):
         if voice_channel and isinstance(voice_channel, discord.VoiceChannel):
             logger.info(f"Connecting to {voice_channel.name}...")
             try:
-                # Use VoiceRecvClient for receiving audio
                 vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
                 logger.info(f"Connected to voice. Encryption mode: {vc.mode}")
 
@@ -187,10 +201,7 @@ class TranscriptionBot(discord.Client):
             logger.error(f"Could not find voice channel with ID {VOICE_CHANNEL_ID}")
 
 if __name__ == "__main__":
-    # Ensure opus is loaded
     if not discord.opus.is_loaded():
-        # On Windows, discord.py usually finds it if it's in the same folder or system PATH
-        # On Linux, it's usually libopus.so.0
         try:
             discord.opus.load_opus('libopus-0.dll' if os.name == 'nt' else 'libopus.so.0')
         except Exception:
