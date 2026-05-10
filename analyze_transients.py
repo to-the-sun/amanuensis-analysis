@@ -19,14 +19,15 @@ def analyze_audio(file_path):
         y, sr = librosa.load(file_path, sr=None)
 
         # Calculate onset strength (transient envelope)
-        # Resolution: 20ms chunks
-        hop_length = int(sr * 0.020)
+        # Resolution: 100ms chunks
+        hop_length = int(sr * 0.100)
         onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
         times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr, hop_length=hop_length)
 
         # Find peaks in the onset strength
-        # prominence=0.5 and distance=10 are heuristic values for transient detection
-        peaks, _ = scipy.signal.find_peaks(onset_env, prominence=0.5, distance=10)
+        # prominence=0.5 and distance=2 are heuristic values for transient detection
+        # distance=2 at 100ms resolution corresponds to 200ms
+        peaks, _ = scipy.signal.find_peaks(onset_env, prominence=0.5, distance=2)
 
         peak_times = times[peaks].tolist()
         peak_values = onset_env[peaks].tolist()
@@ -35,7 +36,7 @@ def analyze_audio(file_path):
         max_onset = np.max(onset_env) if np.max(onset_env) > 0 else 1
         norm_onset = onset_env / max_onset
 
-        # Calculate SSM at full 20ms resolution
+        # Calculate SSM at 100ms resolution
         # Compute pairwise distance matrix using broadcasting
         # SSM(i,j) = |onset_env[i] - onset_env[j]|
         dist_matrix = np.abs(onset_env[:, np.newaxis] - onset_env[np.newaxis, :])
@@ -50,7 +51,7 @@ def analyze_audio(file_path):
         ssm = ssm * transience_weight
 
         # Render SSM to image instead of storing raw JSON data
-        # This keeps the HTML report performant even at high resolution (20ms chunks)
+        # This keeps the HTML report performant even at 100ms resolution
         fig = plt.figure(figsize=(10, 10))
         ax = fig.add_axes([0, 0, 1, 1])
         ax.imshow(ssm, cmap='viridis', origin='lower', aspect='auto')
