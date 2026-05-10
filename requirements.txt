@@ -1,7 +1,0 @@
-librosa
-numpy
-scipy
-argparse
-discord.py[voice]
-discord-ext-voice-recv
-faster-whisper
