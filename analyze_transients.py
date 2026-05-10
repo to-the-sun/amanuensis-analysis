@@ -70,7 +70,7 @@ def analyze_audio(file_path):
         # This keeps the HTML report performant even at 100ms resolution
         fig = plt.figure(figsize=(10, 10))
         ax = fig.add_axes([0, 0, 1, 1])
-        ax.imshow(ssm, cmap='viridis', origin='lower', aspect='auto')
+        ax.imshow(ssm, cmap='viridis', origin='lower', aspect='auto', vmin=0, vmax=1)
         ax.axis('off')
 
         buf = io.BytesIO()
@@ -253,6 +253,29 @@ def main():
                 hoverinfo: 'none'
             };
 
+            // Dummy trace for colorbar
+            const colorbarTrace = {
+                x: [null],
+                y: [null],
+                type: 'scatter',
+                mode: 'markers',
+                marker: {
+                    colorscale: 'Viridis',
+                    cmin: 0,
+                    cmax: 1,
+                    showscale: true,
+                    colorbar: {
+                        title: 'Similarity',
+                        thickness: 20,
+                        len: 0.9,
+                        yanchor: 'middle',
+                        y: 0.5
+                    }
+                },
+                showlegend: false,
+                hoverinfo: 'none'
+            };
+
             const ssmLayout = {
                 title: {
                     text: 'Transient Self-Similarity Matrix',
@@ -304,7 +327,7 @@ def main():
                 }]
             };
 
-            Plotly.newPlot(ssmDiv, [ssmTrace], ssmLayout, config);
+            Plotly.newPlot(ssmDiv, [ssmTrace, colorbarTrace], ssmLayout, config);
 
             // Update Footnote with Math
             const ps = fileData.peak_similarity;
