@@ -46,12 +46,19 @@ def analyze_audio(file_path):
 
         # Convert to similarity: 1 - normalized distance
         max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1
-        ssm = 1 - (dist_matrix / max_dist)
+        ssm_base = 1 - (dist_matrix / max_dist)
+
+        # Power scaling (P=12) increases contrast for repeating patterns (diagonals)
+        # over general transient intersections (blocks).
+        ssm_contrast = ssm_base ** 12
 
         # Weight by transient strength: multiply by the smaller of the two transiences
         # This ensures that only points with high similarity AND high transience are vibrant.
         transience_weight = np.minimum(norm_onset[:, np.newaxis], norm_onset[np.newaxis, :])
-        ssm = ssm * transience_weight
+        ssm = ssm_contrast * transience_weight
+
+        # Identity property: Ensure the main diagonal is always solid 1.0
+        np.fill_diagonal(ssm, 1.0)
 
         # Find peak off-diagonal similarity for footnote
         ssm_off_diag = ssm.copy()
@@ -340,6 +347,8 @@ def main():
             const base_similarity = 1 - (dist / ps.max_dist);
             const weight = Math.min(norm_i, norm_j);
 
+            const contrast_similarity = Math.pow(base_similarity, 12);
+
             footnoteDiv.innerHTML = `
                 <h3>Peak Off-Diagonal Similarity Analysis</h3>
                 <p>The point of greatest similarity (excluding the main diagonal) occurs at <strong>t1 = ${ps.time_i.toFixed(3)}s</strong> and <strong>t2 = ${ps.time_j.toFixed(3)}s</strong>. Similarity is calculated using log-compressed onset strength to better represent rhythmic perception.</p>
@@ -347,13 +356,14 @@ def main():
                     <strong>1. Logarithmic Normalization:</strong><br>
                     norm_i = log_onset_i / max_log_onset = ${ps.onset_i.toFixed(4)} / ${ps.max_onset.toFixed(4)} = ${norm_i.toFixed(4)}<br>
                     norm_j = log_onset_j / max_log_onset = ${ps.onset_j.toFixed(4)} / ${ps.max_onset.toFixed(4)} = ${norm_j.toFixed(4)}<br><br>
-                    <strong>2. Base Similarity:</strong><br>
+                    <strong>2. Contrast-Enhanced Similarity:</strong><br>
                     dist = |log_onset_i - log_onset_j| = |${ps.onset_i.toFixed(4)} - ${ps.onset_j.toFixed(4)}| = ${dist.toFixed(4)}<br>
-                    S_base = 1 - (dist / max_dist) = 1 - (${dist.toFixed(4)} / ${ps.max_dist.toFixed(4)}) = ${base_similarity.toFixed(4)}<br><br>
+                    S_base = 1 - (dist / max_dist) = 1 - (${dist.toFixed(4)} / ${ps.max_dist.toFixed(4)}) = ${base_similarity.toFixed(4)}<br>
+                    S_contrast = S_base^12 = ${base_similarity.toFixed(4)}^12 = ${contrast_similarity.toFixed(4)}<br><br>
                     <strong>3. Transience Weighting:</strong><br>
                     W = min(norm_i, norm_j) = min(${norm_i.toFixed(4)}, ${norm_j.toFixed(4)}) = ${weight.toFixed(4)}<br><br>
                     <strong>4. Final Similarity:</strong><br>
-                    S_final = S_base * W = ${base_similarity.toFixed(4)} * ${weight.toFixed(4)} = <strong>${ps.final_similarity.toFixed(4)}</strong>
+                    S_final = S_contrast * W = ${contrast_similarity.toFixed(4)} * ${weight.toFixed(4)} = <strong>${ps.final_similarity.toFixed(4)}</strong>
                 </div>
             `;
         }
