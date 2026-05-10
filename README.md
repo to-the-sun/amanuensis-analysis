@@ -49,10 +49,12 @@ The SSM allows you to see the "DNA" of the audio's rhythm. It reveals structural
    - `numpy`
    - `scipy`
    - `matplotlib`
+   - `soundcard`
+   - `soundfile`
 
    You can install them via pip:
    ```bash
-   pip install librosa numpy scipy matplotlib
+   pip install librosa numpy scipy matplotlib soundcard soundfile
    ```
 
 2. **Run the Script:**
