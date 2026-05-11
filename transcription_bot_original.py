@@ -11,7 +11,6 @@ import traceback
 from typing import Optional
 
 import discord
-import soundcard as sc
 from discord.ext import voice_recv
 from faster_whisper import WhisperModel
 
@@ -92,16 +91,6 @@ except Exception as e:
     logger.error(f"Failed to load Whisper model: {e}")
     MODEL = None
 
-class LocalUser:
-    def __init__(self, display_name):
-        self.display_name = display_name
-    def __hash__(self):
-        return hash(self.display_name)
-    def __eq__(self, other):
-        if isinstance(other, LocalUser):
-            return self.display_name == other.display_name
-        return False
-
 class WhisperTranscriptionSink(voice_recv.AudioSink):
     def __init__(self, bot, text_channel_id):
         super().__init__()
@@ -117,25 +106,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
 
     def wants_opus(self) -> bool:
         return False
-
-    def write_numpy(self, user, data_np: np.ndarray):
-        """
-        Accepts float32 numpy data (from soundcard), converts to 16-bit PCM.
-        Handles mono or stereo input.
-        """
-        # Ensure we have a 2D array (frames, channels)
-        if data_np.ndim == 1:
-            # Mono to Stereo
-            data_np = np.column_stack((data_np, data_np))
-        elif data_np.shape[1] == 1:
-            # Mono to Stereo
-            data_np = np.concatenate((data_np, data_np), axis=1)
-
-        # Soundcard usually returns float32 in range [-1, 1]
-        pcm_data = (data_np * 32767).astype(np.int16).tobytes()
-        with self.lock:
-            self.user_buffers[user].extend(pcm_data)
-            self.last_audio_time[user] = time.time()
 
     def write(self, user: Optional[discord.User], data: voice_recv.VoiceData):
         # LOG EVERY PACKET ARRIVAL
@@ -235,23 +205,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
     def cleanup(self):
         self.processing_task.cancel()
 
-async def capture_loop(mic, user, sink, sample_rate=48000, chunk_duration=1.0):
-    """
-    Continuous capture loop for a given microphone/loopback device.
-    """
-    logger.info(f"Starting capture loop for {user.display_name} on {mic.name}")
-    num_frames = int(sample_rate * chunk_duration)
-
-    try:
-        with mic.recorder(samplerate=sample_rate) as recorder:
-            while True:
-                # record is a blocking call, so we run it in an executor to keep the event loop free
-                data = await asyncio.get_event_loop().run_in_executor(None, recorder.record, num_frames)
-                sink.write_numpy(user, data)
-    except Exception as e:
-        logger.error(f"Capture loop error for {user.display_name}: {e}")
-        traceback.print_exc()
-
 class TranscriptionBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
@@ -262,28 +215,17 @@ class TranscriptionBot(discord.Client):
 
     async def on_ready(self):
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
-
-        # Initialize the sink
-        self.sink = WhisperTranscriptionSink(self, TEXT_CHANNEL_ID)
-
-        # 1. Setup "To The Sun" (Microphone)
-        try:
-            mic = sc.default_microphone()
-            user_tts = LocalUser("To The Sun")
-            asyncio.create_task(capture_loop(mic, user_tts, self.sink))
-            logger.info(f"Started microphone capture for 'To The Sun' using {mic.name}")
-        except Exception as e:
-            logger.error(f"Failed to setup microphone capture: {e}")
-
-        # 2. Setup "mind_over_moss" (Desktop Audio)
-        try:
-            default_speaker = sc.default_speaker()
-            loopback = sc.get_microphone(id=str(default_speaker.name), include_loopback=True)
-            user_mom = LocalUser("mind_over_moss")
-            asyncio.create_task(capture_loop(loopback, user_mom, self.sink))
-            logger.info(f"Started desktop capture for 'mind_over_moss' using {loopback.name}")
-        except Exception as e:
-            logger.error(f"Failed to setup desktop loopback capture: {e}")
+        voice_channel = self.get_channel(VOICE_CHANNEL_ID)
+        if voice_channel and isinstance(voice_channel, discord.VoiceChannel):
+            logger.info(f"Connecting to {voice_channel.name}...")
+            try:
+                vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
+                logger.info(f"Connected. Mode: {vc.mode}")
+                sink = WhisperTranscriptionSink(self, TEXT_CHANNEL_ID)
+                vc.listen(sink)
+            except Exception as e:
+                logger.error(f"Connect error: {e}")
+                traceback.print_exc()
 
 if __name__ == "__main__":
     if not discord.opus.is_loaded():
