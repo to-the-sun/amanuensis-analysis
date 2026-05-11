@@ -176,9 +176,17 @@ class TranscriptionBot(discord.Client):
 
         # 1. Setup "To the Sun" (Microphone)
         try:
-            mic = sc.default_microphone()
+            target_mic_name = "Microphone (NVIDIA Broadcast)"
+            mics = sc.all_microphones()
+            mic = next((m for m in mics if target_mic_name in m.name), None)
+
+            if mic:
+                print(f"Preferred microphone found: {mic.name}")
+            else:
+                mic = sc.default_microphone()
+                print(f"Preferred microphone not found. Falling back to default: {mic.name}")
+
             user_tts = LocalUser("To the Sun")
-            print(f"Microphone input detected: {mic.name}")
             asyncio.create_task(capture_loop(mic, user_tts, self.sink))
             logger.info(f"Started microphone capture for 'To the Sun' using {mic.name}")
         except Exception as e:
