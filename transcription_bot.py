@@ -8,8 +8,13 @@ import time
 import logging
 import wave
 import traceback
+import re
+import io
 from typing import Optional
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import discord
 import soundcard as sc
 from faster_whisper import WhisperModel
@@ -53,6 +58,53 @@ class LocalUser:
             return self.display_name == other.display_name
         return False
 
+class SpeakerStats:
+    def __init__(self):
+        self.word_lengths = []
+        self.sentence_word_counts = []
+        self.current_sentence_words = 0
+
+    def update(self, text):
+        # Basic word tokenization (removing non-alphanumeric except spaces)
+        clean_text = re.sub(r'[^\w\s\.\!\?]', '', text)
+
+        # We need to track sentences. Punctuation . ! ? end sentences.
+        # Let's split by punctuation but keep it to identify sentence ends.
+        parts = re.split(r'([\.\!\?])', clean_text)
+
+        for part in parts:
+            if part in ('.', '!', '?'):
+                if self.current_sentence_words > 0:
+                    self.sentence_word_counts.append(self.current_sentence_words)
+                    self.current_sentence_words = 0
+            else:
+                words = part.split()
+                for word in words:
+                    self.word_lengths.append(len(word))
+                    self.current_sentence_words += 1
+
+    def get_metrics(self):
+        word_count = len(self.word_lengths)
+
+        avg_word_len = sum(self.word_lengths) / word_count if word_count > 0 else 0
+        min_word_len = min(self.word_lengths) if word_count > 0 else 0
+        max_word_len = max(self.word_lengths) if word_count > 0 else 0
+
+        s_counts = self.sentence_word_counts
+        avg_words_per_sentence = sum(s_counts) / len(s_counts) if s_counts else 0
+        min_words_per_sentence = min(s_counts) if s_counts else 0
+        max_words_per_sentence = max(s_counts) if s_counts else 0
+
+        return {
+            "word_count": word_count,
+            "avg_word_len": avg_word_len,
+            "min_word_len": min_word_len,
+            "max_word_len": max_word_len,
+            "avg_words_per_sentence": avg_words_per_sentence,
+            "min_words_per_sentence": min_words_per_sentence,
+            "max_words_per_sentence": max_words_per_sentence
+        }
+
 class WhisperTranscriptionSink:
     def __init__(self, bot, text_channel_id):
         self.bot = bot
@@ -63,7 +115,9 @@ class WhisperTranscriptionSink:
         self.sample_rate = 48000
         self.channels = 2
         self.debug_saved = False
+        self.stats = collections.defaultdict(SpeakerStats)
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
+        self.reporting_task = self.bot.loop.create_task(self._reporting_loop())
 
     def write_numpy(self, user, data_np: np.ndarray):
         """
@@ -114,6 +168,8 @@ class WhisperTranscriptionSink:
 
                     if text:
                         logger.info(f"WHISPER RESULT [{user.display_name}]: \"{text.strip()}\"")
+                        with self.lock:
+                            self.stats[user].update(text)
                         channel = self.bot.get_channel(self.text_channel_id)
                         if channel:
                             await channel.send(f"**{user.display_name}**: {text.strip()}")
@@ -124,6 +180,59 @@ class WhisperTranscriptionSink:
             except Exception as e:
                 logger.error(f"Processing loop error: {e}")
                 traceback.print_exc()
+
+    async def _reporting_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await self._send_report()
+            except Exception as e:
+                logger.error(f"Reporting loop error: {e}")
+                traceback.print_exc()
+
+    async def _send_report(self):
+        with self.lock:
+            if not self.stats:
+                return
+            users = list(self.stats.keys())
+            all_metrics = {u: self.stats[u].get_metrics() for u in users}
+
+        # Check if we have any stats to report
+        if all(m['word_count'] == 0 for m in all_metrics.values()):
+            return
+
+        user_names = [u.display_name for u in users]
+        metrics_to_plot = ["word_count", "avg_word_len", "avg_words_per_sentence"]
+        metric_labels = ["Word Count", "Avg Word Length", "Avg Words / Sentence"]
+
+        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle("Speaker Statistics Comparison")
+
+        colors = plt.colormaps.get_cmap('tab10').colors
+        for i, metric in enumerate(metrics_to_plot):
+            values = [all_metrics[u][metric] for u in users]
+            axs[i].bar(user_names, values, color=colors[:len(users)])
+            axs[i].set_title(metric_labels[i])
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close(fig)
+
+        # Build message
+        msg = "**Objective Speaker Stats (Running Analysis)**\n\n"
+        for u in users:
+            m = all_metrics[u]
+            msg += f"**{u.display_name}**:\n"
+            msg += f"- Word Count: {m['word_count']}\n"
+            msg += f"- Word Length (Letters): Avg: {m['avg_word_len']:.1f}, Min: {m['min_word_len']}, Max: {m['max_word_len']}\n"
+            msg += f"- Words per Sentence: Avg: {m['avg_words_per_sentence']:.1f}, Min: {m['min_words_per_sentence']}, Max: {m['max_words_per_sentence']}\n\n"
+
+        channel = self.bot.get_channel(self.text_channel_id)
+        if channel:
+            await channel.send(msg, file=discord.File(buf, filename="stats.png"))
 
     def _transcribe(self, audio_bytes):
         if MODEL is None: return "Model not loaded", True
