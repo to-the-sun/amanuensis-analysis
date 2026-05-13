@@ -21,8 +21,10 @@ import wave
 import traceback
 import re
 import io
+import random
 from typing import Optional
 
+import google.generativeai as genai
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -49,6 +51,7 @@ except FileNotFoundError:
 
 TOKEN = config.get('token', 'YOUR_DISCORD_BOT_TOKEN')
 TEXT_CHANNEL_ID = config.get('world_text', 0)
+GEMINI_API_KEY = config.get('gemini_api_key')
 
 # Whisper Configuration
 MODEL_SIZE = "small"
@@ -127,8 +130,10 @@ class WhisperTranscriptionSink:
         self.channels = 2
         self.debug_saved = False
         self.stats = collections.defaultdict(SpeakerStats)
+        self.all_sentences = []
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
         self.reporting_task = self.bot.loop.create_task(self._reporting_loop())
+        self.gemini_task = self.bot.loop.create_task(self._gemini_loop())
 
     def write_numpy(self, user, data_np: np.ndarray):
         """
@@ -181,6 +186,7 @@ class WhisperTranscriptionSink:
                         logger.info(f"WHISPER RESULT [{user.display_name}]: \"{text.strip()}\"")
                         with self.lock:
                             self.stats[user].update(text)
+                            self.all_sentences.append(text.strip())
                         channel = self.bot.get_channel(self.text_channel_id)
                         if channel:
                             await channel.send(f"**{user.display_name}**: {text.strip()}")
@@ -261,8 +267,53 @@ class WhisperTranscriptionSink:
             logger.error(f"Transcription error: {e}")
             return "", False
 
+    async def _gemini_loop(self):
+        if not GEMINI_API_KEY:
+            logger.warning("No Gemini API key found in config. Gemini loop disabled.")
+            return
+
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemini: {e}")
+            return
+
+        while True:
+            await asyncio.sleep(20)
+            try:
+                target_sentence = None
+                with self.lock:
+                    if self.all_sentences:
+                        target_sentence = random.choice(self.all_sentences)
+
+                if target_sentence:
+                    logger.info(f"Sending sentence to Gemini: \"{target_sentence}\"")
+                    # Run generate_content in executor because it might be blocking
+                    response = await self.bot.loop.run_in_executor(
+                        None,
+                        lambda: model.generate_content(target_sentence)
+                    )
+
+                    try:
+                        if response and response.text:
+                            channel = self.bot.get_channel(self.text_channel_id)
+                            if channel:
+                                await channel.send(f"**Gemini**: {response.text.strip()}")
+                        else:
+                            logger.warning("Gemini returned empty response.")
+                    except ValueError:
+                        # This often happens if the response was blocked by safety filters
+                        logger.warning("Gemini response was blocked or contains no text.")
+
+            except Exception as e:
+                logger.error(f"Gemini loop error: {e}")
+                traceback.print_exc()
+
     def cleanup(self):
         self.processing_task.cancel()
+        self.reporting_task.cancel()
+        self.gemini_task.cancel()
 
 async def capture_loop(mic, user, sink, sample_rate=48000, chunk_duration=1.0):
     """
