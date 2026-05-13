@@ -7,3 +7,5 @@ juce_build/
 JUCE/
 juce/
 BasicVolumeVST/juce_build/
+!BasicVolumeVST/bin/
+!BasicVolumeVST/bin/**
