@@ -1,3 +1,14 @@
+import sys
+import traceback
+
+def exit_on_error(type, value, tb):
+    traceback.print_exception(type, value, tb)
+    print("\nCRITICAL ERROR encountered. Press Enter to close...")
+    input()
+    sys.exit(1)
+
+sys.excepthook = exit_on_error
+
 import os
 import json
 import asyncio
@@ -313,5 +324,12 @@ class TranscriptionBot(discord.Client):
             logger.error(f"Failed to setup desktop loopback capture: {e}")
 
 if __name__ == "__main__":
-    bot = TranscriptionBot()
-    bot.run(TOKEN)
+    try:
+        bot = TranscriptionBot()
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"\nCRITICAL STARTUP ERROR: {e}")
+        traceback.print_exc()
+    finally:
+        print("\nScript has stopped. Press Enter to close...")
+        input()
