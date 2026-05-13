@@ -54,7 +54,7 @@ The SSM allows you to see the "DNA" of the audio's rhythm. It reveals structural
 
    You can install them via pip:
    ```bash
-   pip install librosa numpy scipy matplotlib soundcard soundfile
+   pip install librosa numpy scipy matplotlib soundcard soundfile discord.py faster-whisper
    ```
 
 2. **Run the Script:**
