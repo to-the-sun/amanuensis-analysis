@@ -1,0 +1,9 @@
+build/
+juce_build/
+*.o
+*.a
+*.so
+.DS_Store
+JUCE/
+juce/
+BasicVolumeVST/juce_build/
