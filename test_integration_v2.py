@@ -26,6 +26,10 @@ async def manual_test():
     # We'll use the real pipeline for this test since it's already cached
     sink = transcription_bot.WhisperTranscriptionSink(bot, 123)
 
+    print("Waiting for LLM initialization...")
+    while sink.llm_pipe is None:
+        await asyncio.sleep(1)
+
     print("Adding text to memory...")
     sink.transcript_memory = [
         "To the Sun: The stars are like diamonds in the sky.",
@@ -33,7 +37,7 @@ async def manual_test():
     ]
 
     print("Lowering threshold for testing...")
-    sink.max_tokens = 5
+    sink.max_tokens = 1
 
     print("Triggering check...")
     await sink._check_llm_trigger()
