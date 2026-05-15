@@ -22,6 +22,8 @@ import traceback
 import re
 import io
 from typing import Optional
+import torch
+from transformers import pipeline
 
 import matplotlib
 matplotlib.use('Agg')
@@ -127,6 +129,13 @@ class WhisperTranscriptionSink:
         self.channels = 2
         self.debug_saved = False
         self.stats = collections.defaultdict(SpeakerStats)
+
+        # Local LLM Integration
+        logger.info("Initializing local LLM (TinyLlama)...")
+        self.llm_pipe = pipeline("text-generation", model="TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype=torch.float32, device="cpu")
+        self.transcript_memory = []
+        self.max_tokens = 1800 # Threshold to trigger analysis
+
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
         self.reporting_task = self.bot.loop.create_task(self._reporting_loop())
 
@@ -178,12 +187,18 @@ class WhisperTranscriptionSink:
                     text, is_complete = await self.bot.loop.run_in_executor(None, self._transcribe, audio_bytes)
 
                     if text:
-                        logger.info(f"WHISPER RESULT [{user.display_name}]: \"{text.strip()}\"")
+                        text = text.strip()
+                        logger.info(f"WHISPER RESULT [{user.display_name}]: \"{text}\"")
                         with self.lock:
                             self.stats[user].update(text)
+                            self.transcript_memory.append(f"{user.display_name}: {text}")
+
                         channel = self.bot.get_channel(self.text_channel_id)
                         if channel:
-                            await channel.send(f"**{user.display_name}**: {text.strip()}")
+                            await channel.send(f"**{user.display_name}**: {text}")
+
+                        # Trigger analysis as a background task to avoid blocking transcription
+                        self.bot.loop.create_task(self._check_llm_trigger())
 
                     with self.lock:
                         processed_len = len(audio_bytes)
@@ -260,6 +275,57 @@ class WhisperTranscriptionSink:
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             return "", False
+
+    async def _check_llm_trigger(self):
+        full_transcript = "\n".join(self.transcript_memory)
+        tokens = self.llm_pipe.tokenizer.encode(full_transcript)
+
+        if len(tokens) >= self.max_tokens:
+            logger.info(f"Transcript memory reached {len(tokens)} tokens. Triggering LLM analysis...")
+
+            prompt_text = f"What is the most poetic phrase in this transcription? Please identify it clearly starting with 'Most Poetic Phrase:' followed by the phrase itself, and then provide a brief explanation.\n\n{full_transcript}"
+            messages = [
+                {"role": "system", "content": "You are a poetic analyst. Your task is to find the single most poetic phrase in a transcript. Always format your response starting with 'Most Poetic Phrase: [phrase]' and then a brief explanation."},
+                {"role": "user", "content": prompt_text}
+            ]
+
+            formatted_prompt = self.llm_pipe.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+            # Run LLM in executor to avoid blocking event loop
+            loop = asyncio.get_running_loop()
+            outputs = await loop.run_in_executor(None, lambda: self.llm_pipe(formatted_prompt, max_new_tokens=200, do_sample=True, temperature=0.7))
+
+            response = outputs[0]["generated_text"]
+            # Extract assistant part
+            if "<|assistant|>" in response:
+                response = response.split("<|assistant|>")[-1].strip()
+
+            # Attempt to extract the "Most Poetic Phrase" to seed the next memory
+            poetic_phrase = ""
+            # Look for common patterns even if it didn't strictly follow the "Most Poetic Phrase:" prefix
+            if "Most Poetic Phrase:" in response:
+                try:
+                    parts = response.split("Most Poetic Phrase:", 1)[1].strip().split("\n", 1)
+                    poetic_phrase = parts[0].strip().strip('"').strip("'")
+                except Exception:
+                    pass
+            elif "\"" in response:
+                # Fallback: extract the first quoted string as the poetic phrase
+                try:
+                    poetic_phrase = response.split("\"", 2)[1]
+                except Exception:
+                    pass
+
+            channel = self.bot.get_channel(self.text_channel_id)
+            if channel:
+                await channel.send(f"--- **Poetic Analysis** ---\n{response}")
+
+            with self.lock:
+                if poetic_phrase:
+                    self.transcript_memory = [f"Legacy: {poetic_phrase}"]
+                    logger.info(f"Seeded new memory with legacy poetic phrase: {poetic_phrase}")
+                else:
+                    self.transcript_memory = []
 
     def cleanup(self):
         self.processing_task.cancel()
