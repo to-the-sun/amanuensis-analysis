@@ -22,6 +22,8 @@ import traceback
 import re
 import io
 from typing import Optional
+import torch
+from transformers import pipeline
 
 import matplotlib
 matplotlib.use('Agg')
@@ -127,8 +129,18 @@ class WhisperTranscriptionSink:
         self.channels = 2
         self.debug_saved = False
         self.stats = collections.defaultdict(SpeakerStats)
+
+        # Local LLM Integration
+        self.llm_pipe = None
+        self.transcript_memory = []
+        self.max_tokens = 100 # Diagnostic threshold to trigger analysis
+        self.is_analyzing = False
+
+        # Start model loading in a separate thread to avoid blocking the event loop
+        self.init_task = self.bot.loop.create_task(self._initialize_llm())
+
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
-        self.reporting_task = self.bot.loop.create_task(self._reporting_loop())
+        # self.reporting_task = self.bot.loop.create_task(self._reporting_loop())
 
     def write_numpy(self, user, data_np: np.ndarray):
         """
@@ -178,12 +190,18 @@ class WhisperTranscriptionSink:
                     text, is_complete = await self.bot.loop.run_in_executor(None, self._transcribe, audio_bytes)
 
                     if text:
-                        logger.info(f"WHISPER RESULT [{user.display_name}]: \"{text.strip()}\"")
+                        text = text.strip()
+                        logger.info(f"WHISPER RESULT [{user.display_name}]: \"{text}\"")
                         with self.lock:
                             self.stats[user].update(text)
+                            self.transcript_memory.append(f"{user.display_name}: {text}")
+
                         channel = self.bot.get_channel(self.text_channel_id)
                         if channel:
-                            await channel.send(f"**{user.display_name}**: {text.strip()}")
+                            await channel.send(f"**{user.display_name}**: {text}")
+
+                        # Trigger analysis as a background task to avoid blocking transcription
+                        self.bot.loop.create_task(self._check_llm_trigger())
 
                     with self.lock:
                         processed_len = len(audio_bytes)
@@ -261,6 +279,81 @@ class WhisperTranscriptionSink:
             logger.error(f"Transcription error: {e}")
             return "", False
 
+    async def _initialize_llm(self):
+        logger.info("Initializing local LLM (TinyLlama) in background...")
+        try:
+            # Use run_in_executor to load the model without blocking
+            self.llm_pipe = await self.bot.loop.run_in_executor(
+                None,
+                lambda: pipeline("text-generation", model="TinyLlama/TinyLlama-1.1B-Chat-v1.0", torch_dtype=torch.float32, device="cpu")
+            )
+            logger.info("Local LLM (TinyLlama) initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize local LLM: {e}")
+
+    async def _check_llm_trigger(self):
+        if self.llm_pipe is None or self.is_analyzing:
+            return
+
+        with self.lock:
+            full_transcript = "\n".join(self.transcript_memory)
+
+        tokens = self.llm_pipe.tokenizer.encode(full_transcript)
+
+        if len(tokens) >= self.max_tokens:
+            self.is_analyzing = True
+            logger.info(f"Transcript memory reached {len(tokens)} tokens. Triggering LLM analysis...")
+
+            prompt_text = f"Analyze the following transcript and identify the single most poetic or beautiful phrase spoken. \n\nTRANSCRIPT:\n{full_transcript}"
+            messages = [
+                {"role": "system", "content": "You are a poetic analyst. Examine the transcript provided by the user. Select the one phrase that is most poetic or evocative. \n\nYour response MUST follow this format exactly:\nMost Poetic Phrase: \"[The specific phrase from the transcript]\"\nExplanation: [A one-sentence explanation of why it is poetic.]\n\nDo not include any other text."},
+                {"role": "user", "content": prompt_text}
+            ]
+
+            formatted_prompt = self.llm_pipe.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+            print("\n" + "="*40 + " LLM PROMPT " + "="*40)
+            print(formatted_prompt)
+            print("="*92 + "\n")
+
+            # Run LLM in executor to avoid blocking event loop
+            loop = asyncio.get_running_loop()
+            outputs = await loop.run_in_executor(None, lambda: self.llm_pipe(formatted_prompt, max_new_tokens=200, do_sample=True, temperature=0.7))
+
+            response = outputs[0]["generated_text"]
+            # Extract assistant part
+            if "<|assistant|>" in response:
+                response = response.split("<|assistant|>")[-1].strip()
+
+            # Attempt to extract the "Most Poetic Phrase" to seed the next memory
+            poetic_phrase = ""
+            # Look for common patterns even if it didn't strictly follow the "Most Poetic Phrase:" prefix
+            if "Most Poetic Phrase:" in response:
+                try:
+                    parts = response.split("Most Poetic Phrase:", 1)[1].strip().split("\n", 1)
+                    poetic_phrase = parts[0].strip().strip('"').strip("'")
+                except Exception:
+                    pass
+            elif "\"" in response:
+                # Fallback: extract the first quoted string as the poetic phrase
+                try:
+                    poetic_phrase = response.split("\"", 2)[1]
+                except Exception:
+                    pass
+
+            channel = self.bot.get_channel(self.text_channel_id)
+            if channel:
+                await channel.send(f"--- **Poetic Analysis** ---\n{response}")
+
+            with self.lock:
+                if poetic_phrase:
+                    self.transcript_memory = [f"Legacy: {poetic_phrase}"]
+                    logger.info(f"Seeded new memory with legacy poetic phrase: {poetic_phrase}")
+                else:
+                    self.transcript_memory = []
+
+            self.is_analyzing = False
+
     def cleanup(self):
         self.processing_task.cancel()
 
@@ -324,12 +417,25 @@ class TranscriptionBot(discord.Client):
             logger.error(f"Failed to setup desktop loopback capture: {e}")
 
 if __name__ == "__main__":
+    bot = TranscriptionBot()
     try:
-        bot = TranscriptionBot()
         bot.run(TOKEN)
     except Exception as e:
         print(f"\nCRITICAL STARTUP ERROR: {e}")
         traceback.print_exc()
     finally:
+        # Final reporting before closure
+        if hasattr(bot, 'sink'):
+            print("Sending final speaker statistics report...")
+            # We need to run the async report in a new event loop or using the bot's loop if it's still running
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(bot.sink._send_report())
+                else:
+                    loop.run_until_complete(bot.sink._send_report())
+            except Exception as e:
+                print(f"Failed to send final report: {e}")
+
         print("\nScript has stopped. Press Enter to close...")
         input()
