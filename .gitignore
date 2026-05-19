@@ -5,7 +5,7 @@ juce_build/
 *.so
 .DS_Store
 JUCE/
-juce/
-BasicVolumeVST/juce_build/
-!BasicVolumeVST/bin/
-!BasicVolumeVST/bin/**
+sound_design/BasicVolumeVST/juce/
+sound_design/BasicVolumeVST/juce_build/
+!sound_design/BasicVolumeVST/bin/
+!sound_design/BasicVolumeVST/bin/**

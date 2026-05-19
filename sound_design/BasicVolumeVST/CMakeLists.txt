@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.22)
 project(BASIC_VOLUME_VST VERSION 0.1.0)
 
 # Include JUCE
-add_subdirectory(../juce BasicVolumeVST/juce_build)
+add_subdirectory(juce BasicVolumeVST/juce_build)
 
 juce_add_plugin(BasicVolumeVST
     PLUGIN_MANUFACTURER_CODE User
