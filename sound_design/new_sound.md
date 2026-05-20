@@ -39,6 +39,7 @@ The primary objective is to design a sound that is **as perceptually different a
 - **Data Format:** `temporal_data` must be a dictionary of arrays (e.g., `{"times": [...], "rms": [...]}`).
 - **MIDI Consistency:** Always use the same MIDI sequence for all sounds to ensure a fair "timbre" comparison.
 - **Distance Metric:** The system currently uses Euclidean distance on MFCC means as the primary "difference" score.
+- **MIDI Handling:** Modules must be polyphonic and correctly handle sustained notes (e.g., by rendering any notes remaining in `active_notes` at the end of the `duration` without a release phase). This ensures compatibility with both listed sequences and potential live MIDI streams.
 
 ## Subjective Judgment
 While the distance metric provides a quantitative guide, prioritize **human perception**. If two sounds have a high statistical distance but sound similar to a person, iterate further on the design to achieve true variety.
