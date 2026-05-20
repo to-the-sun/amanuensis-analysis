@@ -2,31 +2,35 @@ import numpy as np
 
 SOUND_DESIGN_VERSION = 1
 
-def adsr_envelope(duration_samples, attack_samples, decay_samples, sustain_level, release_samples):
-    """Generate an ADSR envelope."""
-    # Attack
-    attack = np.linspace(0, 1, attack_samples)
+def adsr_envelope(duration_samples, attack_samples, decay_samples, sustain_level, release_samples, is_sustained=False):
+    """Generate an ADSR envelope. If is_sustained is True, the release phase is omitted."""
 
-    # Decay
-    decay = np.linspace(1, sustain_level, decay_samples)
+    # Calculate phase durations
+    a_len = attack_samples
+    d_len = decay_samples
+    r_len = 0 if is_sustained else release_samples
 
-    # Release
-    release = np.linspace(sustain_level, 0, release_samples)
-
-    # Sustain
-    sustain_duration = duration_samples - attack_samples - decay_samples - release_samples
-    if sustain_duration < 0:
-        # If duration is too short, scale everything down
-        total = attack_samples + decay_samples + release_samples
-        scale = duration_samples / total
-        attack = np.linspace(0, 1, int(attack_samples * scale))
-        decay = np.linspace(1, sustain_level, int(decay_samples * scale))
-        release = np.linspace(sustain_level, 0, int(release_samples * scale))
-        sustain = np.array([])
+    # Check if total duration is enough for A+D+R
+    total_adr = a_len + d_len + r_len
+    if duration_samples < total_adr and total_adr > 0:
+        scale = duration_samples / total_adr
+        a_len = int(a_len * scale)
+        d_len = int(d_len * scale)
+        r_len = int(r_len * scale)
+        s_len = 0
     else:
-        sustain = np.full(sustain_duration, sustain_level)
+        s_len = duration_samples - a_len - d_len - r_len
 
-    return np.concatenate([attack, decay, sustain, release])
+    # Generate phases
+    attack = np.linspace(0, 1, a_len)
+    decay = np.linspace(1, sustain_level, d_len)
+    sustain = np.full(s_len, sustain_level)
+
+    if is_sustained:
+        return np.concatenate([attack, decay, sustain])[:duration_samples]
+    else:
+        release = np.linspace(sustain_level, 0, r_len)
+        return np.concatenate([attack, decay, sustain, release])[:duration_samples]
 
 def render_midi(midi_messages, duration, sample_rate):
     """
@@ -48,6 +52,50 @@ def render_midi(midi_messages, duration, sample_rate):
     sustain_level = 0.6
     release_time = 0.3
 
+    def render_note(note_num, start_time, end_time, velocity, is_sustained=False):
+        """Helper to render a single note into the output buffer."""
+        freq = 440.0 * (2.0 ** ((note_num - 69) / 12.0))
+
+        if is_sustained:
+            note_duration = end_time - start_time
+        else:
+            note_duration = end_time - start_time + release_time
+
+        note_samples = int(note_duration * sample_rate)
+
+        # Bound note samples to output range
+        start_idx = int(start_time * sample_rate)
+        end_idx = min(start_idx + note_samples, num_samples)
+        actual_samples = end_idx - start_idx
+
+        if actual_samples <= 0:
+            return
+
+        t_vec = np.arange(actual_samples) / sample_rate
+        wave = np.zeros(actual_samples)
+
+        for ratio, amp in harmonics:
+            wave += amp * np.sin(2 * np.pi * freq * ratio * (t_vec + start_time))
+
+        # Apply envelope
+        env = adsr_envelope(
+            actual_samples,
+            int(attack_time * sample_rate),
+            int(decay_time * sample_rate),
+            sustain_level,
+            int(release_time * sample_rate),
+            is_sustained=is_sustained
+        )
+
+        # Match lengths
+        if len(env) < actual_samples:
+            env = np.pad(env, (0, actual_samples - len(env)))
+        elif len(env) > actual_samples:
+            env = env[:actual_samples]
+
+        note_audio = wave * env * (velocity / 127.0) * 0.2 # 0.2 for headroom
+        output[start_idx:end_idx] += note_audio
+
     for msg in midi_messages:
         t = int(msg.time * sample_rate)
         if t >= num_samples:
@@ -58,44 +106,11 @@ def render_midi(midi_messages, duration, sample_rate):
         elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
             if msg.note in active_notes:
                 start_time, velocity = active_notes.pop(msg.note)
-                end_time = msg.time
+                render_note(msg.note, start_time, msg.time, velocity, is_sustained=False)
 
-                # Render the note
-                freq = 440.0 * (2.0 ** ((msg.note - 69) / 12.0))
-                note_duration = end_time - start_time + release_time
-                note_samples = int(note_duration * sample_rate)
-
-                # Bound note samples to output range
-                start_idx = int(start_time * sample_rate)
-                end_idx = min(start_idx + note_samples, num_samples)
-                actual_samples = end_idx - start_idx
-
-                if actual_samples <= 0:
-                    continue
-
-                t_vec = np.arange(actual_samples) / sample_rate
-                wave = np.zeros(actual_samples)
-
-                for ratio, amp in harmonics:
-                    wave += amp * np.sin(2 * np.pi * freq * ratio * (t_vec + start_time))
-
-                # Apply envelope
-                env = adsr_envelope(
-                    actual_samples,
-                    int(attack_time * sample_rate),
-                    int(decay_time * sample_rate),
-                    sustain_level,
-                    int(release_time * sample_rate)
-                )
-
-                # Match lengths if env is shorter than actual_samples due to truncation
-                if len(env) < actual_samples:
-                    env = np.pad(env, (0, actual_samples - len(env)))
-                elif len(env) > actual_samples:
-                    env = env[:actual_samples]
-
-                note_audio = wave * env * (velocity / 127.0) * 0.2 # 0.2 for headroom
-                output[start_idx:end_idx] += note_audio
+    # Render any notes that are still active (sustained until end)
+    for note_num, (start_time, velocity) in active_notes.items():
+        render_note(note_num, start_time, duration, velocity, is_sustained=True)
 
     # Final clipping protection
     output = np.clip(output, -1.0, 1.0)
