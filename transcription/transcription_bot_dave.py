@@ -60,8 +60,8 @@ def _patched_decryptor_init(self, mode, secret_key):
 PacketDecryptor.__init__ = _patched_decryptor_init
 
 def _decrypt_rtp_aead_aes256_gcm_rtpsize(self, packet):
-    header = bytes(packet.header[:12])
     packet.adjust_rtpsize()
+    header = bytes(packet.header)
     nonce = bytearray(12)
     nonce[:4] = packet.nonce
 
@@ -70,7 +70,7 @@ def _decrypt_rtp_aead_aes256_gcm_rtpsize(self, packet):
         res = self._aesgcm.decrypt(bytes(nonce), bytes(packet.data), header)
     except Exception as e:
         if packet.sequence % 100 == 0:
-            logger.error(f"Outer Decryption Failed: SSRC={packet.ssrc}, Seq={packet.sequence}, Err={e}")
+            logger.error(f"Outer Decryption Failed: SSRC={packet.ssrc}, Seq={packet.sequence}, Err={type(e).__name__}: {e}")
         return None
 
     if packet.extended:
@@ -107,13 +107,75 @@ def _decrypt_rtp_aead_aes256_gcm_rtpsize(self, packet):
                 return dec
             except Exception as e:
                 if seq % 100 == 0:
-                    logger.warning(f"DAVE FAIL: SSRC={ssrc}, UID={uid}, Seq={seq}, ROC={roc}, Err={e}")
+                    logger.warning(f"DAVE FAIL: SSRC={ssrc}, UID={uid}, Seq={seq}, ROC={roc}, Err={type(e).__name__}: {e}")
                 return None # Return None to trigger PLC/silence and avoid hallucinations
 
     return res
 
 PacketDecryptor._decrypt_rtp_aead_aes256_gcm_rtpsize = _decrypt_rtp_aead_aes256_gcm_rtpsize
-PacketDecryptor._decrypt_rtcp_aead_aes256_gcm_rtpsize = lambda self, data: data
+
+def _decrypt_rtcp_aead_aes256_gcm_rtpsize(self, data):
+    header = data[:8]
+    nonce = bytearray(12)
+    nonce[:4] = data[-4:]
+    ciphertext = data[8:-4]
+
+    try:
+        dec = self._aesgcm.decrypt(bytes(nonce), ciphertext, header)
+        return header + dec
+    except Exception as e:
+        logger.error(f"RTCP Decryption Failed: Err={type(e).__name__}: {e}")
+        return data
+
+PacketDecryptor._decrypt_rtcp_aead_aes256_gcm_rtpsize = _decrypt_rtcp_aead_aes256_gcm_rtpsize
+
+# 4. Patch AudioReader.callback to allow SenderReportPacket (type 200)
+def _patched_callback(self, packet_data):
+    packet = rtp_packet = rtcp_packet = None
+    try:
+        if not rtp.is_rtcp(packet_data):
+            packet = rtp_packet = rtp.decode_rtp(packet_data)
+            packet.decrypted_data = self.decryptor.decrypt_rtp(packet)
+        else:
+            packet = rtcp_packet = rtp.decode_rtcp(self.decryptor.decrypt_rtcp(packet_data))
+
+            if not isinstance(packet, (rtp.ReceiverReportPacket, rtp.SenderReportPacket)):
+                logger.info("Received unexpected rtcp packet: type=%s, %s", packet.type, type(packet))
+                logger.debug("Packet info:\n  packet=%s\n  data=%s", packet, packet_data)
+    except Exception as e:
+        if self._is_ip_discovery_packet(packet_data):
+            logger.debug("Ignoring ip discovery packet")
+            return
+
+        logger.exception("Error unpacking packet")
+        logger.debug("Packet data: len=%s data=%s", len(packet_data), packet_data)
+    finally:
+        if self.error:
+            self.stop()
+            return
+        if not packet:
+            return
+
+    if rtcp_packet:
+        self.packet_router.feed_rtcp(rtcp_packet)
+    elif rtp_packet:
+        ssrc = rtp_packet.ssrc
+
+        if ssrc not in self.voice_client._ssrc_to_id:
+            if rtp_packet.is_silence():
+                return
+            else:
+                logger.debug("Received packet for unknown ssrc %s", ssrc)
+
+        self.speaking_timer.notify(ssrc)
+        try:
+            self.packet_router.feed_rtp(rtp_packet)
+        except Exception as e:
+            logger.exception('Error processing rtp packet')
+            self.error = e
+            self.stop()
+
+AudioReader.callback = _patched_callback
 
 # Patch PacketDecoder to handle None (RTP failure)
 _orig_decode_packet = opus_module.PacketDecoder._decode_packet
