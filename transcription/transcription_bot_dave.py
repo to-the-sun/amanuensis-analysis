@@ -27,18 +27,21 @@ logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
 from discord.ext.voice_recv.reader import PacketDecryptor, AudioReader
 import discord.ext.voice_recv.opus as opus_module
 
-# Ensure modern encryption mode is recognized
+# 1. Broaden supported modes
+if 'aead_aes256_gcm_rtpsize' not in voice_recv.VoiceRecvClient.supported_modes:
+    voice_recv.VoiceRecvClient.supported_modes += ('aead_aes256_gcm_rtpsize',)
+
 if 'aead_aes256_gcm_rtpsize' not in PacketDecryptor.supported_modes:
     PacketDecryptor.supported_modes.append('aead_aes256_gcm_rtpsize')
 
-# Patch AudioReader to pass voice_client to the decryptor
+# 2. Patch AudioReader to pass voice_client to the decryptor
 _orig_reader_init = AudioReader.__init__
 def patched_reader_init(self, sink, voice_client, **kwargs):
     _orig_reader_init(self, sink, voice_client, **kwargs)
     self.decryptor.voice_client = voice_client
 AudioReader.__init__ = patched_reader_init
 
-# Patch PacketDecryptor
+# 3. Patch PacketDecryptor
 _orig_decryptor_init = PacketDecryptor.__init__
 def _patched_decryptor_init(self, mode, secret_key):
     self._secret_key = bytes(secret_key)
@@ -57,7 +60,9 @@ def _decrypt_rtp_aead_aes256_gcm_rtpsize(self, packet):
     # Layer 1: Outer RTP Decryption
     try:
         res = self._aesgcm.decrypt(bytes(nonce), bytes(packet.data), header)
-    except Exception:
+    except Exception as e:
+        if packet.sequence % 100 == 0:
+            logger.error(f"Outer Decryption Failed: SSRC={packet.ssrc}, Seq={packet.sequence}, Err={e}")
         return None
 
     if packet.extended:
@@ -66,43 +71,43 @@ def _decrypt_rtp_aead_aes256_gcm_rtpsize(self, packet):
 
     # Layer 2: DAVE/E2EE Decryption
     vc = getattr(self, 'voice_client', None)
-    if vc:
-        state = getattr(vc, '_connection', None)
-        dave = getattr(state, 'dave_session', None)
-        
-        if dave and dave.ready:
-            uid = vc._get_id_from_ssrc(packet.ssrc)
-            if uid:
-                # Track sequence for ROC (diagnostic)
-                seq = packet.sequence
-                last_seq = self._dave_last_seq.get(packet.ssrc, seq)
-                if seq < last_seq and (last_seq - seq) > 32768:
-                    self._dave_roc[packet.ssrc] += 1
-                elif seq > last_seq and (seq - last_seq) > 32768:
-                    self._dave_roc[packet.ssrc] -= 1
-                self._dave_last_seq[packet.ssrc] = seq
-                
-                try:
-                    # Media type 0 = audio
-                    dec = dave.decrypt(uid, MediaType.audio, res)
-                    packet._dave_success = True
-                    return dec
-                except Exception:
-                    packet._dave_success = False
-                    # Return original outer-decrypted (but E2EE encrypted) frame 
-                    # to allow Whisper to "see" the noise/hallucinate.
-                    return res
-        
-        # If DAVE not ready, return the outer-decrypted frame
-        packet._dave_success = False
+    if not vc:
         return res
-            
+
+    state = getattr(vc, '_connection', None)
+    dave = getattr(state, 'dave_session', None)
+
+    # Track sequence for ROC
+    seq = packet.sequence
+    ssrc = packet.ssrc
+    last_seq = self._dave_last_seq.get(ssrc, seq)
+    if seq < last_seq and (last_seq - seq) > 32768:
+        self._dave_roc[ssrc] += 1
+    elif seq > last_seq and (seq - last_seq) > 32768:
+        self._dave_roc[ssrc] -= 1
+    self._dave_last_seq[ssrc] = seq
+    roc = self._dave_roc[ssrc]
+
+    if dave and dave.ready:
+        uid = vc._get_id_from_ssrc(ssrc)
+        if uid:
+            try:
+                # Media type 0 = audio
+                dec = dave.decrypt(uid, MediaType.audio, res)
+                if seq % 500 == 0:
+                    logger.info(f"DAVE OK: SSRC={ssrc}, UID={uid}, Seq={seq}, ROC={roc}")
+                return dec
+            except Exception as e:
+                if seq % 100 == 0:
+                    logger.warning(f"DAVE FAIL: SSRC={ssrc}, UID={uid}, Seq={seq}, ROC={roc}, Err={e}")
+                return None # Return None to trigger PLC/silence and avoid hallucinations
+
     return res
 
 PacketDecryptor._decrypt_rtp_aead_aes256_gcm_rtpsize = _decrypt_rtp_aead_aes256_gcm_rtpsize
 PacketDecryptor._decrypt_rtcp_aead_aes256_gcm_rtpsize = lambda self, data: data
 
-# Patch PacketDecoder to handle None (RTP failure) but pass encrypted noise (DAVE failure)
+# Patch PacketDecoder to handle None (RTP failure)
 _orig_decode_packet = opus_module.PacketDecoder._decode_packet
 def _patched_decode_packet(self, packet):
     if packet and packet.decrypted_data is None:
@@ -111,8 +116,6 @@ def _patched_decode_packet(self, packet):
     try:
         return _orig_decode_packet(self, packet)
     except Exception:
-        # If Opus decoding fails on encrypted noise, return empty bytes
-        # instead of crashing the router.
         return packet, b''
 
 opus_module.PacketDecoder._decode_packet = _patched_decode_packet
@@ -134,7 +137,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
     def wants_opus(self): return False
 
     def write(self, user, data):
-        # HALLUCINATION FILTER REMOVED: Process all PCM produced by the decoder
         if data.pcm:
             with self.lock:
                 self.user_buffers[user].extend(data.pcm)
@@ -157,20 +159,28 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                 for user, audio_bytes in users_to_process:
                     audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
                     rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
+                    duration = len(audio_bytes)/(48000*4)
                     
-                    if rms > 150:
+                    logger.info(f"Buffer: User={user}, Duration={duration:.1f}s, RMS={rms:.1f}")
+
+                    if rms > 50:
                         audio_float32 = audio_np.reshape(-1, 2).astype(np.float32) / 32768.0
                         mono_16k = audio_float32.mean(axis=1)[::3]
                         
-                        logger.info(f"Transcribing {len(mono_16k)/16000:.1f}s from {user}...")
+                        logger.info(f"Transcribing {duration:.1f}s from {user}...")
                         text = await self.bot.loop.run_in_executor(_executor, self._transcribe, mono_16k)
                         
-                        if text and len(text.strip()) > 1:
+                        if text:
                             clean_text = text.strip()
                             logger.info(f"WHISPER RESULT [{user}]: {clean_text}")
-                            channel = self.bot.get_channel(self.text_id)
-                            if channel:
-                                await channel.send(f"**{user}**: {clean_text}")
+                            if len(clean_text) > 1:
+                                channel = self.bot.get_channel(self.text_id)
+                                if channel:
+                                    await channel.send(f"**{user}**: {clean_text}")
+                        else:
+                            logger.info(f"WHISPER RESULT [{user}]: <empty>")
+                    else:
+                        logger.info(f"Skipping silent buffer (RMS={rms:.1f})")
 
                     with self.lock:
                         self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
@@ -180,7 +190,7 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
     def _transcribe(self, audio_16k):
         if not MODEL: return ""
         try:
-            segments, info = MODEL.transcribe(audio_16k, beam_size=1, language='en')
+            segments, info = MODEL.transcribe(audio_16k, beam_size=5, language='en')
             return "".join([s.text for s in segments])
         except Exception:
             return ""

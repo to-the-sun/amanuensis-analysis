@@ -9,3 +9,5 @@ sound_design/BasicVolumeVST/juce/
 sound_design/BasicVolumeVST/juce_build/
 !sound_design/BasicVolumeVST/bin/
 !sound_design/BasicVolumeVST/bin/**
+transcription/credentials.json
+credentials.json
