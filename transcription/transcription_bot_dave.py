@@ -6,6 +6,9 @@ import logging
 import json
 import asyncio
 import numpy as np
+import random
+import re
+import io
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
@@ -16,12 +19,17 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from discord.gateway import DiscordVoiceWebSocket
 import davey
 from davey import MediaType
+from google import genai
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger('discord').setLevel(logging.WARNING)
 logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
+logging.getLogger('faster_whisper').setLevel(logging.WARNING)
 
 # --- DAVE DECRYPTION PATCHES ---
 from discord.ext.voice_recv.reader import PacketDecryptor, AudioReader
@@ -120,6 +128,49 @@ def _patched_decode_packet(self, packet):
 
 opus_module.PacketDecoder._decode_packet = _patched_decode_packet
 
+# --- SPEAKER STATS ---
+class SpeakerStats:
+    def __init__(self):
+        self.word_lengths = []
+        self.sentence_word_counts = []
+        self.current_sentence_words = 0
+
+    def update(self, text):
+        clean_text = re.sub(r'[^\w\s\.\!\?]', '', text)
+        parts = re.split(r'([\.\!\?])', clean_text)
+
+        for part in parts:
+            if part in ('.', '!', '?'):
+                if self.current_sentence_words > 0:
+                    self.sentence_word_counts.append(self.current_sentence_words)
+                    self.current_sentence_words = 0
+            else:
+                words = part.split()
+                for word in words:
+                    self.word_lengths.append(len(word))
+                    self.current_sentence_words += 1
+
+    def get_metrics(self):
+        word_count = len(self.word_lengths)
+        avg_word_len = sum(self.word_lengths) / word_count if word_count > 0 else 0
+        min_word_len = min(self.word_lengths) if word_count > 0 else 0
+        max_word_len = max(self.word_lengths) if word_count > 0 else 0
+
+        s_counts = self.sentence_word_counts
+        avg_words_per_sentence = sum(s_counts) / len(s_counts) if s_counts else 0
+        min_words_per_sentence = min(s_counts) if s_counts else 0
+        max_words_per_sentence = max(s_counts) if s_counts else 0
+
+        return {
+            "word_count": word_count,
+            "avg_word_len": avg_word_len,
+            "min_word_len": min_word_len,
+            "max_word_len": max_word_len,
+            "avg_words_per_sentence": avg_words_per_sentence,
+            "min_words_per_sentence": min_words_per_sentence,
+            "max_words_per_sentence": max_words_per_sentence
+        }
+
 # --- TRANSCRIPTION SINK ---
 class WhisperTranscriptionSink(voice_recv.AudioSink):
     def __init__(self, bot, text_id):
@@ -129,10 +180,16 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
         self.user_buffers = collections.defaultdict(bytearray)
         self.last_audio_time = collections.defaultdict(float)
         self.lock = threading.Lock()
+        self.all_sentences = []
+        self.stats = collections.defaultdict(SpeakerStats)
         self.processing_task = self.bot.loop.create_task(self._process_buffers())
+        self.gemini_task = self.bot.loop.create_task(self._gemini_loop())
+        self.reporting_task = self.bot.loop.create_task(self._reporting_loop())
 
     def cleanup(self):
         self.processing_task.cancel()
+        self.gemini_task.cancel()
+        self.reporting_task.cancel()
 
     def wants_opus(self): return False
 
@@ -161,8 +218,6 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                     rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
                     duration = len(audio_bytes)/(48000*4)
                     
-                    logger.info(f"Buffer: User={user}, Duration={duration:.1f}s, RMS={rms:.1f}")
-
                     if rms > 50:
                         audio_float32 = audio_np.reshape(-1, 2).astype(np.float32) / 32768.0
                         mono_16k = audio_float32.mean(axis=1)[::3]
@@ -174,13 +229,12 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
                             clean_text = text.strip()
                             logger.info(f"WHISPER RESULT [{user}]: {clean_text}")
                             if len(clean_text) > 1:
+                                with self.lock:
+                                    self.all_sentences.append(clean_text)
+                                    self.stats[user].update(clean_text)
                                 channel = self.bot.get_channel(self.text_id)
                                 if channel:
                                     await channel.send(f"**{user}**: {clean_text}")
-                        else:
-                            logger.info(f"WHISPER RESULT [{user}]: <empty>")
-                    else:
-                        logger.info(f"Skipping silent buffer (RMS={rms:.1f})")
 
                     with self.lock:
                         self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
@@ -194,6 +248,81 @@ class WhisperTranscriptionSink(voice_recv.AudioSink):
             return "".join([s.text for s in segments])
         except Exception:
             return ""
+
+    async def _gemini_loop(self):
+        if not GEMINI_API_KEY:
+            logger.warning("No Gemini API key found. Gemini loop disabled.")
+            return
+
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        while True:
+            await asyncio.sleep(20)
+            if not self.all_sentences:
+                continue
+
+            sentence = random.choice(self.all_sentences)
+            prompt = f"React to this sentence in a short, witty, and slightly cryptic way: \"{sentence}\""
+
+            try:
+                response = await self.bot.loop.run_in_executor(None, lambda: client.models.generate_content(model="gemini-2.0-flash", contents=prompt))
+                if response and response.text:
+                    channel = self.bot.get_channel(self.text_id)
+                    if channel:
+                        await channel.send(f"*Gemini:* {response.text.strip()}")
+            except Exception as e:
+                logger.error(f"Gemini error: {e}")
+
+    async def _reporting_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await self._send_report()
+            except Exception as e:
+                logger.error(f"Reporting loop error: {e}")
+
+    async def _send_report(self):
+        with self.lock:
+            if not self.stats:
+                return
+            users = list(self.stats.keys())
+            all_metrics = {u: self.stats[u].get_metrics() for u in users}
+
+        if all(m['word_count'] == 0 for m in all_metrics.values()):
+            return
+
+        user_names = [getattr(u, 'display_name', str(u)) for u in users]
+        metrics_to_plot = ["word_count", "avg_word_len", "avg_words_per_sentence"]
+        metric_labels = ["Word Count", "Avg Word Length", "Avg Words / Sentence"]
+
+        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle("Speaker Statistics Comparison")
+
+        colors = plt.colormaps.get_cmap('tab10').colors
+        for i, metric in enumerate(metrics_to_plot):
+            values = [all_metrics[u][metric] for u in users]
+            axs[i].bar(user_names, values, color=colors[:len(users)])
+            axs[i].set_title(metric_labels[i])
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close(fig)
+
+        msg = "**Objective Speaker Stats**\n\n"
+        for u in users:
+            m = all_metrics[u]
+            name = getattr(u, 'display_name', str(u))
+            msg += f"**{name}**:\n"
+            msg += f"- Word Count: {m['word_count']}\n"
+            msg += f"- Word Length: Avg: {m['avg_word_len']:.1f}, Min: {m['min_word_len']}, Max: {m['max_word_len']}\n"
+            msg += f"- Words/Sentence: Avg: {m['avg_words_per_sentence']:.1f}, Min: {m['min_words_per_sentence']}, Max: {m['max_words_per_sentence']}\n\n"
+
+        channel = self.bot.get_channel(self.text_id)
+        if channel:
+            await channel.send(msg, file=discord.File(buf, filename="stats.png"))
 
 # --- BOT CLIENT ---
 class TranscriptionBot(discord.Client):
@@ -222,6 +351,7 @@ if __name__ == '__main__':
     TOKEN = config['token']
     VOICE_ID = int(config['world_voice'])
     TEXT_ID = int(config['world_text'])
+    GEMINI_API_KEY = config.get('gemini_api_key')
 
     if not discord.opus.is_loaded():
         try: discord.opus.load_opus('libopus.so.0')
