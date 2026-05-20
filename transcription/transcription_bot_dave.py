@@ -9,6 +9,7 @@ import numpy as np
 import random
 import re
 import io
+import sys
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
@@ -32,6 +33,7 @@ logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
 logging.getLogger('faster_whisper').setLevel(logging.WARNING)
 
 # --- DAVE DECRYPTION PATCHES ---
+from discord.ext.voice_recv import rtp
 from discord.ext.voice_recv.reader import PacketDecryptor, AudioReader
 import discord.ext.voice_recv.opus as opus_module
 
@@ -406,22 +408,36 @@ class TranscriptionBot(discord.Client):
         else:
             logger.error(f"Voice channel {self.voice_id} not found.")
 
+# --- CRASH HANDLING ---
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = handle_exception
+
 # --- MAIN ---
 if __name__ == '__main__':
-    with open('credentials.json', 'r') as f:
-        config = json.load(f)
-    TOKEN = config['token']
-    VOICE_ID = int(config['world_voice'])
-    TEXT_ID = int(config['world_text'])
-    GEMINI_API_KEY = config.get('gemini_api_key')
+    try:
+        with open('credentials.json', 'r') as f:
+            config = json.load(f)
+        TOKEN = config['token']
+        VOICE_ID = int(config['world_voice'])
+        TEXT_ID = int(config['world_text'])
+        GEMINI_API_KEY = config.get('gemini_api_key')
 
-    if not discord.opus.is_loaded():
-        try: discord.opus.load_opus('libopus.so.0')
-        except: pass
+        if not discord.opus.is_loaded():
+            try: discord.opus.load_opus('libopus.so.0')
+            except: pass
 
-    logger.info("Loading Whisper model...")
-    MODEL = WhisperModel('small', device='cpu', compute_type='int8')
-    _executor = ThreadPoolExecutor(max_workers=1)
+        logger.info("Loading Whisper model...")
+        MODEL = WhisperModel('small', device='cpu', compute_type='int8')
+        _executor = ThreadPoolExecutor(max_workers=1)
 
-    bot = TranscriptionBot(VOICE_ID, TEXT_ID)
-    bot.run(TOKEN)
+        bot = TranscriptionBot(VOICE_ID, TEXT_ID)
+        bot.run(TOKEN)
+    except Exception as e:
+        logger.error(f"FATAL ERROR: {type(e).__name__}: {e}", exc_info=True)
+    finally:
+        input("\nScript halted. Press Enter to close window...")
