@@ -240,31 +240,37 @@ try:
 
     # --- BOT CLIENT ---
     class TranscriptionBot(discord.Client):
-        def __init__(self, voice_id, text_id):
-            self.voice_id = voice_id
-            self.text_id = text_id
+        def __init__(self):
             super().__init__(intents=discord.Intents.all())
 
         async def on_ready(self):
             logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
-            vc_channel = self.get_channel(self.voice_id)
-            if vc_channel:
-                try:
-                    client = await vc_channel.connect(cls=voice_recv.VoiceRecvClient)
-                    client.listen(WhisperTranscriptionSink(self, self.text_id))
-                    logger.info(f"Connected to {vc_channel.name}. Listening...")
-                except Exception as e:
-                    logger.error(f"Failed to connect to voice: {e}")
-            else:
-                logger.error(f"Voice channel {self.voice_id} not found.")
+
+            for guild in self.guilds:
+                vc_channel = discord.utils.get(guild.voice_channels, name="world")
+                text_channel = discord.utils.get(guild.text_channels, name="world")
+
+                if vc_channel and text_channel:
+                    try:
+                        if guild.voice_client:
+                            logger.info(f"Already connected in guild {guild.name}")
+                            continue
+                        client = await vc_channel.connect(cls=voice_recv.VoiceRecvClient)
+                        client.listen(WhisperTranscriptionSink(self, text_channel.id))
+                        logger.info(f"Connected to {vc_channel.name} in {guild.name}. Listening...")
+                    except Exception as e:
+                        logger.error(f"Failed to connect to voice in {guild.name}: {e}")
+                else:
+                    if not vc_channel:
+                        logger.warning(f"Voice channel 'world' not found in {guild.name}")
+                    if not text_channel:
+                        logger.warning(f"Text channel 'world' not found in {guild.name}")
 
     # --- MAIN ---
     if __name__ == '__main__':
         with open('credentials.json', 'r') as f:
             config = json.load(f)
         TOKEN = config['token']
-        VOICE_ID = int(config['world_voice'])
-        TEXT_ID = int(config['world_text'])
 
         if not discord.opus.is_loaded():
             try: discord.opus.load_opus('libopus.so.0')
@@ -274,7 +280,7 @@ try:
         MODEL = WhisperModel('small', device='cpu', compute_type='int8')
         _executor = ThreadPoolExecutor(max_workers=1)
 
-        bot = TranscriptionBot(VOICE_ID, TEXT_ID)
+        bot = TranscriptionBot()
         bot.run(TOKEN)
 
 except Exception as e:
