@@ -278,7 +278,16 @@ try:
 
                     try:
                         logger.info(f"Purge command received in {message.channel.name} from {message.author}")
-                        await message.channel.purge(limit=None)
+                        total_deleted = 0
+                        while True:
+                            deleted = await message.channel.purge(limit=100)
+                            num_deleted = len(deleted)
+                            total_deleted += num_deleted
+                            logger.info(f"Purged {num_deleted} messages in this chunk. Total deleted: {total_deleted}")
+                            if num_deleted < 100:
+                                break
+                            await asyncio.sleep(1.5)
+                        logger.info(f"Successfully completed purge of {message.channel.name}. Total deleted: {total_deleted}")
                     except discord.Forbidden:
                         logger.error(f"Failed to purge {message.channel.name}: Missing permissions.")
                     except Exception as e:
