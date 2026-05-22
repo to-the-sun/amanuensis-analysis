@@ -266,6 +266,24 @@ try:
                     if not text_channel:
                         logger.warning(f"Text channel 'world' not found in {guild.name}")
 
+        async def on_message(self, message):
+            if message.author == self.user:
+                return
+
+            if message.content.strip() == '/purge':
+                if isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
+                    if not message.author.guild_permissions.manage_messages:
+                        logger.warning(f"User {message.author} tried to purge without permissions in {message.channel.name}.")
+                        return
+
+                    try:
+                        logger.info(f"Purge command received in {message.channel.name} from {message.author}")
+                        await message.channel.purge(limit=None)
+                    except discord.Forbidden:
+                        logger.error(f"Failed to purge {message.channel.name}: Missing permissions.")
+                    except Exception as e:
+                        logger.error(f"Error during purge in {message.channel.name}: {e}")
+
     # --- MAIN ---
     if __name__ == '__main__':
         with open('credentials.json', 'r') as f:
