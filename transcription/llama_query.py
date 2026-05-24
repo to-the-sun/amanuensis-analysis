@@ -33,19 +33,14 @@ def run_query(query, system_prompt="You are a helpful and concise assistant."):
 
     print("Generating response...")
     start_time = time.time()
-    outputs = pipe(prompt, max_new_tokens=128, do_sample=True, temperature=0.7, top_k=50, top_p=0.95)
+    # return_full_text=False prevents the prompt from being included in the output
+    outputs = pipe(prompt, max_new_tokens=128, do_sample=True, temperature=0.7, top_k=50, top_p=0.95, return_full_text=False)
     gen_time = time.time() - start_time
 
-    full_text = outputs[0]["generated_text"]
+    response = outputs[0]["generated_text"].strip()
 
-    # TinyLlama template includes the full history.
-    # We want to extract just the assistant's part.
-    # The template usually ends with <|assistant|>\n
-    marker = "<|assistant|>\n"
-    if marker in full_text:
-        response = full_text.split(marker)[-1].strip()
-    else:
-        response = full_text.strip()
+    # Sometimes TinyLlama might still include some tags or artifacts depending on the version/config
+    # but return_full_text=False usually solves it for the pipeline.
 
     return response, gen_time
 
