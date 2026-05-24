@@ -313,7 +313,8 @@ try:
                         if messages_to_analyze:
                             # Join messages in chronological order (history is newest first)
                             all_text = "\n".join(reversed(messages_to_analyze))
-                            prompt = f"The following is a collection of sentences from a conversation:\n\n{all_text}\n\nYour task is to identify the single most poetic phrase from the text above. Return ONLY that phrase and nothing else. Do not repeat the prompt or explain your choice."
+                            prompt = f"The following is a collection of sentences from a conversation:\n\n{all_text}\n\nYour task is to identify the single most poetic phrase from the text above. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
+                            print(f"\n--- LLM PROMPT ---\n{prompt}\n------------------\n")
                             # Use the same executor as Whisper for LLM query
                             response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt)
                             await message.channel.send(response)
