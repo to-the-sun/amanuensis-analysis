@@ -308,7 +308,7 @@ try:
                             all_text = "\n".join(reversed(transcriptions))
                             prompt = f"The following are transcriptions of a conversation:\n\n{all_text}\n\nFind the most poetic phrase among these sentences and return ONLY that phrase."
                             # Use the same executor as Whisper for LLM query
-                            response, _ = await self.bot.loop.run_in_executor(_executor, llama_query.run_query, prompt)
+                            response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt)
                             await message.channel.send(response)
                         else:
                             await message.channel.send("No transcriptions found to analyze.")

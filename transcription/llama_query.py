@@ -63,3 +63,5 @@ if __name__ == "__main__":
     print(response)
     print("="*50)
     print(f"Generation took {duration:.2f} seconds.")
+
+    input("\nPress Enter to exit...")
