@@ -24,6 +24,7 @@ try:
     from typing import Optional
     from concurrent.futures import ThreadPoolExecutor
 
+    import llama_query
     import discord
     from discord.ext import voice_recv
     from faster_whisper import WhisperModel
@@ -272,10 +273,6 @@ try:
 
             if message.content.strip() == '/purge':
                 if isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
-                    if not message.author.guild_permissions.manage_messages:
-                        logger.warning(f"User {message.author} tried to purge without permissions in {message.channel.name}.")
-                        return
-
                     try:
                         logger.info(f"Purge command received in {message.channel.name} from {message.author}")
                         total_deleted = 0
@@ -292,6 +289,31 @@ try:
                         logger.error(f"Failed to purge {message.channel.name}: Missing permissions.")
                     except Exception as e:
                         logger.error(f"Error during purge in {message.channel.name}: {e}")
+
+            if message.content.strip() == '/analyze':
+                if isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
+                    try:
+                        logger.info(f"Analyze command received in {message.channel.name} from {message.author}")
+                        transcriptions = []
+                        async for msg in message.channel.history(limit=None):
+                            if msg.author == self.user and msg.content.startswith("**"):
+                                # Extract text after the second ** and the colon
+                                # Format is **user**: text
+                                parts = msg.content.split("**: ", 1)
+                                if len(parts) > 1:
+                                    transcriptions.append(parts[1])
+
+                        if transcriptions:
+                            # Join transcriptions in chronological order (history is newest first)
+                            all_text = "\n".join(reversed(transcriptions))
+                            prompt = f"The following are transcriptions of a conversation:\n\n{all_text}\n\nFind the most poetic phrase among these sentences and return ONLY that phrase."
+                            # Use the same executor as Whisper for LLM query
+                            response, _ = await self.bot.loop.run_in_executor(_executor, llama_query.run_query, prompt)
+                            await message.channel.send(response)
+                        else:
+                            await message.channel.send("No transcriptions found to analyze.")
+                    except Exception as e:
+                        logger.error(f"Error during analyze in {message.channel.name}: {e}")
 
     # --- MAIN ---
     if __name__ == '__main__':
