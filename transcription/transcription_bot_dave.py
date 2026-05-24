@@ -26,6 +26,7 @@ try:
 
     import llama_query
     import discord
+    from discord import app_commands
     from discord.ext import voice_recv
     from faster_whisper import WhisperModel
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -243,6 +244,83 @@ try:
     class TranscriptionBot(discord.Client):
         def __init__(self):
             super().__init__(intents=discord.Intents.all())
+            self.tree = app_commands.CommandTree(self)
+
+        async def setup_hook(self):
+            @self.tree.command(name="purge", description="Purge all messages in the world channel")
+            async def purge(interaction: discord.Interaction):
+                await self.purge_logic(interaction)
+
+            @self.tree.command(name="analyze", description="Identify the most poetic phrase in the world channel")
+            async def analyze(interaction: discord.Interaction):
+                await self.analyze_logic(interaction)
+
+            await self.tree.sync()
+            logger.info("Application commands synced.")
+
+        async def purge_logic(self, interaction: discord.Interaction):
+            if not (isinstance(interaction.channel, discord.TextChannel) and interaction.channel.name == "world"):
+                await interaction.response.send_message("This command can only be used in the 'world' channel.", ephemeral=True)
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            try:
+                logger.info(f"Purge command received in {interaction.channel.name} from {interaction.user}")
+                total_deleted = 0
+                while True:
+                    deleted = await interaction.channel.purge(limit=100)
+                    num_deleted = len(deleted)
+                    total_deleted += num_deleted
+                    logger.info(f"Purged {num_deleted} messages in this chunk. Total deleted: {total_deleted}")
+                    if num_deleted < 100:
+                        break
+                    await asyncio.sleep(1.5)
+                logger.info(f"Successfully completed purge of {interaction.channel.name}. Total deleted: {total_deleted}")
+                await interaction.followup.send(f"Successfully purged {total_deleted} messages.")
+            except discord.Forbidden:
+                logger.error(f"Failed to purge {interaction.channel.name}: Missing permissions.")
+                await interaction.followup.send("Failed to purge: Missing permissions.")
+            except Exception as e:
+                logger.error(f"Error during purge in {interaction.channel.name}: {e}")
+                await interaction.followup.send(f"Error during purge: {e}")
+
+        async def analyze_logic(self, interaction: discord.Interaction):
+            if not (isinstance(interaction.channel, discord.TextChannel) and interaction.channel.name == "world"):
+                await interaction.response.send_message("This command can only be used in the 'world' channel.", ephemeral=True)
+                return
+
+            await interaction.response.defer()
+            try:
+                logger.info(f"Analyze command received in {interaction.channel.name} from {interaction.user}")
+                messages_to_analyze = []
+                async for msg in interaction.channel.history(limit=None):
+                    # Skip common command patterns if they were typed manually
+                    if msg.content.strip() in ['/analyze', '/purge']:
+                        continue
+
+                    if msg.author == self.user:
+                        if msg.content.startswith("**"):
+                            # Transcription format is **user**: text
+                            parts = msg.content.split("**: ", 1)
+                            if len(parts) > 1:
+                                messages_to_analyze.append(parts[1])
+                    else:
+                        # Regular user message
+                        messages_to_analyze.append(msg.content)
+
+                if messages_to_analyze:
+                    # Join messages in chronological order (history is newest first)
+                    all_text = "\n".join(reversed(messages_to_analyze))
+                    prompt = f"The following is a collection of sentences from a conversation:\n\n{all_text}\n\nYour task is to identify the single most poetic phrase from the text above. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
+                    print(f"\n--- LLM PROMPT ---\n{prompt}\n------------------\n")
+                    # Use the same executor as Whisper for LLM query
+                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt)
+                    await interaction.followup.send(response)
+                else:
+                    await interaction.followup.send("No messages found to analyze.")
+            except Exception as e:
+                logger.error(f"Error during analyze in {interaction.channel.name}: {e}")
+                await interaction.followup.send(f"Error during analyze: {e}")
 
         async def on_ready(self):
             logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
@@ -268,60 +346,8 @@ try:
                         logger.warning(f"Text channel 'world' not found in {guild.name}")
 
         async def on_message(self, message):
-            if message.author == self.user:
-                return
-
-            if message.content.strip() == '/purge':
-                if isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
-                    try:
-                        logger.info(f"Purge command received in {message.channel.name} from {message.author}")
-                        total_deleted = 0
-                        while True:
-                            deleted = await message.channel.purge(limit=100)
-                            num_deleted = len(deleted)
-                            total_deleted += num_deleted
-                            logger.info(f"Purged {num_deleted} messages in this chunk. Total deleted: {total_deleted}")
-                            if num_deleted < 100:
-                                break
-                            await asyncio.sleep(1.5)
-                        logger.info(f"Successfully completed purge of {message.channel.name}. Total deleted: {total_deleted}")
-                    except discord.Forbidden:
-                        logger.error(f"Failed to purge {message.channel.name}: Missing permissions.")
-                    except Exception as e:
-                        logger.error(f"Error during purge in {message.channel.name}: {e}")
-
-            if message.content.strip() == '/analyze':
-                if isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
-                    try:
-                        logger.info(f"Analyze command received in {message.channel.name} from {message.author}")
-                        messages_to_analyze = []
-                        async for msg in message.channel.history(limit=None):
-                            # Skip the command itself and purge command
-                            if msg.content.strip() in ['/analyze', '/purge']:
-                                continue
-
-                            if msg.author == self.user:
-                                if msg.content.startswith("**"):
-                                    # Transcription format is **user**: text
-                                    parts = msg.content.split("**: ", 1)
-                                    if len(parts) > 1:
-                                        messages_to_analyze.append(parts[1])
-                            else:
-                                # Regular user message
-                                messages_to_analyze.append(msg.content)
-
-                        if messages_to_analyze:
-                            # Join messages in chronological order (history is newest first)
-                            all_text = "\n".join(reversed(messages_to_analyze))
-                            prompt = f"The following is a collection of sentences from a conversation:\n\n{all_text}\n\nYour task is to identify the single most poetic phrase from the text above. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
-                            print(f"\n--- LLM PROMPT ---\n{prompt}\n------------------\n")
-                            # Use the same executor as Whisper for LLM query
-                            response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt)
-                            await message.channel.send(response)
-                        else:
-                            await message.channel.send("No messages found to analyze.")
-                    except Exception as e:
-                        logger.error(f"Error during analyze in {message.channel.name}: {e}")
+            # We no longer handle commands here as they are migrated to Slash Commands
+            pass
 
     # --- MAIN ---
     if __name__ == '__main__':
