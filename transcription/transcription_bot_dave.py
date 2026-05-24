@@ -294,24 +294,31 @@ try:
                 if isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
                     try:
                         logger.info(f"Analyze command received in {message.channel.name} from {message.author}")
-                        transcriptions = []
+                        messages_to_analyze = []
                         async for msg in message.channel.history(limit=None):
-                            if msg.author == self.user and msg.content.startswith("**"):
-                                # Extract text after the second ** and the colon
-                                # Format is **user**: text
-                                parts = msg.content.split("**: ", 1)
-                                if len(parts) > 1:
-                                    transcriptions.append(parts[1])
+                            # Skip the command itself and purge command
+                            if msg.content.strip() in ['/analyze', '/purge']:
+                                continue
 
-                        if transcriptions:
-                            # Join transcriptions in chronological order (history is newest first)
-                            all_text = "\n".join(reversed(transcriptions))
-                            prompt = f"The following are transcriptions of a conversation:\n\n{all_text}\n\nFind the most poetic phrase among these sentences and return ONLY that phrase."
+                            if msg.author == self.user:
+                                if msg.content.startswith("**"):
+                                    # Transcription format is **user**: text
+                                    parts = msg.content.split("**: ", 1)
+                                    if len(parts) > 1:
+                                        messages_to_analyze.append(parts[1])
+                            else:
+                                # Regular user message
+                                messages_to_analyze.append(msg.content)
+
+                        if messages_to_analyze:
+                            # Join messages in chronological order (history is newest first)
+                            all_text = "\n".join(reversed(messages_to_analyze))
+                            prompt = f"The following are transcriptions and messages from a conversation:\n\n{all_text}\n\nFind the most poetic phrase among these sentences and return ONLY that phrase."
                             # Use the same executor as Whisper for LLM query
                             response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt)
                             await message.channel.send(response)
                         else:
-                            await message.channel.send("No transcriptions found to analyze.")
+                            await message.channel.send("No messages found to analyze.")
                     except Exception as e:
                         logger.error(f"Error during analyze in {message.channel.name}: {e}")
 
