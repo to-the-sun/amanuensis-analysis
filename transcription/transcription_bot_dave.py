@@ -245,6 +245,7 @@ try:
         def __init__(self):
             super().__init__(intents=discord.Intents.all())
             self.tree = app_commands.CommandTree(self)
+            self.context_window_size = None
 
         async def setup_hook(self):
             @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -294,28 +295,67 @@ try:
                 logger.info(f"Analyze command received in {interaction.channel.name} from {interaction.user}")
                 messages_to_analyze = []
                 async for msg in interaction.channel.history(limit=None):
-                    # Skip common command patterns if they were typed manually
                     if msg.content.strip() in ['/analyze', '/purge']:
                         continue
 
                     if msg.author == self.user:
                         if msg.content.startswith("**"):
-                            # Transcription format is **user**: text
                             parts = msg.content.split("**: ", 1)
                             if len(parts) > 1:
                                 messages_to_analyze.append(parts[1])
                     else:
-                        # Regular user message
                         messages_to_analyze.append(msg.content)
 
                 if messages_to_analyze:
-                    # Join messages in chronological order (history is newest first)
-                    all_text = "\n".join(reversed(messages_to_analyze))
-                    prompt = f"The following is a collection of sentences from a conversation:\n\n{all_text}\n\nYour task is to identify the single most poetic phrase from the text above. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
-                    print(f"\n--- LLM PROMPT ---\n{prompt}\n------------------\n")
-                    # Use the same executor as Whisper for LLM query
-                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt)
-                    await interaction.followup.send(response)
+                    messages_to_analyze.reverse()
+
+                    if self.context_window_size is None:
+                        self.context_window_size = await self.loop.run_in_executor(_executor, llama_query.get_max_context_length)
+
+                    MAX_NEW_TOKENS = 128
+                    current_poetic_phrase = ""
+                    chunk_messages = []
+
+                    for msg in messages_to_analyze:
+                        test_chunk = chunk_messages + [msg]
+                        test_text = "\n".join(test_chunk)
+
+                        if current_poetic_phrase:
+                            prompt = f"Previous most poetic phrase: {current_poetic_phrase}\n\nNew conversation text:\n{test_text}\n\nTask: Identify the single most poetic phrase from all the text provided above (including the previous best). Return ONLY that phrase and nothing else. No preamble, no explanation."
+                        else:
+                            prompt = f"Conversation text:\n{test_text}\n\nTask: Identify the single most poetic phrase from the text above. Return ONLY that phrase and nothing else. No preamble, no explanation."
+
+                        tokens = await self.loop.run_in_executor(_executor, llama_query.count_query_tokens, prompt)
+
+                        if tokens + MAX_NEW_TOKENS > self.context_window_size:
+                            if chunk_messages:
+                                actual_text = "\n".join(chunk_messages)
+                                if current_poetic_phrase:
+                                    actual_prompt = f"Previous most poetic phrase: {current_poetic_phrase}\n\nNew conversation text:\n{actual_text}\n\nTask: Identify the single most poetic phrase from all the text provided above (including the previous best). Return ONLY that phrase and nothing else. No preamble, no explanation."
+                                else:
+                                    actual_prompt = f"Conversation text:\n{actual_text}\n\nTask: Identify the single most poetic phrase from the text above. Return ONLY that phrase and nothing else. No preamble, no explanation."
+
+                                logger.info(f"Processing chunk of {len(chunk_messages)} messages...")
+                                response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, actual_prompt)
+                                current_poetic_phrase = response.strip()
+                                chunk_messages = [msg]
+                            else:
+                                chunk_messages = [msg]
+                        else:
+                            chunk_messages.append(msg)
+
+                    if chunk_messages:
+                        actual_text = "\n".join(chunk_messages)
+                        if current_poetic_phrase:
+                            actual_prompt = f"Previous most poetic phrase: {current_poetic_phrase}\n\nNew conversation text:\n{actual_text}\n\nTask: Identify the single most poetic phrase from all the text provided above (including the previous best). Return ONLY that phrase and nothing else. No preamble, no explanation."
+                        else:
+                            actual_prompt = f"Conversation text:\n{actual_text}\n\nTask: Identify the single most poetic phrase from the text above. Return ONLY that phrase and nothing else. No preamble, no explanation."
+
+                        logger.info(f"Processing final chunk of {len(chunk_messages)} messages...")
+                        response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, actual_prompt)
+                        current_poetic_phrase = response.strip()
+
+                    await interaction.followup.send(current_poetic_phrase)
                 else:
                     await interaction.followup.send("No messages found to analyze.")
             except Exception as e:

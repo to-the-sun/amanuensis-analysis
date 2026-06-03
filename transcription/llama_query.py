@@ -44,6 +44,23 @@ def run_query(query, system_prompt="You are a helpful and concise assistant."):
 
     return response, gen_time
 
+def get_max_context_length():
+    pipe = get_pipeline()
+    return getattr(pipe.model.config, "max_position_embeddings", 2048)
+
+def count_tokens(text):
+    pipe = get_pipeline()
+    return len(pipe.tokenizer.encode(text))
+
+def count_query_tokens(query, system_prompt="You are a helpful and concise assistant."):
+    pipe = get_pipeline()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": query},
+    ]
+    prompt = pipe.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return len(pipe.tokenizer.encode(prompt))
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         query = " ".join(sys.argv[1:])
