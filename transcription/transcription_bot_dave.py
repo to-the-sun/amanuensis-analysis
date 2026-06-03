@@ -250,6 +250,8 @@ try:
         def __init__(self):
             super().__init__(intents=discord.Intents.all())
             self.tree = app_commands.CommandTree(self)
+            self.context_window_size = 2048
+            self.prompt_overhead = 0
 
         async def setup_hook(self):
             @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -259,6 +261,10 @@ try:
             @self.tree.command(name="analyze", description="Identify the most poetic phrase in the world channel")
             async def analyze(interaction: discord.Interaction):
                 await self.analyze_logic(interaction)
+
+            self.context_window_size = llama_query.get_context_window_size()
+            self.prompt_overhead = llama_query.get_prompt_overhead()
+            logger.info(f"Context window size: {self.context_window_size}, Prompt overhead: {self.prompt_overhead}")
 
             self.loop.create_task(self.health_check_loop())
             await self.tree.sync()
@@ -300,32 +306,74 @@ try:
                 logger.info(f"Analyze command received in {interaction.channel.name} from {interaction.user}")
                 messages_to_analyze = []
                 async for msg in interaction.channel.history(limit=None):
-                    # Skip common command patterns if they were typed manually
                     if msg.content.strip() in ['/analyze', '/purge']:
                         continue
 
                     if msg.author == self.user:
                         if msg.content.startswith("**"):
-                            # Transcription format is **user**: text
                             parts = msg.content.split("**: ", 1)
                             if len(parts) > 1:
                                 messages_to_analyze.append(parts[1])
                     else:
-                        # Regular user message
                         messages_to_analyze.append(msg.content)
 
-                if messages_to_analyze:
-                    # Join messages in chronological order (history is newest first)
-                    all_text = "\n".join(reversed(messages_to_analyze))
-                    prompt = f"The following is a collection of sentences from a conversation:\n\n{all_text}\n\nYour task is to identify the single most poetic phrase from the text above. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
-                    print(f"\n--- LLM PROMPT ---\n{prompt}\n------------------\n")
-                    # Use the same executor as Whisper for LLM query
-                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt)
-                    await interaction.followup.send(response)
-                else:
+                if not messages_to_analyze:
                     await interaction.followup.send("No messages found to analyze.")
+                    return
+
+                # Process in chronological order
+                messages_to_analyze.reverse()
+
+                max_response_tokens = 128
+                prompt_template = "The following is a collection of sentences from a conversation:\n\n{text}\n\nYour task is to identify the single most poetic phrase from the text above. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
+
+                # Base prompt tokens (template minus the {text} placeholder)
+                base_prompt_tokens = llama_query.count_tokens(prompt_template.replace("{text}", ""))
+
+                # We need a buffer for the previous poetic phrase and new messages
+                # available_tokens = context_limit - system_overhead - response_buffer - base_prompt_overhead
+                available_tokens_for_content = self.context_window_size - self.prompt_overhead - max_response_tokens - base_prompt_tokens - 20 # 20 for safety
+
+                running_poetic_phrase = ""
+                current_chunk = []
+                current_chunk_tokens = 0
+
+                async def process_chunk(chunk_texts, prev_phrase):
+                    combined_text = "\n".join(chunk_texts)
+                    if prev_phrase:
+                        combined_text = f"{prev_phrase}\n{combined_text}"
+
+                    full_prompt = prompt_template.format(text=combined_text)
+                    logger.info(f"Processing chunk with {len(chunk_texts)} messages. Total tokens approx: {llama_query.count_tokens(full_prompt)}")
+                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, full_prompt)
+                    return response.strip()
+
+                for msg in messages_to_analyze:
+                    msg_tokens = llama_query.count_tokens(msg) + 1 # +1 for newline
+
+                    # If a single message is too long, we might need to truncate it, but let's assume they are reasonable.
+                    # If adding this message exceeds available tokens:
+                    prev_phrase_tokens = llama_query.count_tokens(running_poetic_phrase) if running_poetic_phrase else 0
+
+                    if current_chunk_tokens + msg_tokens + prev_phrase_tokens > available_tokens_for_content and current_chunk:
+                        # Process the current chunk before adding the new message
+                        running_poetic_phrase = await process_chunk(current_chunk, running_poetic_phrase)
+                        current_chunk = []
+                        current_chunk_tokens = 0
+                        # Recalculate prev_phrase_tokens
+                        prev_phrase_tokens = llama_query.count_tokens(running_poetic_phrase)
+
+                    current_chunk.append(msg)
+                    current_chunk_tokens += msg_tokens
+
+                # Process final chunk
+                if current_chunk:
+                    running_poetic_phrase = await process_chunk(current_chunk, running_poetic_phrase)
+
+                await interaction.followup.send(running_poetic_phrase if running_poetic_phrase else "Could not determine a poetic phrase.")
+
             except Exception as e:
-                logger.error(f"Error during analyze in {interaction.channel.name}: {e}")
+                logger.exception(f"Error during analyze in {interaction.channel.name}: {e}")
                 await interaction.followup.send(f"Error during analyze: {e}")
 
         async def connect_to_world(self, guild):

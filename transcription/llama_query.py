@@ -1,22 +1,46 @@
 import torch
-from transformers import pipeline
+from transformers import pipeline, AutoConfig, AutoTokenizer
 import time
 import sys
 
-# Global variable to cache the pipeline
+# Global variable to cache the pipeline and tokenizer
 _pipe = None
+_tokenizer = None
+MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+def get_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        _tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    return _tokenizer
 
 def get_pipeline():
     global _pipe
     if _pipe is None:
-        model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-        print(f"Loading model {model_id} on CPU...")
+        print(f"Loading model {MODEL_ID} on CPU...")
         start_time = time.time()
         # Using float32 for maximum compatibility on CPU
-        _pipe = pipeline("text-generation", model=model_id, torch_dtype=torch.float32, device="cpu")
+        _pipe = pipeline("text-generation", model=MODEL_ID, torch_dtype=torch.float32, device="cpu")
         load_time = time.time() - start_time
         print(f"Model loaded in {load_time:.2f} seconds.")
     return _pipe
+
+def get_context_window_size():
+    config = AutoConfig.from_pretrained(MODEL_ID)
+    return getattr(config, "max_position_embeddings", 2048)
+
+def count_tokens(text):
+    tokenizer = get_tokenizer()
+    return len(tokenizer.encode(text))
+
+def get_prompt_overhead(system_prompt="You are a helpful and concise assistant."):
+    tokenizer = get_tokenizer()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": ""}, # Placeholder for user content
+    ]
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return len(tokenizer.encode(prompt))
 
 def run_query(query, system_prompt="You are a helpful and concise assistant."):
     pipe = get_pipeline()
@@ -39,9 +63,6 @@ def run_query(query, system_prompt="You are a helpful and concise assistant."):
 
     response = outputs[0]["generated_text"].strip()
 
-    # Sometimes TinyLlama might still include some tags or artifacts depending on the version/config
-    # but return_full_text=False usually solves it for the pipeline.
-
     return response, gen_time
 
 if __name__ == "__main__":
@@ -49,6 +70,9 @@ if __name__ == "__main__":
         query = " ".join(sys.argv[1:])
     else:
         query = "Explain what a Self-Similarity Matrix is in the context of audio analysis."
+
+    print(f"Context window size: {get_context_window_size()}")
+    print(f"Prompt overhead: {get_prompt_overhead()}")
 
     response, duration = run_query(query)
 
