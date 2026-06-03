@@ -67,6 +67,7 @@ try:
         self._aesgcm = AESGCM(self._secret_key)
         self._dave_roc = collections.defaultdict(int)
         self._dave_last_seq = {}
+        self.consecutive_failures = 0
         return _orig_decryptor_init(self, mode, secret_key)
     PacketDecryptor.__init__ = _patched_decryptor_init
 
@@ -80,6 +81,7 @@ try:
         try:
             res = self._aesgcm.decrypt(bytes(nonce), bytes(packet.data), header)
         except Exception as e:
+            self.consecutive_failures += 1
             if packet.sequence % 100 == 0:
                 logger.error(f"Outer Decryption Failed: SSRC={packet.ssrc}, Seq={packet.sequence}, Err={type(e).__name__}: {e}")
             return None
@@ -114,12 +116,15 @@ try:
                     dec = dave.decrypt(uid, MediaType.audio, res)
                     if seq % 500 == 0:
                         logger.info(f"DAVE OK: SSRC={ssrc}, UID={uid}, Seq={seq}, ROC={roc}")
+                    self.consecutive_failures = 0
                     return dec
                 except Exception as e:
+                    self.consecutive_failures += 1
                     if seq % 100 == 0:
                         logger.warning(f"DAVE FAIL: SSRC={ssrc}, UID={uid}, Seq={seq}, ROC={roc}, Err={type(e).__name__}: {e}")
                     return None
 
+        self.consecutive_failures = 0
         return res
 
     PacketDecryptor._decrypt_rtp_aead_aes256_gcm_rtpsize = _decrypt_rtp_aead_aes256_gcm_rtpsize
@@ -255,8 +260,9 @@ try:
             async def analyze(interaction: discord.Interaction):
                 await self.analyze_logic(interaction)
 
+            self.loop.create_task(self.health_check_loop())
             await self.tree.sync()
-            logger.info("Application commands synced.")
+            logger.info("Application commands synced and health check loop started.")
 
         async def purge_logic(self, interaction: discord.Interaction):
             if not (isinstance(interaction.channel, discord.TextChannel) and interaction.channel.name == "world"):
@@ -322,28 +328,60 @@ try:
                 logger.error(f"Error during analyze in {interaction.channel.name}: {e}")
                 await interaction.followup.send(f"Error during analyze: {e}")
 
+        async def connect_to_world(self, guild):
+            vc_channel = discord.utils.get(guild.voice_channels, name="world")
+            text_channel = discord.utils.get(guild.text_channels, name="world")
+
+            if vc_channel and text_channel:
+                try:
+                    if guild.voice_client:
+                        if guild.voice_client.is_connected():
+                            return
+                        else:
+                            await guild.voice_client.disconnect(force=True)
+
+                    client = await vc_channel.connect(cls=voice_recv.VoiceRecvClient)
+                    client.listen(WhisperTranscriptionSink(self, text_channel.id))
+                    logger.info(f"Connected to {vc_channel.name} in {guild.name}. Listening...")
+                except Exception as e:
+                    logger.error(f"Failed to connect to voice in {guild.name}: {e}")
+            else:
+                if not vc_channel:
+                    logger.warning(f"Voice channel 'world' not found in {guild.name}")
+                if not text_channel:
+                    logger.warning(f"Text channel 'world' not found in {guild.name}")
+
+        async def health_check_loop(self):
+            await self.wait_until_ready()
+            while not self.is_closed():
+                try:
+                    await asyncio.sleep(20)
+                    for vc in self.voice_clients:
+                        if not isinstance(vc, voice_recv.VoiceRecvClient):
+                            continue
+
+                        reader = getattr(vc, '_reader', None)
+                        if reader:
+                            decryptor = getattr(reader, 'decryptor', None)
+                            if decryptor:
+                                failures = getattr(decryptor, 'consecutive_failures', 0)
+                                if failures > 500:
+                                    logger.warning(f"Excessive decryption failures ({failures}) detected in {vc.guild.name}. Reconnecting...")
+                                    await vc.disconnect(force=True)
+                                    await self.connect_to_world(vc.guild)
+                        else:
+                            # If we are connected but not listening, maybe we should start listening?
+                            # Or just wait for the next iteration to connect_to_world if it's completely disconnected
+                            if not vc.is_connected():
+                                await self.connect_to_world(vc.guild)
+
+                except Exception as e:
+                    logger.error(f"Error in health check loop: {e}")
+
         async def on_ready(self):
             logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
-
             for guild in self.guilds:
-                vc_channel = discord.utils.get(guild.voice_channels, name="world")
-                text_channel = discord.utils.get(guild.text_channels, name="world")
-
-                if vc_channel and text_channel:
-                    try:
-                        if guild.voice_client:
-                            logger.info(f"Already connected in guild {guild.name}")
-                            continue
-                        client = await vc_channel.connect(cls=voice_recv.VoiceRecvClient)
-                        client.listen(WhisperTranscriptionSink(self, text_channel.id))
-                        logger.info(f"Connected to {vc_channel.name} in {guild.name}. Listening...")
-                    except Exception as e:
-                        logger.error(f"Failed to connect to voice in {guild.name}: {e}")
-                else:
-                    if not vc_channel:
-                        logger.warning(f"Voice channel 'world' not found in {guild.name}")
-                    if not text_channel:
-                        logger.warning(f"Text channel 'world' not found in {guild.name}")
+                await self.connect_to_world(guild)
 
         async def on_message(self, message):
             # We no longer handle commands here as they are migrated to Slash Commands
