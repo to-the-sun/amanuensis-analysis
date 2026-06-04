@@ -68,6 +68,7 @@ try:
         self._dave_roc = collections.defaultdict(int)
         self._dave_last_seq = {}
         self.consecutive_failures = 0
+        self.last_success = time.time()
         return _orig_decryptor_init(self, mode, secret_key)
     PacketDecryptor.__init__ = _patched_decryptor_init
 
@@ -117,6 +118,7 @@ try:
                     if seq % 500 == 0:
                         logger.info(f"DAVE OK: SSRC={ssrc}, UID={uid}, Seq={seq}, ROC={roc}")
                     self.consecutive_failures = 0
+                    self.last_success = time.time()
                     return dec
                 except Exception as e:
                     self.consecutive_failures += 1
@@ -125,6 +127,7 @@ try:
                     return None
 
         self.consecutive_failures = 0
+        self.last_success = time.time()
         return res
 
     PacketDecryptor._decrypt_rtp_aead_aes256_gcm_rtpsize = _decrypt_rtp_aead_aes256_gcm_rtpsize
@@ -136,9 +139,12 @@ try:
         ciphertext = data[8:-4]
         try:
             dec = self._aesgcm.decrypt(bytes(nonce), ciphertext, header)
+            self.consecutive_failures = 0
+            self.last_success = time.time()
             return header + dec
         except Exception as e:
-            logger.error(f"RTCP Decryption Failed: Err={type(e).__name__}: {e}")
+            self.consecutive_failures += 10
+            logger.error(f"RTCP Decryption Failed (Failures={self.consecutive_failures}): Err={type(e).__name__}: {e}")
             return data
 
     PacketDecryptor._decrypt_rtcp_aead_aes256_gcm_rtpsize = _decrypt_rtcp_aead_aes256_gcm_rtpsize
@@ -413,8 +419,10 @@ try:
                             decryptor = getattr(reader, 'decryptor', None)
                             if decryptor:
                                 failures = getattr(decryptor, 'consecutive_failures', 0)
-                                if failures > 500:
-                                    logger.warning(f"Excessive decryption failures ({failures}) detected in {vc.guild.name}. Reconnecting...")
+                                last_success = getattr(decryptor, 'last_success', 0)
+                                if failures > 100 or (failures > 0 and time.time() - last_success > 30):
+                                    reason = f"Excessive failures ({failures})" if failures > 100 else f"Decryption stalled for {time.time() - last_success:.1f}s"
+                                    logger.warning(f"{reason} detected in {vc.guild.name}. Reconnecting...")
                                     await vc.disconnect(force=True)
                                     await self.connect_to_world(vc.guild)
                         else:
