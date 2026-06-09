@@ -5,8 +5,78 @@ import json
 import os
 import argparse
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 import io
 import base64
+import subprocess
+import tempfile
+import shutil
+
+def generate_video(audio_path, data):
+    """
+    Generates a video file for the analyzed audio showing a moving playhead over the transient graph.
+    """
+    print(f"Generating video for {audio_path}...")
+    try:
+        times = data['times']
+        onset_env = data['onset_env']
+        peak_times = data['peaks']['times']
+        peak_values = data['peaks']['values']
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(times, onset_env, color='#3498db', lw=2, label='Transient Envelope')
+        ax.scatter(peak_times, peak_values, color='#e74c3c', marker='x', s=50, label='Peaks')
+
+        playhead = ax.axvline(x=0, color='#e67e22', lw=2, ls='--')
+
+        ax.set_title(f"Transient Analysis - {os.path.basename(audio_path)}")
+        ax.set_xlabel("Time (seconds)")
+        ax.set_ylabel("Onset Strength")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Ensure axes are fixed to prevent jumping during animation
+        ax.set_xlim(times[0], times[-1])
+        ax.set_ylim(0, max(onset_env) * 1.1 if len(onset_env) > 0 else 1)
+
+        def update(frame):
+            playhead.set_xdata([times[frame], times[frame]])
+            return playhead,
+
+        # 100ms resolution = 10 FPS
+        ani = animation.FuncAnimation(fig, update, frames=len(times), blit=True, interval=100)
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            temp_video_path = tmp.name
+
+        writer = animation.FFMpegWriter(fps=10, metadata=dict(artist='Transient Analysis Tool'), bitrate=2000)
+        ani.save(temp_video_path, writer=writer)
+        plt.close(fig)
+
+        # Merge with original audio using ffmpeg
+        output_video = os.path.splitext(audio_path)[0] + ".mp4"
+
+        if not shutil.which("ffmpeg"):
+            print("Error: ffmpeg is not installed. Skipping video-audio merge.")
+            return
+
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', temp_video_path,
+            '-i', audio_path,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-shortest',
+            output_video
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
+
+        print(f"Video generated: {output_video}")
+    except Exception as e:
+        print(f"Error generating video for {audio_path}: {e}")
 
 def analyze_audio(file_path):
     """
@@ -116,6 +186,7 @@ def main():
         result = analyze_audio(file_path)
         if result:
             all_data[f] = result
+            generate_video(file_path, result)
 
     if not all_data:
         print("No valid audio data was processed.")
