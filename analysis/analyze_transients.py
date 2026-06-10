@@ -14,37 +14,80 @@ import shutil
 
 def generate_video(audio_path, data):
     """
-    Generates a video file for the analyzed audio showing a moving playhead over the transient graph.
+    Generates a video file for the analyzed audio showing a moving playhead over the transient graph
+    and an accumulating 10-second buffer.
     """
     print(f"Generating video for {audio_path}...")
     try:
         times = data['times']
-        onset_env = data['onset_env']
+        onset_env = np.array(data['onset_env'])
         peak_times = data['peaks']['times']
         peak_values = data['peaks']['values']
+        peak_indices = set(data['peaks']['indices'])
+        max_peak = data['max_peak_value']
 
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(times, onset_env, color='#3498db', lw=2, label='Transient Envelope')
-        ax.scatter(peak_times, peak_values, color='#e74c3c', marker='x', s=50, label='Peaks')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [1, 1]})
 
-        playhead = ax.axvline(x=0, color='#e67e22', lw=2, ls='--')
+        # Top Plot: Transient Envelope
+        ax1.plot(times, onset_env, color='#3498db', lw=2, label='Transient Envelope')
+        ax1.scatter(peak_times, peak_values, color='#e74c3c', marker='x', s=50, label='Peaks')
+        playhead = ax1.axvline(x=0, color='#e67e22', lw=2, ls='--')
+        ax1.set_title(f"Transient Analysis - {os.path.basename(audio_path)}")
+        ax1.set_ylabel("Onset Strength")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xlim(times[0], times[-1])
+        ax1.set_ylim(0, max(onset_env) * 1.1 if len(onset_env) > 0 else 1)
 
-        ax.set_title(f"Transient Analysis - {os.path.basename(audio_path)}")
-        ax.set_xlabel("Time (seconds)")
-        ax.set_ylabel("Onset Strength")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        # Bottom Plot: Accumulated 10s Buffer
+        buffer_len = 101  # 10 seconds @ 100ms = 100 steps + center
+        accumulated_buffer = np.zeros(buffer_len)
+        buffer_times = np.linspace(-5, 5, buffer_len)
+        buffer_line, = ax2.plot(buffer_times, accumulated_buffer, color='#2ecc71', lw=2)
+        ax2.set_title("Accumulated 10s Buffer")
+        ax2.set_xlabel("Time Relative to Peak (seconds)")
+        ax2.set_ylabel("Accumulated Energy")
+        ax2.grid(True, alpha=0.3)
+        ax2.set_xlim(-5, 5)
+        ax2.set_ylim(0, 1)
 
-        # Ensure axes are fixed to prevent jumping during animation
-        ax.set_xlim(times[0], times[-1])
-        ax.set_ylim(0, max(onset_env) * 1.1 if len(onset_env) > 0 else 1)
+        hanning = np.hanning(buffer_len)
 
         def update(frame):
+            # Update playhead
             playhead.set_xdata([times[frame], times[frame]])
-            return playhead,
+
+            # Check for peak
+            if frame in peak_indices:
+                start = frame - 50
+                end = frame + 50
+
+                # Extract window with padding
+                if start < 0:
+                    window = onset_env[0 : end + 1]
+                    window = np.pad(window, (abs(start), 0), mode='constant')
+                elif end >= len(onset_env):
+                    window = onset_env[start : len(onset_env)]
+                    window = np.pad(window, (0, end - len(onset_env) + 1), mode='constant')
+                else:
+                    window = onset_env[start : end + 1]
+
+                if len(window) == buffer_len:
+                    peak_val = onset_env[frame]
+                    normalization = peak_val / max_peak if max_peak > 0 else 1.0
+                    snapshot = window * hanning * normalization
+                    accumulated_buffer[:] += snapshot
+                    buffer_line.set_ydata(accumulated_buffer)
+
+                    # Dynamic Y-axis scaling for buffer
+                    current_max = np.max(accumulated_buffer)
+                    if current_max > ax2.get_ylim()[1]:
+                        ax2.set_ylim(0, current_max * 1.1)
+
+            return playhead, buffer_line
 
         # 100ms resolution = 10 FPS
-        ani = animation.FuncAnimation(fig, update, frames=len(times), blit=True, interval=100)
+        ani = animation.FuncAnimation(fig, update, frames=len(times), blit=False, interval=100)
 
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             temp_video_path = tmp.name
@@ -101,6 +144,8 @@ def analyze_audio(file_path):
 
         peak_times = times[peaks].tolist()
         peak_values = onset_env[peaks].tolist()
+        peak_indices = peaks.tolist()
+        max_peak_value = float(np.max(peak_values)) if len(peak_values) > 0 else 1.0
 
         # Normalize onset_env for weighting
         max_onset = np.max(onset_env) if np.max(onset_env) > 0 else 1
@@ -155,8 +200,10 @@ def analyze_audio(file_path):
             "onset_env": onset_env.tolist(),
             "peaks": {
                 "times": peak_times,
-                "values": peak_values
+                "values": peak_values,
+                "indices": peak_indices
             },
+            "max_peak_value": max_peak_value,
             "ssm_image": ssm_base64,
             "ssm_extent": [float(times[0]), float(times[-1])],
             "peak_similarity": peak_similarity_data
@@ -208,7 +255,8 @@ def main():
         .controls label { font-weight: bold; display: block; margin-bottom: 10px; }
         #file-select { width: 100%; padding: 10px; font-size: 16px; border-radius: 4px; border: 1px solid #ccc; }
         #audio-player { width: 100%; margin-top: 20px; }
-        #graph { width: 100%; height: 500px; margin-top: 20px; }
+        #graph { width: 100%; height: 400px; margin-top: 20px; }
+        #buffer-graph { width: 100%; height: 400px; margin-top: 20px; }
         #ssm-graph { width: 100%; height: 600px; margin-top: 30px; }
         .footnote { margin-top: 20px; padding: 15px; background: #fdf6e3; border-left: 5px solid #b58900; font-size: 14px; color: #586e75; }
         .footnote h3 { margin-top: 0; color: #b58900; }
@@ -228,6 +276,7 @@ def main():
         </div>
 
         <div id="graph"></div>
+        <div id="buffer-graph"></div>
         <div id="ssm-graph"></div>
         <div id="ssm-footnote" class="footnote"></div>
 
@@ -241,8 +290,22 @@ def main():
         const fileSelect = document.getElementById('file-select');
         const audioPlayer = document.getElementById('audio-player');
         const graphDiv = document.getElementById('graph');
+        const bufferDiv = document.getElementById('buffer-graph');
         const ssmDiv = document.getElementById('ssm-graph');
         const footnoteDiv = document.getElementById('ssm-footnote');
+
+        let accumulatedBuffer = new Array(101).fill(0);
+        let processedPeaks = new Set();
+        let lastFrameIdx = -1;
+
+        function getHanningWindow(size) {
+            let window = new Array(size);
+            for (let i = 0; i < size; i++) {
+                window[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (size - 1)));
+            }
+            return window;
+        }
+        const hanning = getHanningWindow(101);
 
         // Populate dropdown with available audio files
         Object.keys(data).forEach(filename => {
@@ -310,6 +373,29 @@ def main():
             };
 
             Plotly.newPlot(graphDiv, [traceTransient, tracePeaks], layout, config);
+
+            // Initialize Buffer Graph
+            const bufferTimes = [];
+            for (let i = -50; i <= 50; i++) bufferTimes.push(i * 0.1);
+
+            const traceBuffer = {
+                x: bufferTimes,
+                y: accumulatedBuffer,
+                mode: 'lines',
+                name: 'Accumulated Buffer',
+                line: { color: '#2ecc71', width: 2 },
+                fill: 'tozeroy'
+            };
+
+            const bufferLayout = {
+                title: 'Accumulated 10s Buffer (Real-time)',
+                xaxis: { title: 'Time Relative to Peak (seconds)' },
+                yaxis: { title: 'Accumulated Energy', autorange: true },
+                plot_bgcolor: '#fff',
+                paper_bgcolor: '#fff'
+            };
+
+            Plotly.newPlot(bufferDiv, [traceBuffer], bufferLayout, config);
 
             // Update SSM Visualization using Base64 Image
             const ssmExtent = fileData.ssm_extent;
@@ -434,6 +520,9 @@ def main():
 
         fileSelect.addEventListener('change', (e) => {
             currentFile = e.target.value;
+            accumulatedBuffer.fill(0);
+            processedPeaks.clear();
+            lastFrameIdx = -1;
             updateGraph(currentFile);
             updateAudio(currentFile);
         });
@@ -441,6 +530,50 @@ def main():
         // Synchronize playhead on the graph with audio playback
         audioPlayer.addEventListener('timeupdate', () => {
             const currentTime = audioPlayer.currentTime;
+            const fileData = data[currentFile];
+            const frameIdx = Math.floor(currentTime * 10); // 100ms resolution
+
+            // Reset if seeking back
+            if (frameIdx < lastFrameIdx) {
+                accumulatedBuffer.fill(0);
+                processedPeaks.clear();
+            }
+
+            // Check for peaks passed since last update
+            const peakIndices = fileData.peaks.indices;
+            let bufferUpdated = false;
+
+            for (let i = 0; i < peakIndices.length; i++) {
+                const peakIdx = peakIndices[i];
+                if (peakIdx <= frameIdx && !processedPeaks.has(peakIdx)) {
+                    processedPeaks.add(peakIdx);
+
+                    const start = peakIdx - 50;
+                    const end = peakIdx + 50;
+                    const window = new Array(101).fill(0);
+
+                    for (let j = 0; j <= 100; j++) {
+                        const envIdx = start + j;
+                        if (envIdx >= 0 && envIdx < fileData.onset_env.length) {
+                            window[j] = fileData.onset_env[envIdx];
+                        }
+                    }
+
+                    const peakVal = fileData.onset_env[peakIdx];
+                    const normalization = peakVal / fileData.max_peak_value;
+
+                    for (let j = 0; j < 101; j++) {
+                        accumulatedBuffer[j] += window[j] * hanning[j] * normalization;
+                    }
+                    bufferUpdated = true;
+                }
+            }
+
+            if (bufferUpdated) {
+                Plotly.restyle(bufferDiv, { y: [accumulatedBuffer] }, [0]);
+            }
+
+            lastFrameIdx = frameIdx;
 
             // Update Transient Graph Playhead
             Plotly.relayout(graphDiv, {
