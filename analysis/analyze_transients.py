@@ -39,19 +39,26 @@ def generate_video(audio_path, data):
         ax1.set_xlim(times[0], times[-1])
         ax1.set_ylim(0, max(onset_env) * 1.1 if len(onset_env) > 0 else 1)
 
-        # Bottom Plot: Accumulated 10s Buffer
-        buffer_len = 101  # 10 seconds @ 100ms = 100 steps + center
+        # Bottom Plot: Accumulated 5s Historical Buffer
+        buffer_len = 51  # 5 seconds @ 100ms = 50 steps + current
         accumulated_buffer = np.zeros(buffer_len)
-        buffer_times = np.linspace(-5, 5, buffer_len)
+        buffer_times = np.linspace(-5000, 0, buffer_len)
         buffer_line, = ax2.plot(buffer_times, accumulated_buffer, color='#2ecc71', lw=2)
-        ax2.set_title("Accumulated 10s Buffer")
-        ax2.set_xlabel("Time Relative to Peak (seconds)")
+        ax2.set_title("Accumulated 5s Historical Buffer")
+        ax2.set_xlabel("Time Relative to Peak (ms)")
         ax2.set_ylabel("Accumulated Energy")
         ax2.grid(True, alpha=0.3)
-        ax2.set_xlim(-5, 5)
+        ax2.set_xlim(-5000, 0)
         ax2.set_ylim(0, 1)
 
-        hanning = np.hanning(buffer_len)
+        # Use the first half of a 10s Hanning window so it peaks at the end
+        hanning = np.hanning(101)[:51]
+
+        # Flash and fade storage
+        active_flashes = [] # List of (snapshot, frames_remaining)
+        flash_fill_artists = []
+        peak_lines = []
+        peak_labels = []
 
         def update(frame):
             # Update playhead
@@ -60,15 +67,12 @@ def generate_video(audio_path, data):
             # Check for peak
             if frame in peak_indices:
                 start = frame - 50
-                end = frame + 50
+                end = frame
 
                 # Extract window with padding
                 if start < 0:
                     window = onset_env[0 : end + 1]
                     window = np.pad(window, (abs(start), 0), mode='constant')
-                elif end >= len(onset_env):
-                    window = onset_env[start : len(onset_env)]
-                    window = np.pad(window, (0, end - len(onset_env) + 1), mode='constant')
                 else:
                     window = onset_env[start : end + 1]
 
@@ -79,12 +83,49 @@ def generate_video(audio_path, data):
                     accumulated_buffer[:] += snapshot
                     buffer_line.set_ydata(accumulated_buffer)
 
+                    # Add new flash: (data, initial_lifetime)
+                    active_flashes.append([snapshot, 20])
+
                     # Dynamic Y-axis scaling for buffer
                     current_max = np.max(accumulated_buffer)
                     if current_max > ax2.get_ylim()[1]:
                         ax2.set_ylim(0, current_max * 1.1)
 
-            return playhead, buffer_line
+            # Handle Flash and Fade
+            for artist in flash_fill_artists:
+                artist.remove()
+            flash_fill_artists.clear()
+
+            for flash in active_flashes[:]:
+                snapshot, lifetime = flash
+                alpha = (lifetime / 20.0) * 0.5 # Max 0.5 alpha
+                fill = ax2.fill_between(buffer_times, 0, snapshot, color='#2ecc71', alpha=alpha)
+                flash_fill_artists.append(fill)
+                flash[1] -= 1
+                if flash[1] <= 0:
+                    active_flashes.remove(flash)
+
+            # Analyze peaks in the accumulated buffer
+            for line in peak_lines:
+                line.remove()
+            for label in peak_labels:
+                label.remove()
+            peak_lines.clear()
+            peak_labels.clear()
+
+            if np.max(accumulated_buffer) > 0.1:
+                # distance=5 ensures we don't have too many labels (500ms apart)
+                peaks_in_buf, _ = scipy.signal.find_peaks(accumulated_buffer, height=np.max(accumulated_buffer)*0.3, distance=5)
+                for p_idx in peaks_in_buf:
+                    ms_val = int(buffer_times[p_idx])
+                    line = ax2.axvline(x=ms_val, color='white', lw=1, alpha=0.6, ls=':')
+                    label = ax2.text(ms_val, ax2.get_ylim()[1]*0.9, f"{ms_val}ms", color='white',
+                                    fontsize=8, ha='center', fontweight='bold',
+                                    bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=1))
+                    peak_lines.append(line)
+                    peak_labels.append(label)
+
+            return [playhead, buffer_line] + flash_fill_artists + peak_lines + peak_labels
 
         # 100ms resolution = 10 FPS
         ani = animation.FuncAnimation(fig, update, frames=len(times), blit=False, interval=100)
@@ -294,8 +335,9 @@ def main():
         const ssmDiv = document.getElementById('ssm-graph');
         const footnoteDiv = document.getElementById('ssm-footnote');
 
-        let accumulatedBuffer = new Array(101).fill(0);
+        let accumulatedBuffer = new Array(51).fill(0);
         let processedPeaks = new Set();
+        let activeFlashes = []; // {snapshot: [], lifetime: 20}
         let lastFrameIdx = -1;
 
         function getHanningWindow(size) {
@@ -305,7 +347,8 @@ def main():
             }
             return window;
         }
-        const hanning = getHanningWindow(101);
+        // Use first half of 10s Hanning (101 points)
+        const hanning = getHanningWindow(101).slice(0, 51);
 
         // Populate dropdown with available audio files
         Object.keys(data).forEach(filename => {
@@ -376,7 +419,7 @@ def main():
 
             // Initialize Buffer Graph
             const bufferTimes = [];
-            for (let i = -50; i <= 50; i++) bufferTimes.push(i * 0.1);
+            for (let i = -50; i <= 0; i++) bufferTimes.push(i * 100);
 
             const traceBuffer = {
                 x: bufferTimes,
@@ -388,8 +431,8 @@ def main():
             };
 
             const bufferLayout = {
-                title: 'Accumulated 10s Buffer (Real-time)',
-                xaxis: { title: 'Time Relative to Peak (seconds)' },
+                title: 'Accumulated 5s Historical Buffer (Real-time)',
+                xaxis: { title: 'Time Relative to Peak (ms)' },
                 yaxis: { title: 'Accumulated Energy', autorange: true },
                 plot_bgcolor: '#fff',
                 paper_bgcolor: '#fff'
@@ -549,10 +592,10 @@ def main():
                     processedPeaks.add(peakIdx);
 
                     const start = peakIdx - 50;
-                    const end = peakIdx + 50;
-                    const window = new Array(101).fill(0);
+                    const end = peakIdx;
+                    const window = new Array(51).fill(0);
 
-                    for (let j = 0; j <= 100; j++) {
+                    for (let j = 0; j <= 50; j++) {
                         const envIdx = start + j;
                         if (envIdx >= 0 && envIdx < fileData.onset_env.length) {
                             window[j] = fileData.onset_env[envIdx];
@@ -562,15 +605,90 @@ def main():
                     const peakVal = fileData.onset_env[peakIdx];
                     const normalization = peakVal / fileData.max_peak_value;
 
-                    for (let j = 0; j < 101; j++) {
-                        accumulatedBuffer[j] += window[j] * hanning[j] * normalization;
+                    const snapshot = new Array(51);
+                    for (let j = 0; j < 51; j++) {
+                        snapshot[j] = window[j] * hanning[j] * normalization;
+                        accumulatedBuffer[j] += snapshot[j];
                     }
+                    activeFlashes.push({snapshot: snapshot, lifetime: 20});
                     bufferUpdated = true;
                 }
             }
 
-            if (bufferUpdated) {
-                Plotly.restyle(bufferDiv, { y: [accumulatedBuffer] }, [0]);
+            if (bufferUpdated || activeFlashes.length > 0) {
+                // Handle Flash and Fade
+                activeFlashes = activeFlashes.filter(f => f.lifetime > 0);
+                activeFlashes.forEach(f => f.lifetime--);
+
+                // Update Buffer Graph with Flashes and Peaks
+                const traces = [
+                    {
+                        x: bufferTimes,
+                        y: accumulatedBuffer,
+                        mode: 'lines',
+                        name: 'Accumulated Buffer',
+                        line: { color: '#2ecc71', width: 2 },
+                        fill: 'tozeroy'
+                    }
+                ];
+
+                activeFlashes.forEach((f, idx) => {
+                    traces.push({
+                        x: bufferTimes,
+                        y: f.snapshot,
+                        mode: 'lines',
+                        name: 'Flash ' + idx,
+                        line: { color: 'rgba(46, 204, 113, ' + (f.lifetime / 20 * 0.5) + ')', width: 0 },
+                        fill: 'tozeroy',
+                        showlegend: false,
+                        hoverinfo: 'none'
+                    });
+                });
+
+                // Peak Detection in Buffer
+                const shapes = [];
+                const annotations = [];
+                const maxVal = Math.max(...accumulatedBuffer);
+                if (maxVal > 0.1) {
+                    // Heuristic peak detection: higher than neighbors and > 30% of max
+                    for (let i = 1; i < accumulatedBuffer.length - 1; i++) {
+                        if (accumulatedBuffer[i] > accumulatedBuffer[i-1] &&
+                            accumulatedBuffer[i] > accumulatedBuffer[i+1] &&
+                            accumulatedBuffer[i] > maxVal * 0.3) {
+
+                            const msVal = bufferTimes[i];
+                            shapes.push({
+                                type: 'line',
+                                x0: msVal,
+                                x1: msVal,
+                                y0: 0,
+                                y1: 1,
+                                yref: 'paper',
+                                line: { color: 'white', width: 1, dash: 'dot', opacity: 0.6 }
+                            });
+                            annotations.push({
+                                x: msVal,
+                                y: 1,
+                                yref: 'paper',
+                                text: msVal + 'ms',
+                                showarrow: false,
+                                font: { color: 'white', size: 10, weight: 'bold' },
+                                bgcolor: 'rgba(0,0,0,0.5)',
+                                yshift: -10
+                            });
+                        }
+                    }
+                }
+
+                Plotly.react(bufferDiv, traces, {
+                    title: 'Accumulated 5s Historical Buffer (Real-time)',
+                    xaxis: { title: 'Time Relative to Peak (ms)' },
+                    yaxis: { title: 'Accumulated Energy', autorange: true },
+                    plot_bgcolor: '#333', // Darker background for better contrast with white lines
+                    paper_bgcolor: '#fff',
+                    shapes: shapes,
+                    annotations: annotations
+                });
             }
 
             lastFrameIdx = frameIdx;
