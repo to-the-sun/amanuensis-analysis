@@ -9,9 +9,9 @@ from pydub import AudioSegment
 import sys
 
 # Add the parent directory of this script's directory to sys.path so we can import cumulative_transients
-# This assumes cumulative_transients.py is in the same directory as Amanuensis.py
+# This assumes cumulative_transience.py is in the same directory as Amanuensis.py
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-import cumulative_transients
+import cumulative_transience
 
 # Global configuration
 DEFAULT_CHANNEL = "works-in-progress"  # Channel where the bot will post updates
@@ -125,9 +125,9 @@ async def periodic_task():
 
                             # Perform transient analysis and generate video
                             print(f"Performing transient analysis for {wav_file}...")
-                            analysis_data = cumulative_transients.analyze_audio(file_path)
+                            analysis_data = cumulative_transience.analyze_audio(file_path)
                             if analysis_data:
-                                video_path = cumulative_transients.generate_video(file_path, analysis_data)
+                                video_path = cumulative_transience.generate_video(file_path, analysis_data)
                                 if video_path and os.path.exists(video_path):
                                     if not os.path.exists(VIDEO_OUTPUT_DIR):
                                         os.makedirs(VIDEO_OUTPUT_DIR)

@@ -1,7 +1,7 @@
 import json
 import os
 import argparse
-import cumulative_transients
+import cumulative_transience
 
 def main():
     parser = argparse.ArgumentParser(description="Generate a transient analysis report for audio files in a directory.")
@@ -21,10 +21,10 @@ def main():
     all_data = {}
     for f in audio_files:
         file_path = os.path.join(args.dir, f)
-        result = cumulative_transients.analyze_audio(file_path)
+        result = cumulative_transience.analyze_audio(file_path)
         if result:
             all_data[f] = result
-            cumulative_transients.generate_video(file_path, result)
+            cumulative_transience.generate_video(file_path, result)
 
     if not all_data:
         print("No valid audio data was processed.")
