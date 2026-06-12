@@ -59,7 +59,7 @@ The SSM allows you to see the "DNA" of the audio's rhythm. It reveals structural
 
 2. **Run the Script:**
    ```bash
-   python analyze_transients.py --dir /path/to/audio --output report.html
+   python analyze.py --dir /path/to/audio --output report.html
    ```
 
 3. **View the Report:**
