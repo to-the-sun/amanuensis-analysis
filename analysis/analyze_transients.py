@@ -31,12 +31,13 @@ def generate_video(audio_path, data):
         # Top Plot: Transient Envelope
         ax1.plot(times, onset_env, color='#3498db', lw=2, label='Transient Envelope')
         ax1.scatter(peak_times, peak_values, color='#e74c3c', marker='x', s=50, label='Peaks')
-        playhead = ax1.axvline(x=0, color='#e67e22', lw=2, ls='--')
+        playhead = ax1.axvline(x=0, color='#e67e22', lw=2, ls='--', label='Playhead')
+        cleanup_line = ax1.axvline(x=-20, color='#9b59b6', lw=2, ls=':', label='Cleanup Sweep')
         ax1.set_title(f"Transient Analysis - {os.path.basename(audio_path)}")
         ax1.set_ylabel("Onset Strength")
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        ax1.set_xlim(times[0], times[-1])
+        ax1.set_xlim(-20, 5)
         ax1.set_ylim(0, max(onset_env) * 1.1 if len(onset_env) > 0 else 1)
 
         # Bottom Plot: Accumulated 5s Historical Buffer
@@ -59,12 +60,18 @@ def generate_video(audio_path, data):
         flash_fill_artists = []
         peak_lines = []
         peak_labels = []
+        peak_snapshots = {} # frame_idx -> snapshot
 
         def update(frame):
-            # Update playhead
-            playhead.set_xdata([times[frame], times[frame]])
+            current_time = times[frame]
+            ax1.set_xlim(current_time - 20, current_time + 5)
 
-            # Check for peak
+            # Update playhead and cleanup sweep
+            playhead.set_xdata([current_time, current_time])
+            cleanup_time = current_time - 20
+            cleanup_line.set_xdata([cleanup_time, cleanup_time])
+
+            # Check for peak at playhead
             if frame in peak_indices:
                 start = frame - 50
                 end = frame
@@ -81,6 +88,7 @@ def generate_video(audio_path, data):
                     normalization = peak_val / max_peak if max_peak > 0 else 1.0
                     snapshot = window * hanning * normalization
                     accumulated_buffer[:] += snapshot
+                    peak_snapshots[frame] = snapshot
                     buffer_line.set_ydata(accumulated_buffer)
 
                     # Add new flash: (data, initial_lifetime)
@@ -90,6 +98,13 @@ def generate_video(audio_path, data):
                     current_max = np.max(accumulated_buffer)
                     if current_max > ax2.get_ylim()[1]:
                         ax2.set_ylim(0, current_max * 1.1)
+
+            # Check for peak at cleanup sweep (20 seconds = 200 frames @ 10fps)
+            cleanup_frame = frame - 200
+            if cleanup_frame in peak_snapshots:
+                accumulated_buffer[:] -= peak_snapshots[cleanup_frame]
+                del peak_snapshots[cleanup_frame]
+                buffer_line.set_ydata(accumulated_buffer)
 
             # Handle Flash and Fade
             for artist in flash_fill_artists:
@@ -125,7 +140,7 @@ def generate_video(audio_path, data):
                     peak_lines.append(line)
                     peak_labels.append(label)
 
-            return [playhead, buffer_line] + flash_fill_artists + peak_lines + peak_labels
+            return [playhead, cleanup_line, buffer_line] + flash_fill_artists + peak_lines + peak_labels
 
         # 100ms resolution = 10 FPS
         ani = animation.FuncAnimation(fig, update, frames=len(times), blit=False, interval=100)
@@ -337,8 +352,13 @@ def main():
 
         let accumulatedBuffer = new Array(51).fill(0);
         let processedPeaks = new Set();
+        let cleanedPeaks = new Set();
+        let peakSnapshots = {}; // peakIdx -> snapshot
         let activeFlashes = []; // {snapshot: [], lifetime: 20}
         let lastFrameIdx = -1;
+
+        const bufferTimes = [];
+        for (let i = -50; i <= 0; i++) bufferTimes.push(i * 100);
 
         function getHanningWindow(size) {
             let window = new Array(size);
@@ -403,6 +423,19 @@ def main():
                         dash: 'dash'
                     },
                     name: 'playhead'
+                }, {
+                    type: 'line',
+                    x0: -20,
+                    x1: -20,
+                    y0: 0,
+                    y1: 1,
+                    yref: 'paper',
+                    line: {
+                        color: '#9b59b6',
+                        width: 2,
+                        dash: 'dot'
+                    },
+                    name: 'cleanup'
                 }],
                 dragmode: 'zoom',
                 hovermode: 'closest',
@@ -418,9 +451,6 @@ def main():
             Plotly.newPlot(graphDiv, [traceTransient, tracePeaks], layout, config);
 
             // Initialize Buffer Graph
-            const bufferTimes = [];
-            for (let i = -50; i <= 0; i++) bufferTimes.push(i * 100);
-
             const traceBuffer = {
                 x: bufferTimes,
                 y: accumulatedBuffer,
@@ -565,6 +595,8 @@ def main():
             currentFile = e.target.value;
             accumulatedBuffer.fill(0);
             processedPeaks.clear();
+            cleanedPeaks.clear();
+            peakSnapshots = {};
             lastFrameIdx = -1;
             updateGraph(currentFile);
             updateAudio(currentFile);
@@ -575,11 +607,14 @@ def main():
             const currentTime = audioPlayer.currentTime;
             const fileData = data[currentFile];
             const frameIdx = Math.floor(currentTime * 10); // 100ms resolution
+            const cleanupFrameIdx = frameIdx - 200; // 20 seconds behind
 
-            // Reset if seeking back
-            if (frameIdx < lastFrameIdx) {
+            // Reset if seeking (forward or backward to keep it simple and accurate)
+            if (Math.abs(frameIdx - lastFrameIdx) > 2) {
                 accumulatedBuffer.fill(0);
                 processedPeaks.clear();
+                cleanedPeaks.clear();
+                peakSnapshots = {};
             }
 
             // Check for peaks passed since last update
@@ -588,7 +623,9 @@ def main():
 
             for (let i = 0; i < peakIndices.length; i++) {
                 const peakIdx = peakIndices[i];
-                if (peakIdx <= frameIdx && !processedPeaks.has(peakIdx)) {
+
+                // Add peak if it's passed the playhead but not the cleanup sweep
+                if (peakIdx <= frameIdx && peakIdx > cleanupFrameIdx && !processedPeaks.has(peakIdx)) {
                     processedPeaks.add(peakIdx);
 
                     const start = peakIdx - 50;
@@ -610,7 +647,21 @@ def main():
                         snapshot[j] = window[j] * hanning[j] * normalization;
                         accumulatedBuffer[j] += snapshot[j];
                     }
+                    peakSnapshots[peakIdx] = snapshot;
                     activeFlashes.push({snapshot: snapshot, lifetime: 20});
+                    bufferUpdated = true;
+                }
+
+                // Subtract peak if it's passed the cleanup sweep
+                if (peakIdx <= cleanupFrameIdx && processedPeaks.has(peakIdx) && !cleanedPeaks.has(peakIdx)) {
+                    const snapshot = peakSnapshots[peakIdx];
+                    if (snapshot) {
+                        for (let j = 0; j < 51; j++) {
+                            accumulatedBuffer[j] -= snapshot[j];
+                        }
+                        delete peakSnapshots[peakIdx];
+                    }
+                    cleanedPeaks.add(peakIdx);
                     bufferUpdated = true;
                 }
             }
@@ -693,10 +744,13 @@ def main():
 
             lastFrameIdx = frameIdx;
 
-            // Update Transient Graph Playhead
+            // Update Transient Graph Playhead and Range
             Plotly.relayout(graphDiv, {
+                'xaxis.range': [currentTime - 20, currentTime + 5],
                 'shapes[0].x0': currentTime,
-                'shapes[0].x1': currentTime
+                'shapes[0].x1': currentTime,
+                'shapes[1].x0': currentTime - 20,
+                'shapes[1].x1': currentTime - 20
             });
 
             // Update SSM Crosshair Playhead
