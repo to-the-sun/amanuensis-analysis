@@ -3,12 +3,25 @@ import json
 import os
 import asyncio
 import re
+import shutil
 from datetime import datetime, timezone, timedelta
 from pydub import AudioSegment
+import sys
+
+# Add the directory containing cumulative_transients.py to sys.path
+# Since this script is in transcription/, and cumulative_transients.py is in analysis/
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'analysis'))
+try:
+    import cumulative_transients
+except ImportError:
+    # Fallback in case it's in the same directory (though we just put it in analysis/)
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    import cumulative_transients
 
 # Global configuration
 DEFAULT_CHANNEL = "works-in-progress"  # Channel where the bot will post updates
 CHECK_INTERVAL = 30  # seconds
+VIDEO_OUTPUT_DIR = r'D:\[Library]\[Video]\[Works]\[Uploads]'
 
 # Load credentials from a separate file
 with open('credentials.json') as f:
@@ -114,6 +127,19 @@ async def periodic_task():
                                 file=discord.File(mp3_path)
                             )
                             os.remove(mp3_path)
+
+                            # Perform transient analysis and generate video
+                            print(f"Performing transient analysis for {wav_file}...")
+                            analysis_data = cumulative_transients.analyze_audio(file_path)
+                            if analysis_data:
+                                video_path = cumulative_transients.generate_video(file_path, analysis_data)
+                                if video_path and os.path.exists(video_path):
+                                    if not os.path.exists(VIDEO_OUTPUT_DIR):
+                                        os.makedirs(VIDEO_OUTPUT_DIR)
+                                    dest_path = os.path.join(VIDEO_OUTPUT_DIR, os.path.basename(video_path))
+                                    shutil.move(video_path, dest_path)
+                                    print(f"Moved video to {dest_path}")
+
                             last_uploaded_song = file_name  # Track the last uploaded song
                             await asyncio.sleep(2)  # Add delay to avoid rate limiting
                             uploads_occurred = True  # Set flag to indicate an upload occurred
