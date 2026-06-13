@@ -252,7 +252,7 @@ try:
                             text = await self.bot.loop.run_in_executor(_executor, self._transcribe, mono_16k)
                             if text:
                                 clean_text = self._poetic_parse(text)
-                                logger.info(f"AQUA RESULT [{user}]:\n{clean_text}")
+                                logger.info(f"AQUA RESULT [{user}]:\n{text}")
                                 channel = self.bot.get_channel(self.text_id)
                                 if channel: await channel.send(f"**{user}**:\n{clean_text}")
 
