@@ -85,7 +85,7 @@ def main():
         const ssmDiv = document.getElementById('ssm-graph');
         const footnoteDiv = document.getElementById('ssm-footnote');
 
-        let accumulatedBuffer = new Array(51).fill(0);
+        let accumulatedBuffer = new Array(5001).fill(0);
         let processedPeaks = new Set();
         let cleanedPeaks = new Set();
         let peakSnapshots = {}; // peakIdx -> snapshot
@@ -93,17 +93,7 @@ def main():
         let lastFrameIdx = -1;
 
         const bufferTimes = [];
-        for (let i = -50; i <= 0; i++) bufferTimes.push(i * 100);
-
-        function getHanningWindow(size) {
-            let window = new Array(size);
-            for (let i = 0; i < size; i++) {
-                window[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (size - 1)));
-            }
-            return window;
-        }
-        // Use first half of 10s Hanning (101 points)
-        const hanning = getHanningWindow(101).slice(0, 51);
+        for (let i = -5000; i <= 0; i++) bufferTimes.push(i);
 
         // Populate dropdown with available audio files
         Object.keys(data).forEach(filename => {
@@ -160,8 +150,8 @@ def main():
                     name: 'playhead'
                 }, {
                     type: 'line',
-                    x0: -20,
-                    x1: -20,
+                    x0: -15,
+                    x1: -15,
                     y0: 0,
                     y1: 1,
                     yref: 'paper',
@@ -341,11 +331,12 @@ def main():
         audioPlayer.addEventListener('timeupdate', () => {
             const currentTime = audioPlayer.currentTime;
             const fileData = data[currentFile];
-            const frameIdx = Math.floor(currentTime * 10); // 100ms resolution
-            const cleanupFrameIdx = frameIdx - 200; // 20 seconds behind
+            const frameIdx = Math.floor(currentTime * 1000); // 1ms resolution
+            const cleanupFrameIdx = frameIdx - 15000; // 15 seconds behind
 
             // Reset if seeking (forward or backward to keep it simple and accurate)
-            if (Math.abs(frameIdx - lastFrameIdx) > 2) {
+            // Use 100ms threshold for reset
+            if (Math.abs(frameIdx - lastFrameIdx) > 100) {
                 accumulatedBuffer.fill(0);
                 processedPeaks.clear();
                 cleanedPeaks.clear();
@@ -363,11 +354,11 @@ def main():
                 if (peakIdx <= frameIdx && peakIdx > cleanupFrameIdx && !processedPeaks.has(peakIdx)) {
                     processedPeaks.add(peakIdx);
 
-                    const start = peakIdx - 50;
+                    const start = peakIdx - 5000;
                     const end = peakIdx;
-                    const window = new Array(51).fill(0);
+                    const window = new Array(5001).fill(0);
 
-                    for (let j = 0; j <= 50; j++) {
+                    for (let j = 0; j <= 5000; j++) {
                         const envIdx = start + j;
                         if (envIdx >= 0 && envIdx < fileData.onset_env.length) {
                             window[j] = fileData.onset_env[envIdx];
@@ -377,9 +368,9 @@ def main():
                     const peakVal = fileData.onset_env[peakIdx];
                     const normalization = peakVal / fileData.max_peak_value;
 
-                    const snapshot = new Array(51);
-                    for (let j = 0; j < 51; j++) {
-                        snapshot[j] = window[j] * hanning[j] * normalization;
+                    const snapshot = new Array(5001);
+                    for (let j = 0; j < 5001; j++) {
+                        snapshot[j] = window[j] * normalization;
                         accumulatedBuffer[j] += snapshot[j];
                     }
                     peakSnapshots[peakIdx] = snapshot;
@@ -391,7 +382,7 @@ def main():
                 if (peakIdx <= cleanupFrameIdx && processedPeaks.has(peakIdx) && !cleanedPeaks.has(peakIdx)) {
                     const snapshot = peakSnapshots[peakIdx];
                     if (snapshot) {
-                        for (let j = 0; j < 51; j++) {
+                        for (let j = 0; j < 5001; j++) {
                             accumulatedBuffer[j] -= snapshot[j];
                         }
                         delete peakSnapshots[peakIdx];
@@ -435,36 +426,55 @@ def main():
                 const shapes = [];
                 const annotations = [];
                 const maxVal = Math.max(...accumulatedBuffer);
-                if (maxVal > 0.1) {
-                    // Heuristic peak detection: higher than neighbors and > 30% of max
+                const detectedPeaks = [];
+                if (maxVal > 0.01) {
+                    const localMaxima = [];
                     for (let i = 1; i < accumulatedBuffer.length - 1; i++) {
                         if (accumulatedBuffer[i] > accumulatedBuffer[i-1] &&
                             accumulatedBuffer[i] > accumulatedBuffer[i+1] &&
-                            accumulatedBuffer[i] > maxVal * 0.3) {
+                            accumulatedBuffer[i] > 0.01) {
+                            localMaxima.push({idx: i, val: accumulatedBuffer[i]});
+                        }
+                    }
+                    localMaxima.sort((a, b) => b.val - a.val);
 
-                            const msVal = bufferTimes[i];
-                            shapes.push({
-                                type: 'line',
-                                x0: msVal,
-                                x1: msVal,
-                                y0: 0,
-                                y1: 1,
-                                yref: 'paper',
-                                line: { color: 'white', width: 1, dash: 'dot', opacity: 0.6 }
-                            });
-                            annotations.push({
-                                x: msVal,
-                                y: 1,
-                                yref: 'paper',
-                                text: msVal + 'ms',
-                                showarrow: false,
-                                font: { color: 'white', size: 10, weight: 'bold' },
-                                bgcolor: 'rgba(0,0,0,0.5)',
-                                yshift: -10
-                            });
+                    for (let i = 0; i < localMaxima.length && detectedPeaks.length < 3; i++) {
+                        const peak = localMaxima[i];
+                        let tooClose = false;
+                        for (const existing of detectedPeaks) {
+                            if (Math.abs(existing.idx - peak.idx) < 200) {
+                                tooClose = true;
+                                break;
+                            }
+                        }
+                        if (!tooClose) {
+                            detectedPeaks.push(peak);
                         }
                     }
                 }
+
+                detectedPeaks.forEach(peak => {
+                    const msVal = bufferTimes[peak.idx];
+                    shapes.push({
+                        type: 'line',
+                        x0: msVal,
+                        x1: msVal,
+                        y0: 0,
+                        y1: 1,
+                        yref: 'paper',
+                        line: { color: 'white', width: 1, dash: 'dash', opacity: 0.8 }
+                    });
+                    annotations.push({
+                        x: msVal,
+                        y: 1,
+                        yref: 'paper',
+                        text: msVal + 'ms',
+                        showarrow: false,
+                        font: { color: 'white', size: 10, weight: 'bold' },
+                        bgcolor: 'rgba(0,0,0,0.5)',
+                        yshift: -10
+                    });
+                });
 
                 Plotly.react(bufferDiv, traces, {
                     title: 'Accumulated 5s Historical Buffer (Real-time)',
@@ -481,11 +491,11 @@ def main():
 
             // Update Transient Graph Playhead and Range
             Plotly.relayout(graphDiv, {
-                'xaxis.range': [currentTime - 20, currentTime + 5],
+                'xaxis.range': [currentTime - 15, currentTime + 5],
                 'shapes[0].x0': currentTime,
                 'shapes[0].x1': currentTime,
-                'shapes[1].x0': currentTime - 20,
-                'shapes[1].x1': currentTime - 20
+                'shapes[1].x0': currentTime - 15,
+                'shapes[1].x1': currentTime - 15
             });
 
             // Update SSM Crosshair Playhead
