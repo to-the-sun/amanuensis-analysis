@@ -212,10 +212,16 @@ try:
             # but NOT internal hyphens.
             # We use | as a temporary delimiter for dashes to simplify splitting
             normalized = re.sub(r'—|–|--|\s-\s', '|', text)
-            parts = re.split(r'[.!?,;:()|]', normalized)
+            # Use capturing groups to keep track of delimiters
+            parts = re.split(r'([.!?,;:()|])', normalized)
 
             lines = []
             for part in parts:
+                if part in ".!?,;:()|":
+                    if part == "?" and lines:
+                        lines[-1] += "?"
+                    continue
+
                 clean = part.strip()
                 if clean:
                     # Lowercase the first character
