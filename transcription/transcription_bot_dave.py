@@ -315,13 +315,20 @@ try:
                     if msg.content.strip() in ['/analyze', '/purge']:
                         continue
 
+                    content = ""
                     if msg.author == self.user:
                         if msg.content.startswith("**"):
                             parts = msg.content.split("**: ", 1)
                             if len(parts) > 1:
-                                messages_to_analyze.append(parts[1])
+                                content = parts[1]
                     else:
-                        messages_to_analyze.append(msg.content)
+                        content = msg.content
+
+                    if content:
+                        for line in content.splitlines():
+                            line_strip = line.strip()
+                            if line_strip:
+                                messages_to_analyze.append(line_strip)
 
                 if not messages_to_analyze:
                     await interaction.followup.send("No messages found to analyze.")
@@ -331,7 +338,7 @@ try:
                 messages_to_analyze.reverse()
 
                 max_response_tokens = 128
-                prompt_template = "The following is a collection of sentences from a conversation:\n\n{text}\n\nYour task is to identify the single most poetic phrase from the text above. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
+                prompt_template = "The following is a collection of phrases from a conversation, with each phrase on a new line:\n\n{text}\n\nYour task is to identify the single most poetic phrase from the text above. Each line should be considered its own phrase, and each phrase should compete with one another. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
 
                 # Base prompt tokens (template minus the {text} placeholder)
                 base_prompt_tokens = llama_query.count_tokens(prompt_template.replace("{text}", ""))
