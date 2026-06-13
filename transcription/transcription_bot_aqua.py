@@ -216,9 +216,7 @@ try:
 
             lines = []
             for part in parts:
-                # Remove remaining punctuation except hyphens
-                clean = re.sub(r'[^a-zA-Z0-9\s-]', '', part)
-                clean = clean.strip()
+                clean = part.strip()
                 if clean:
                     # Lowercase the first character
                     clean = clean[0].lower() + clean[1:]
