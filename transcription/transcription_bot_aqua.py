@@ -13,6 +13,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 sys.excepthook = handle_exception
 
 try:
+    import re
     import os
     import wave
     import io
@@ -206,6 +207,24 @@ try:
 
         def wants_opus(self): return False
 
+        def _poetic_parse(self, text):
+            # Split by punctuation: . ! ? , ; : ( ) and dashes (em, en, double-hyphen, spaced-hyphen)
+            # but NOT internal hyphens.
+            # We use | as a temporary delimiter for dashes to simplify splitting
+            normalized = re.sub(r'—|–|--|\s-\s', '|', text)
+            parts = re.split(r'[.!?,;:()|]', normalized)
+
+            lines = []
+            for part in parts:
+                # Remove remaining punctuation except hyphens
+                clean = re.sub(r'[^a-zA-Z0-9\s-]', '', part)
+                clean = clean.strip()
+                if clean:
+                    # Lowercase the first character
+                    clean = clean[0].lower() + clean[1:]
+                    lines.append(clean)
+            return '\n'.join(lines)
+
         def write(self, user, data):
             if data.pcm:
                 with self.lock:
@@ -234,10 +253,10 @@ try:
                             mono_16k = audio_float32.mean(axis=1)[::3]
                             text = await self.bot.loop.run_in_executor(_executor, self._transcribe, mono_16k)
                             if text:
-                                clean_text = text.strip()
-                                logger.info(f"AQUA RESULT [{user}]: {clean_text}")
+                                clean_text = self._poetic_parse(text)
+                                logger.info(f"AQUA RESULT [{user}]:\n{clean_text}")
                                 channel = self.bot.get_channel(self.text_id)
-                                if channel: await channel.send(f"**{user}**: {clean_text}")
+                                if channel: await channel.send(f"**{user}**:\n{clean_text}")
 
                         with self.lock:
                             self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
