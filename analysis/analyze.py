@@ -188,7 +188,7 @@ def main():
             const bufferLayout = {
                 title: 'Accumulated 5s Historical Buffer (Real-time)',
                 xaxis: { title: 'Time Relative to Peak (ms)' },
-                yaxis: { title: 'Accumulated Energy', autorange: true },
+                yaxis: { title: 'Accumulated Energy', range: [0, 0.1], autorange: false },
                 plot_bgcolor: '#fff',
                 paper_bgcolor: '#fff'
             };
@@ -483,10 +483,13 @@ def main():
                     });
                 });
 
+                const maxValExcludingZero = Math.max(...accumulatedBuffer.slice(0, -1));
+                const bufferYMax = Math.max(0.1, maxValExcludingZero * 1.1);
+
                 Plotly.react(bufferDiv, traces, {
                     title: 'Accumulated 5s Historical Buffer (Real-time)',
                     xaxis: { title: 'Time Relative to Peak (ms)' },
-                    yaxis: { title: 'Accumulated Energy', autorange: true },
+                    yaxis: { title: 'Accumulated Energy', range: [0, bufferYMax], autorange: false },
                     plot_bgcolor: '#333', // Darker background for better contrast with white lines
                     paper_bgcolor: '#fff',
                     shapes: shapes,
