@@ -280,12 +280,37 @@ try:
 
         def _poetic_parse(self, text):
             try:
-                prompt = f"Transcription: {text}\n\nPoetic lines:"
-                system_prompt = "Split the transcription into short coherent phrases. Return ONLY the phrases."
+                prompt = f"""Task: Split the given transcription into short poetic lines. Use ONLY the original words. Do NOT add any words.
 
-                # Using temperature 0.5 to allow for some creativity while maintaining structure
-                response, _ = llama_query.run_query(prompt, system_prompt, temperature=0.5)
-                return response.strip()
+Transcription: I have a dream that one day this nation will rise up and live out the true meaning of its creed
+Poetic Lines:
+I have a dream
+that one day this nation
+will rise up
+and live out the true meaning
+of its creed
+
+Transcription: {text}
+Poetic Lines:"""
+                system_prompt = "You are a poetic assistant. You return ONLY the lines."
+
+                logger.info(f"LLM PROMPT:\n{prompt}")
+
+                # Using low temperature for strict adherence
+                response, _ = llama_query.run_query(prompt, system_prompt, temperature=0.1)
+
+                # Post-process to extract only the generated lines
+                lines = response.split('\n')
+                cleaned = []
+                for line in lines:
+                    line_stripped = line.strip()
+                    if line_stripped.startswith("Transcription:") or line_stripped.startswith("Poetic Lines:") or line_stripped == "":
+                        if cleaned: break # Stop if we hit a new block
+                        continue
+                    cleaned.append(line_stripped)
+
+                result = "\n".join(cleaned)
+                return result if result else text
             except Exception as e:
                 logger.error(f"Poetic parsing error: {e}")
                 return text
