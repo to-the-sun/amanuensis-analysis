@@ -98,7 +98,9 @@ def generate_video(audio_path, data):
                         active_flashes.append([snapshot, 20])
 
             # Dynamic Y-axis scaling for buffer (excluding peak at 0ms)
-            current_max = np.max(accumulated_buffer[:-1]) if len(accumulated_buffer) > 0 else 0
+            # We ignore the last 100ms (-99ms to 0ms) to avoid scaling by the alignment peak.
+            # This is an arbitrary value but works well in practice.
+            current_max = np.max(accumulated_buffer[:-100]) if len(accumulated_buffer) > 100 else 0
             ax2.set_ylim(0, max(0.1, current_max * 1.1))
 
             # Check for peak at cleanup sweep (15 seconds = 15000 frames @ 1ms)

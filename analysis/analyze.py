@@ -483,7 +483,9 @@ def main():
                     });
                 });
 
-                const maxValExcludingZero = Math.max(...accumulatedBuffer.slice(0, -1));
+                // Ignore the last 100ms (-99ms to 0ms) for scaling to avoid the alignment peak.
+                // This 100ms window is arbitrary but works in practice.
+                const maxValExcludingZero = Math.max(...accumulatedBuffer.slice(0, -100));
                 const bufferYMax = Math.max(0.1, maxValExcludingZero * 1.1);
 
                 Plotly.react(bufferDiv, traces, {
