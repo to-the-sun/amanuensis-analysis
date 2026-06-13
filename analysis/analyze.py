@@ -453,8 +453,15 @@ def main():
                     }
                 }
 
-                detectedPeaks.forEach(peak => {
+                const peakStyles = [
+                    { color: '#f1c40f', width: 2, opacity: 1.0 }, // 1st: Gold
+                    { color: '#ecf0f1', width: 1.5, opacity: 0.9 }, // 2nd: Silver
+                    { color: '#bdc3c7', width: 1, opacity: 0.8 } // 3rd: Bronze
+                ];
+
+                detectedPeaks.forEach((peak, i) => {
                     const msVal = bufferTimes[peak.idx];
+                    const style = peakStyles[i] || peakStyles[2];
                     shapes.push({
                         type: 'line',
                         x0: msVal,
@@ -462,15 +469,15 @@ def main():
                         y0: 0,
                         y1: 1,
                         yref: 'paper',
-                        line: { color: 'white', width: 1, dash: 'dash', opacity: 0.8 }
+                        line: { color: style.color, width: style.width, dash: 'dash', opacity: style.opacity }
                     });
                     annotations.push({
                         x: msVal,
-                        y: 1,
+                        y: 1 - (i * 0.05),
                         yref: 'paper',
                         text: msVal + 'ms',
                         showarrow: false,
-                        font: { color: 'white', size: 10, weight: 'bold' },
+                        font: { color: style.color, size: 10, weight: 'bold' },
                         bgcolor: 'rgba(0,0,0,0.5)',
                         yshift: -10
                     });
@@ -491,7 +498,7 @@ def main():
 
             // Update Transient Graph Playhead and Range
             Plotly.relayout(graphDiv, {
-                'xaxis.range': [currentTime - 15, currentTime + 5],
+                'xaxis.range': [currentTime - 20, currentTime + 5],
                 'shapes[0].x0': currentTime,
                 'shapes[0].x1': currentTime,
                 'shapes[1].x0': currentTime - 15,

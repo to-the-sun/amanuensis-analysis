@@ -36,7 +36,7 @@ def generate_video(audio_path, data):
         ax1.set_ylabel("Onset Strength")
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        ax1.set_xlim(-15, 5)
+        ax1.set_xlim(-20, 5)
         ax1.set_ylim(0, max(onset_env) * 1.1 if len(onset_env) > 0 else 1)
 
         # Bottom Plot: Accumulated 5s Historical Buffer
@@ -63,7 +63,7 @@ def generate_video(audio_path, data):
 
         def update(frame):
             current_time = times[frame]
-            ax1.set_xlim(current_time - 15, current_time + 5)
+            ax1.set_xlim(current_time - 20, current_time + 5)
 
             # Update playhead and cleanup sweep
             playhead.set_xdata([current_time, current_time])
@@ -143,11 +143,20 @@ def generate_video(audio_path, data):
                     peak_heights = props['peak_heights']
                     top_indices = np.argsort(peak_heights)[-3:][::-1]
 
-                    for idx in top_indices:
+                    peak_styles = [
+                        {'color': '#f1c40f', 'lw': 2, 'alpha': 1.0}, # 1st: Gold
+                        {'color': '#ecf0f1', 'lw': 1.5, 'alpha': 0.9}, # 2nd: Silver
+                        {'color': '#bdc3c7', 'lw': 1, 'alpha': 0.8}, # 3rd: Bronze
+                    ]
+
+                    for i, idx in enumerate(top_indices):
                         p_idx = peaks_in_buf[idx]
                         ms_val = int(buffer_times[p_idx])
-                        line = ax2.axvline(x=ms_val, color='white', lw=1, alpha=0.8, ls='--')
-                        label = ax2.text(ms_val, ax2.get_ylim()[1]*0.9, f"{ms_val}ms", color='white',
+                        style = peak_styles[i] if i < len(peak_styles) else peak_styles[-1]
+
+                        line = ax2.axvline(x=ms_val, color=style['color'], lw=style['lw'], alpha=style['alpha'], ls='--')
+                        label = ax2.text(ms_val, ax2.get_ylim()[1]*0.9 - (i * 0.05 * ax2.get_ylim()[1]),
+                                        f"{ms_val}ms", color=style['color'],
                                         fontsize=8, ha='center', fontweight='bold',
                                         bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=1))
                         peak_lines.append(line)
