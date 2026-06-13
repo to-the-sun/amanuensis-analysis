@@ -26,6 +26,8 @@ try:
     from typing import Optional
     from concurrent.futures import ThreadPoolExecutor
 
+    _executor = ThreadPoolExecutor(max_workers=1)
+
     import llama_query
     import discord
     from discord import app_commands
@@ -236,8 +238,12 @@ try:
                             if text:
                                 clean_text = text.strip()
                                 logger.info(f"AQUA RESULT [{user}]: {clean_text}")
-                                channel = self.bot.get_channel(self.text_id)
-                                if channel: await channel.send(f"**{user}**: {clean_text}")
+
+                                poetic_text = await self.bot.loop.run_in_executor(_executor, self._poetic_parse, clean_text)
+                                if poetic_text:
+                                    logger.info(f"POETIC PARSE [{user}]: {poetic_text}")
+                                    channel = self.bot.get_channel(self.text_id)
+                                    if channel: await channel.send(f"**{user}**:\n{poetic_text}")
 
                         with self.lock:
                             self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
@@ -271,6 +277,18 @@ try:
             except Exception as e:
                 logger.error(f"Aqua transcription error: {e}")
                 return ""
+
+        def _poetic_parse(self, text):
+            try:
+                prompt = f"Transcription: {text}\n\nPoetic lines:"
+                system_prompt = "Split the transcription into short coherent phrases. Return ONLY the phrases."
+
+                # Using temperature 0.5 to allow for some creativity while maintaining structure
+                response, _ = llama_query.run_query(prompt, system_prompt, temperature=0.5)
+                return response.strip()
+            except Exception as e:
+                logger.error(f"Poetic parsing error: {e}")
+                return text
 
     # --- BOT CLIENT ---
     class TranscriptionBot(discord.Client):
@@ -474,8 +492,6 @@ try:
         if not discord.opus.is_loaded():
             try: discord.opus.load_opus('libopus.so.0')
             except: pass
-
-        _executor = ThreadPoolExecutor(max_workers=1)
 
         bot = TranscriptionBot()
         bot.run(TOKEN)

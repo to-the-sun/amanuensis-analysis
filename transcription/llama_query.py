@@ -42,7 +42,7 @@ def get_prompt_overhead(system_prompt="You are a helpful and concise assistant."
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     return len(tokenizer.encode(prompt))
 
-def run_query(query, system_prompt="You are a helpful and concise assistant."):
+def run_query(query, system_prompt="You are a helpful and concise assistant.", max_new_tokens=128, temperature=0.7, do_sample=True):
     pipe = get_pipeline()
 
     messages = [
@@ -58,7 +58,7 @@ def run_query(query, system_prompt="You are a helpful and concise assistant."):
     print("Generating response...")
     start_time = time.time()
     # return_full_text=False prevents the prompt from being included in the output
-    outputs = pipe(prompt, max_new_tokens=128, do_sample=True, temperature=0.7, top_k=50, top_p=0.95, return_full_text=False)
+    outputs = pipe(prompt, max_new_tokens=max_new_tokens, do_sample=do_sample, temperature=temperature, top_k=50, top_p=0.95, return_full_text=False)
     gen_time = time.time() - start_time
 
     response = outputs[0]["generated_text"].strip()
