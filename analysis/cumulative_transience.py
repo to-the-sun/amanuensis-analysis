@@ -4,6 +4,7 @@ import scipy.signal
 import os
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from tqdm import tqdm
 import io
 import base64
 import subprocess
@@ -166,13 +167,21 @@ def generate_video(audio_path, data):
             return [playhead, cleanup_line, buffer_line] + flash_fill_artists + peak_lines + peak_labels
 
         # Update every 100ms, stepping 100 frames (1ms each)
-        ani = animation.FuncAnimation(fig, update, frames=range(0, len(times), 100), blit=False, interval=100)
+        frame_indices = range(0, len(times), 100)
+        num_frames = len(frame_indices)
+        ani = animation.FuncAnimation(fig, update, frames=frame_indices, blit=False, interval=100)
 
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             temp_video_path = tmp.name
 
+        pbar = tqdm(total=num_frames, desc="Rendering Video", unit="frame")
+        def progress_callback(i, n):
+            pbar.n = i + 1
+            pbar.refresh()
+
         writer = animation.FFMpegWriter(fps=10, metadata=dict(artist='Transient Analysis Tool'), bitrate=2000)
-        ani.save(temp_video_path, writer=writer)
+        ani.save(temp_video_path, writer=writer, progress_callback=progress_callback)
+        pbar.close()
         plt.close(fig)
 
         # Merge with original audio using ffmpeg
