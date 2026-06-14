@@ -79,6 +79,25 @@ def convert_wav_to_mp3(wav_path, mp3_path):
     print(f'Converted {wav_path} to {mp3_path} with bitrate {int(bitrate)}k')
     print(f'Estimated file size: {estimated_size / (1024 * 1024):.2f} MB')
 
+def process_transient_analysis(file_path):
+    """
+    Synchronous helper to perform CPU-intensive transient analysis and video generation.
+    Designed to be run in a separate thread.
+    """
+    try:
+        print(f"Performing transient analysis for {os.path.basename(file_path)}...")
+        analysis_data = cumulative_transience.analyze_audio(file_path)
+        if analysis_data:
+            video_path = cumulative_transience.generate_video(file_path, analysis_data)
+            if video_path and os.path.exists(video_path):
+                if not os.path.exists(VIDEO_OUTPUT_DIR):
+                    os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
+                dest_path = os.path.join(VIDEO_OUTPUT_DIR, os.path.basename(video_path))
+                shutil.move(video_path, dest_path)
+                print(f"Moved video to {dest_path}")
+    except Exception as e:
+        print(f"Error during transient analysis processing for {file_path}: {e}")
+
 async def periodic_task():
     await client.wait_until_ready()
     channel = discord.utils.get(client.get_all_channels(), name=DEFAULT_CHANNEL)
@@ -123,17 +142,8 @@ async def periodic_task():
                             )
                             os.remove(mp3_path)
 
-                            # Perform transient analysis and generate video
-                            print(f"Performing transient analysis for {wav_file}...")
-                            analysis_data = cumulative_transience.analyze_audio(file_path)
-                            if analysis_data:
-                                video_path = cumulative_transience.generate_video(file_path, analysis_data)
-                                if video_path and os.path.exists(video_path):
-                                    if not os.path.exists(VIDEO_OUTPUT_DIR):
-                                        os.makedirs(VIDEO_OUTPUT_DIR)
-                                    dest_path = os.path.join(VIDEO_OUTPUT_DIR, os.path.basename(video_path))
-                                    shutil.move(video_path, dest_path)
-                                    print(f"Moved video to {dest_path}")
+                            # Perform transient analysis and generate video in a separate thread to avoid blocking the heartbeat
+                            await asyncio.to_thread(process_transient_analysis, file_path)
 
                             last_uploaded_song = file_name  # Track the last uploaded song
                             await asyncio.sleep(2)  # Add delay to avoid rate limiting
