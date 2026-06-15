@@ -27,6 +27,11 @@ try:
     from typing import Optional
     from concurrent.futures import ThreadPoolExecutor
 
+    import nltk
+    from nltk.corpus import cmudict
+    import syllables
+    from hyphen import Hyphenator
+
     import llama_query
     import discord
     from discord import app_commands
@@ -190,6 +195,35 @@ try:
         try: return _orig_decode_packet(self, packet)
         except Exception: return packet, b''
     opus_module.PacketDecoder._decode_packet = _patched_decode_packet
+
+    # --- SYLLABLE UTILITIES ---
+    try:
+        CMU_DICT = cmudict.dict()
+    except LookupError:
+        nltk.download('cmudict')
+        CMU_DICT = cmudict.dict()
+
+    HYPHENATOR = Hyphenator('en_US')
+
+    def count_syllables_word(word):
+        clean_word = word.lower().strip(".,!?:;()\"'")
+        if not clean_word:
+            return 0
+        if clean_word in CMU_DICT:
+            return max([len([y for y in x if y[-1].isdigit()]) for x in CMU_DICT[clean_word]])
+        return syllables.estimate(clean_word)
+
+    def hyphenate_word(word):
+        # We only want to hyphenate the alphabetic part of the word
+        match = re.match(r"^([^a-zA-Z]*)([a-zA-Z]+)([^a-zA-Z]*)$", word)
+        if not match:
+            return word
+
+        prefix, core, suffix = match.groups()
+        syls = HYPHENATOR.syllables(core)
+        if syls:
+            return prefix + "-".join(syls) + suffix
+        return word
 
     # --- TRANSCRIPTION SINK ---
     class AquaTranscriptionSink(voice_recv.AudioSink):
@@ -365,86 +399,42 @@ try:
 
             await interaction.response.defer()
             try:
-                logger.info(f"Analyze command (syllables) received in {interaction.channel.name} from {interaction.user}")
+                logger.info(f"Analyze command (syllables + hyphenation) received in {interaction.channel.name} from {interaction.user}")
                 await interaction.followup.send("Starting syllable analysis and message editing...")
 
-                # Collect all bot messages and their lines
-                bot_messages = []
-                all_lines_to_process = []
-
                 async for msg in interaction.channel.history(limit=None):
-                    if msg.author == self.user:
-                        bot_messages.append(msg)
-                        lines = msg.content.splitlines()
-                        for line in lines:
-                            _, cleaned_content = self._get_cleaned_content(line)
-                            if cleaned_content:
-                                all_lines_to_process.append(cleaned_content)
+                    if msg.author != self.user:
+                        continue
 
-                if not all_lines_to_process:
-                    await interaction.followup.send("No lines found to analyze.")
-                    return
-
-                # Deduplicate to save LLM calls
-                unique_lines = list(set(all_lines_to_process))
-                line_to_syllables = {}
-
-                # Batch processing
-                max_response_tokens = 512
-                prompt_template = "For each line of text provided below, count the number of syllables. Respond with a list of numbers only, separated by commas, in the same order as the lines.\n\nLines:\n{text}"
-                base_prompt_tokens = llama_query.count_tokens(prompt_template.replace("{text}", ""))
-                available_tokens = self.context_window_size - self.prompt_overhead - max_response_tokens - base_prompt_tokens - 50
-
-                current_batch = []
-                current_batch_tokens = 0
-
-                async def process_batch(batch):
-                    text = "\n".join(batch)
-                    full_prompt = prompt_template.format(text=text)
-                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, full_prompt, "You are a precise linguistics assistant.", max_response_tokens)
-                    counts = re.findall(r'\d+', response)
-                    return counts
-
-                for line in unique_lines:
-                    line_tokens = llama_query.count_tokens(line) + 1
-                    if current_batch_tokens + line_tokens > available_tokens and current_batch:
-                        counts = await process_batch(current_batch)
-                        for i, count in enumerate(counts):
-                            if i < len(current_batch):
-                                line_to_syllables[current_batch[i]] = count
-                        current_batch = []
-                        current_batch_tokens = 0
-
-                    current_batch.append(line)
-                    current_batch_tokens += line_tokens
-
-                if current_batch:
-                    counts = await process_batch(current_batch)
-                    for i, count in enumerate(counts):
-                        if i < len(current_batch):
-                            line_to_syllables[current_batch[i]] = count
-
-                # Update messages
-                for msg in bot_messages:
                     lines = msg.content.splitlines()
                     new_lines = []
                     changed = False
+
                     for line in lines:
                         prefix, cleaned_content = self._get_cleaned_content(line)
-                        if cleaned_content in line_to_syllables:
-                            count = line_to_syllables[cleaned_content]
-                            new_line = f"{prefix}{cleaned_content} ({count})"
-                            if new_line != line:
-                                changed = True
-                            new_lines.append(new_line)
-                        else:
+                        if not cleaned_content:
                             new_lines.append(line)
+                            continue
+
+                        # Process words for hyphenation and count syllables
+                        words = cleaned_content.split()
+                        hyphenated_words = [hyphenate_word(w) for w in words]
+                        # Use the ORIGINAL cleaned_content words for counting to match CMUdict better,
+                        # but hyphenate_word handles prefixes/suffixes so it's fine either way.
+                        total_syls = sum(count_syllables_word(w) for w in words)
+
+                        hyphenated_content = " ".join(hyphenated_words)
+                        new_line = f"{prefix}{hyphenated_content} ({total_syls})"
+
+                        if new_line != line:
+                            changed = True
+                        new_lines.append(new_line)
 
                     if changed:
                         await msg.edit(content="\n".join(new_lines))
                         await asyncio.sleep(0.5) # Rate limit safety
 
-                await interaction.followup.send("Syllable analysis complete.")
+                await interaction.followup.send("Syllable analysis and hyphenation complete.")
 
             except Exception as e:
                 logger.exception(f"Error during analyze (syllables) in {interaction.channel.name}: {e}")
