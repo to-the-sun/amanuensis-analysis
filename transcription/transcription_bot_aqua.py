@@ -297,6 +297,18 @@ try:
 
     # --- BOT CLIENT ---
     class TranscriptionBot(discord.Client):
+        def _get_cleaned_content(self, line):
+            prefix = ""
+            content = line
+            if line.startswith("**"):
+                parts = line.split("**: ", 1)
+                if len(parts) > 1:
+                    prefix = parts[0] + "**: "
+                    content = parts[1]
+
+            cleaned_content = re.sub(r'\s*\(\d+\)$', '', content).strip()
+            return prefix, cleaned_content
+
         def __init__(self):
             super().__init__(intents=discord.Intents.all())
             self.tree = app_commands.CommandTree(self)
@@ -308,7 +320,7 @@ try:
             async def purge(interaction: discord.Interaction):
                 await self.purge_logic(interaction)
 
-            @self.tree.command(name="analyze", description="Identify the most poetic phrase in the world channel")
+            @self.tree.command(name="analyze", description="Count syllables in each line of the world channel and edit messages to display them")
             async def analyze(interaction: discord.Interaction):
                 await self.analyze_logic(interaction)
 
@@ -353,84 +365,89 @@ try:
 
             await interaction.response.defer()
             try:
-                logger.info(f"Analyze command received in {interaction.channel.name} from {interaction.user}")
-                messages_to_analyze = []
+                logger.info(f"Analyze command (syllables) received in {interaction.channel.name} from {interaction.user}")
+                await interaction.followup.send("Starting syllable analysis and message editing...")
+
+                # Collect all bot messages and their lines
+                bot_messages = []
+                all_lines_to_process = []
+
                 async for msg in interaction.channel.history(limit=None):
-                    if msg.content.strip() in ['/analyze', '/purge']:
-                        continue
-
-                    content = ""
                     if msg.author == self.user:
-                        if msg.content.startswith("**"):
-                            parts = msg.content.split("**: ", 1)
-                            if len(parts) > 1:
-                                content = parts[1]
-                    else:
-                        content = msg.content
+                        bot_messages.append(msg)
+                        lines = msg.content.splitlines()
+                        for line in lines:
+                            _, cleaned_content = self._get_cleaned_content(line)
+                            if cleaned_content:
+                                all_lines_to_process.append(cleaned_content)
 
-                    if content:
-                        for line in content.splitlines():
-                            line_strip = line.strip()
-                            if line_strip:
-                                messages_to_analyze.append(line_strip)
-
-                if not messages_to_analyze:
-                    await interaction.followup.send("No messages found to analyze.")
+                if not all_lines_to_process:
+                    await interaction.followup.send("No lines found to analyze.")
                     return
 
-                # Process in chronological order
-                messages_to_analyze.reverse()
+                # Deduplicate to save LLM calls
+                unique_lines = list(set(all_lines_to_process))
+                line_to_syllables = {}
 
-                max_response_tokens = 128
-                prompt_template = "The following is a collection of phrases from a conversation, with each phrase on a new line:\n\n{text}\n\nYour task is to identify the single most poetic phrase from the text above. Each line should be considered its own phrase, and each phrase should compete with one another. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
-
-                # Base prompt tokens (template minus the {text} placeholder)
+                # Batch processing
+                max_response_tokens = 512
+                prompt_template = "For each line of text provided below, count the number of syllables. Respond with a list of numbers only, separated by commas, in the same order as the lines.\n\nLines:\n{text}"
                 base_prompt_tokens = llama_query.count_tokens(prompt_template.replace("{text}", ""))
+                available_tokens = self.context_window_size - self.prompt_overhead - max_response_tokens - base_prompt_tokens - 50
 
-                # We need a buffer for the previous poetic phrase and new messages
-                # available_tokens = context_limit - system_overhead - response_buffer - base_prompt_overhead
-                available_tokens_for_content = self.context_window_size - self.prompt_overhead - max_response_tokens - base_prompt_tokens - 20 # 20 for safety
+                current_batch = []
+                current_batch_tokens = 0
 
-                running_poetic_phrase = ""
-                current_chunk = []
-                current_chunk_tokens = 0
+                async def process_batch(batch):
+                    text = "\n".join(batch)
+                    full_prompt = prompt_template.format(text=text)
+                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, full_prompt, "You are a precise linguistics assistant.", max_response_tokens)
+                    counts = re.findall(r'\d+', response)
+                    return counts
 
-                async def process_chunk(chunk_texts, prev_phrase):
-                    combined_text = "\n".join(chunk_texts)
-                    if prev_phrase:
-                        combined_text = f"{prev_phrase}\n{combined_text}"
+                for line in unique_lines:
+                    line_tokens = llama_query.count_tokens(line) + 1
+                    if current_batch_tokens + line_tokens > available_tokens and current_batch:
+                        counts = await process_batch(current_batch)
+                        for i, count in enumerate(counts):
+                            if i < len(current_batch):
+                                line_to_syllables[current_batch[i]] = count
+                        current_batch = []
+                        current_batch_tokens = 0
 
-                    full_prompt = prompt_template.format(text=combined_text)
-                    logger.info(f"Processing chunk with {len(chunk_texts)} messages. Total tokens approx: {llama_query.count_tokens(full_prompt)}")
-                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, full_prompt)
-                    return response.strip()
+                    current_batch.append(line)
+                    current_batch_tokens += line_tokens
 
-                for msg in messages_to_analyze:
-                    msg_tokens = llama_query.count_tokens(msg) + 1 # +1 for newline
+                if current_batch:
+                    counts = await process_batch(current_batch)
+                    for i, count in enumerate(counts):
+                        if i < len(current_batch):
+                            line_to_syllables[current_batch[i]] = count
 
-                    # If a single message is too long, we might need to truncate it, but let's assume they are reasonable.
-                    # If adding this message exceeds available tokens:
-                    prev_phrase_tokens = llama_query.count_tokens(running_poetic_phrase) if running_poetic_phrase else 0
+                # Update messages
+                for msg in bot_messages:
+                    lines = msg.content.splitlines()
+                    new_lines = []
+                    changed = False
+                    for line in lines:
+                        prefix, cleaned_content = self._get_cleaned_content(line)
+                        if cleaned_content in line_to_syllables:
+                            count = line_to_syllables[cleaned_content]
+                            new_line = f"{prefix}{cleaned_content} ({count})"
+                            if new_line != line:
+                                changed = True
+                            new_lines.append(new_line)
+                        else:
+                            new_lines.append(line)
 
-                    if current_chunk_tokens + msg_tokens + prev_phrase_tokens > available_tokens_for_content and current_chunk:
-                        # Process the current chunk before adding the new message
-                        running_poetic_phrase = await process_chunk(current_chunk, running_poetic_phrase)
-                        current_chunk = []
-                        current_chunk_tokens = 0
-                        # Recalculate prev_phrase_tokens
-                        prev_phrase_tokens = llama_query.count_tokens(running_poetic_phrase)
+                    if changed:
+                        await msg.edit(content="\n".join(new_lines))
+                        await asyncio.sleep(0.5) # Rate limit safety
 
-                    current_chunk.append(msg)
-                    current_chunk_tokens += msg_tokens
-
-                # Process final chunk
-                if current_chunk:
-                    running_poetic_phrase = await process_chunk(current_chunk, running_poetic_phrase)
-
-                await interaction.followup.send(running_poetic_phrase if running_poetic_phrase else "Could not determine a poetic phrase.")
+                await interaction.followup.send("Syllable analysis complete.")
 
             except Exception as e:
-                logger.exception(f"Error during analyze in {interaction.channel.name}: {e}")
+                logger.exception(f"Error during analyze (syllables) in {interaction.channel.name}: {e}")
                 await interaction.followup.send(f"Error during analyze: {e}")
 
         async def connect_to_world(self, guild):
