@@ -27,6 +27,11 @@ try:
     from typing import Optional
     from concurrent.futures import ThreadPoolExecutor
 
+    import nltk
+    from nltk.corpus import cmudict
+    import syllables
+    from hyphen import Hyphenator
+
     import llama_query
     import discord
     from discord import app_commands
@@ -191,6 +196,35 @@ try:
         except Exception: return packet, b''
     opus_module.PacketDecoder._decode_packet = _patched_decode_packet
 
+    # --- SYLLABLE UTILITIES ---
+    try:
+        CMU_DICT = cmudict.dict()
+    except LookupError:
+        nltk.download('cmudict')
+        CMU_DICT = cmudict.dict()
+
+    HYPHENATOR = Hyphenator('en_US')
+
+    def count_syllables_word(word):
+        clean_word = word.lower().strip(".,!?:;()\"'")
+        if not clean_word:
+            return 0
+        if clean_word in CMU_DICT:
+            return max([len([y for y in x if y[-1].isdigit()]) for x in CMU_DICT[clean_word]])
+        return syllables.estimate(clean_word)
+
+    def hyphenate_word(word):
+        # We only want to hyphenate the alphabetic part of the word
+        match = re.match(r"^([^a-zA-Z]*)([a-zA-Z]+)([^a-zA-Z]*)$", word)
+        if not match:
+            return word
+
+        prefix, core, suffix = match.groups()
+        syls = HYPHENATOR.syllables(core)
+        if syls:
+            return prefix + "-".join(syls) + suffix
+        return word
+
     # --- TRANSCRIPTION SINK ---
     class AquaTranscriptionSink(voice_recv.AudioSink):
         def __init__(self, bot, text_id):
@@ -297,6 +331,18 @@ try:
 
     # --- BOT CLIENT ---
     class TranscriptionBot(discord.Client):
+        def _get_cleaned_content(self, line):
+            prefix = ""
+            content = line
+            if line.startswith("**"):
+                parts = line.split("**: ", 1)
+                if len(parts) > 1:
+                    prefix = parts[0] + "**: "
+                    content = parts[1]
+
+            cleaned_content = re.sub(r'\s*\(\d+\)$', '', content).strip()
+            return prefix, cleaned_content
+
         def __init__(self):
             super().__init__(intents=discord.Intents.all())
             self.tree = app_commands.CommandTree(self)
@@ -308,7 +354,7 @@ try:
             async def purge(interaction: discord.Interaction):
                 await self.purge_logic(interaction)
 
-            @self.tree.command(name="analyze", description="Identify the most poetic phrase in the world channel")
+            @self.tree.command(name="analyze", description="Count syllables in each line of the world channel and edit messages to display them")
             async def analyze(interaction: discord.Interaction):
                 await self.analyze_logic(interaction)
 
@@ -353,84 +399,45 @@ try:
 
             await interaction.response.defer()
             try:
-                logger.info(f"Analyze command received in {interaction.channel.name} from {interaction.user}")
-                messages_to_analyze = []
+                logger.info(f"Analyze command (syllables + hyphenation) received in {interaction.channel.name} from {interaction.user}")
+                await interaction.followup.send("Starting syllable analysis and message editing...")
+
                 async for msg in interaction.channel.history(limit=None):
-                    if msg.content.strip() in ['/analyze', '/purge']:
+                    if msg.author != self.user:
                         continue
 
-                    content = ""
-                    if msg.author == self.user:
-                        if msg.content.startswith("**"):
-                            parts = msg.content.split("**: ", 1)
-                            if len(parts) > 1:
-                                content = parts[1]
-                    else:
-                        content = msg.content
+                    lines = msg.content.splitlines()
+                    new_lines = []
+                    changed = False
 
-                    if content:
-                        for line in content.splitlines():
-                            line_strip = line.strip()
-                            if line_strip:
-                                messages_to_analyze.append(line_strip)
+                    for line in lines:
+                        prefix, cleaned_content = self._get_cleaned_content(line)
+                        if not cleaned_content:
+                            new_lines.append(line)
+                            continue
 
-                if not messages_to_analyze:
-                    await interaction.followup.send("No messages found to analyze.")
-                    return
+                        # Process words for hyphenation and count syllables
+                        words = cleaned_content.split()
+                        hyphenated_words = [hyphenate_word(w) for w in words]
+                        # Use the ORIGINAL cleaned_content words for counting to match CMUdict better,
+                        # but hyphenate_word handles prefixes/suffixes so it's fine either way.
+                        total_syls = sum(count_syllables_word(w) for w in words)
 
-                # Process in chronological order
-                messages_to_analyze.reverse()
+                        hyphenated_content = " ".join(hyphenated_words)
+                        new_line = f"{prefix}{hyphenated_content} ({total_syls})"
 
-                max_response_tokens = 128
-                prompt_template = "The following is a collection of phrases from a conversation, with each phrase on a new line:\n\n{text}\n\nYour task is to identify the single most poetic phrase from the text above. Each line should be considered its own phrase, and each phrase should compete with one another. It is extremely important that you return ONLY that phrase and nothing else. Do not explain your choice or provide any introductory text. Just the single most poetic phrase."
+                        if new_line != line:
+                            changed = True
+                        new_lines.append(new_line)
 
-                # Base prompt tokens (template minus the {text} placeholder)
-                base_prompt_tokens = llama_query.count_tokens(prompt_template.replace("{text}", ""))
+                    if changed:
+                        await msg.edit(content="\n".join(new_lines))
+                        await asyncio.sleep(0.5) # Rate limit safety
 
-                # We need a buffer for the previous poetic phrase and new messages
-                # available_tokens = context_limit - system_overhead - response_buffer - base_prompt_overhead
-                available_tokens_for_content = self.context_window_size - self.prompt_overhead - max_response_tokens - base_prompt_tokens - 20 # 20 for safety
-
-                running_poetic_phrase = ""
-                current_chunk = []
-                current_chunk_tokens = 0
-
-                async def process_chunk(chunk_texts, prev_phrase):
-                    combined_text = "\n".join(chunk_texts)
-                    if prev_phrase:
-                        combined_text = f"{prev_phrase}\n{combined_text}"
-
-                    full_prompt = prompt_template.format(text=combined_text)
-                    logger.info(f"Processing chunk with {len(chunk_texts)} messages. Total tokens approx: {llama_query.count_tokens(full_prompt)}")
-                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, full_prompt)
-                    return response.strip()
-
-                for msg in messages_to_analyze:
-                    msg_tokens = llama_query.count_tokens(msg) + 1 # +1 for newline
-
-                    # If a single message is too long, we might need to truncate it, but let's assume they are reasonable.
-                    # If adding this message exceeds available tokens:
-                    prev_phrase_tokens = llama_query.count_tokens(running_poetic_phrase) if running_poetic_phrase else 0
-
-                    if current_chunk_tokens + msg_tokens + prev_phrase_tokens > available_tokens_for_content and current_chunk:
-                        # Process the current chunk before adding the new message
-                        running_poetic_phrase = await process_chunk(current_chunk, running_poetic_phrase)
-                        current_chunk = []
-                        current_chunk_tokens = 0
-                        # Recalculate prev_phrase_tokens
-                        prev_phrase_tokens = llama_query.count_tokens(running_poetic_phrase)
-
-                    current_chunk.append(msg)
-                    current_chunk_tokens += msg_tokens
-
-                # Process final chunk
-                if current_chunk:
-                    running_poetic_phrase = await process_chunk(current_chunk, running_poetic_phrase)
-
-                await interaction.followup.send(running_poetic_phrase if running_poetic_phrase else "Could not determine a poetic phrase.")
+                await interaction.followup.send("Syllable analysis and hyphenation complete.")
 
             except Exception as e:
-                logger.exception(f"Error during analyze in {interaction.channel.name}: {e}")
+                logger.exception(f"Error during analyze (syllables) in {interaction.channel.name}: {e}")
                 await interaction.followup.send(f"Error during analyze: {e}")
 
         async def connect_to_world(self, guild):
