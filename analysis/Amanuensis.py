@@ -113,9 +113,6 @@ async def periodic_task():
                         last_post_time = await get_last_post_time(channel)
                         print(f'  Last post time: {last_post_time}')
                         wav_files = [f for f in os.listdir(UPLOADS_DIR) if f.endswith('.wav')]
-                        uploads_occurred = False  # Flag to track if any uploads happened
-                        last_uploaded_song = None  # Track the last uploaded song name
-                        
                         for wav_file in wav_files:
                             file_path = os.path.join(UPLOADS_DIR, wav_file)
                             file_name = os.path.splitext(wav_file)[0]
@@ -142,34 +139,23 @@ async def periodic_task():
                             )
                             os.remove(mp3_path)
 
-                            # Perform transient analysis and generate video in a separate thread to avoid blocking the heartbeat
-                            await asyncio.to_thread(process_transient_analysis, file_path)
-
-                            last_uploaded_song = file_name  # Track the last uploaded song
-                            await asyncio.sleep(2)  # Add delay to avoid rate limiting
-                            uploads_occurred = True  # Set flag to indicate an upload occurred
-
-                        # After all uploads, clean up general channel and post notification
-                        # Only if uploads actually occurred
-                        if uploads_occurred:
+                            # Clean up general channel and post notification
                             for ch in guild.text_channels:
                                 if ch.name == "general":
                                     # Delete all previous bot messages in general
                                     async for message in ch.history(limit=None):
-                                        #print(f"Message author: {message.author.id}, Client user: {client.user.id}, Match: {message.author.id == client.user.id}")
                                         if message.author == client.user:
                                             await message.delete()
                                             await asyncio.sleep(0.5)  # Add small delay to avoid rate limiting
                                     
-                                    # Find the works-in-progress channel to create the link
-                                    wip_channel = next((c for c in guild.text_channels if c.name == DEFAULT_CHANNEL), None)
-                                    if wip_channel:
-                                        if last_uploaded_song:
-                                            await ch.send(f"{wip_channel.mention} updated with the newest version of **{last_uploaded_song}**")
-                                        else:
-                                            await ch.send(f"{wip_channel.mention} updated")
+                                    await ch.send(f"{channel.mention} updated with the newest version of **{file_name}**")
                                     await asyncio.sleep(1)
                                     break
+
+                            # Perform transient analysis and generate video in a separate thread backgrounded to avoid blocking the heartbeat
+                            asyncio.create_task(asyncio.to_thread(process_transient_analysis, file_path))
+
+                            await asyncio.sleep(2)  # Add delay to avoid rate limiting
             
             await asyncio.sleep(CHECK_INTERVAL)
         except Exception as e:
