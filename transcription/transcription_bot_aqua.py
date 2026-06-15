@@ -30,7 +30,6 @@ try:
     import nltk
     from nltk.corpus import cmudict
     import syllables
-    from hyphen import Hyphenator
 
     import llama_query
     import discord
@@ -46,6 +45,8 @@ try:
     logger = logging.getLogger(__name__)
     logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
+
+    _executor = ThreadPoolExecutor(max_workers=1)
 
     # --- DAVE DECRYPTION PATCHES ---
     from discord.ext.voice_recv import rtp
@@ -203,8 +204,6 @@ try:
         nltk.download('cmudict')
         CMU_DICT = cmudict.dict()
 
-    HYPHENATOR = Hyphenator('en_US')
-
     def count_syllables_word(word):
         clean_word = word.lower().strip(".,!?:;()\"'")
         if not clean_word:
@@ -212,18 +211,6 @@ try:
         if clean_word in CMU_DICT:
             return max([len([y for y in x if y[-1].isdigit()]) for x in CMU_DICT[clean_word]])
         return syllables.estimate(clean_word)
-
-    def hyphenate_word(word):
-        # We only want to hyphenate the alphabetic part of the word
-        match = re.match(r"^([^a-zA-Z]*)([a-zA-Z]+)([^a-zA-Z]*)$", word)
-        if not match:
-            return word
-
-        prefix, core, suffix = match.groups()
-        syls = HYPHENATOR.syllables(core)
-        if syls:
-            return prefix + "-".join(syls) + suffix
-        return word
 
     # --- TRANSCRIPTION SINK ---
     class AquaTranscriptionSink(voice_recv.AudioSink):
@@ -399,9 +386,10 @@ try:
 
             await interaction.response.defer()
             try:
-                logger.info(f"Analyze command (syllables + hyphenation) received in {interaction.channel.name} from {interaction.user}")
-                await interaction.followup.send("Starting syllable analysis and message editing...")
+                logger.info(f"Analyze command (syllables + poem) received in {interaction.channel.name} from {interaction.user}")
+                await interaction.followup.send("Starting syllable analysis and poem generation...")
 
+                collected_lines = []
                 async for msg in interaction.channel.history(limit=None):
                     if msg.author != self.user:
                         continue
@@ -416,15 +404,12 @@ try:
                             new_lines.append(line)
                             continue
 
-                        # Process words for hyphenation and count syllables
+                        # Count syllables
                         words = cleaned_content.split()
-                        hyphenated_words = [hyphenate_word(w) for w in words]
-                        # Use the ORIGINAL cleaned_content words for counting to match CMUdict better,
-                        # but hyphenate_word handles prefixes/suffixes so it's fine either way.
                         total_syls = sum(count_syllables_word(w) for w in words)
 
-                        hyphenated_content = " ".join(hyphenated_words)
-                        new_line = f"{prefix}{hyphenated_content} ({total_syls})"
+                        collected_lines.append(f"{cleaned_content} ({total_syls})")
+                        new_line = f"{prefix}{cleaned_content} ({total_syls})"
 
                         if new_line != line:
                             changed = True
@@ -434,10 +419,24 @@ try:
                         await msg.edit(content="\n".join(new_lines))
                         await asyncio.sleep(0.5) # Rate limit safety
 
-                await interaction.followup.send("Syllable analysis and hyphenation complete.")
+                if collected_lines:
+                    # We reverse so they are in chronological order for the prompt if desired,
+                    # history(limit=None) usually goes newest to oldest.
+                    collected_lines.reverse()
+
+                    await interaction.followup.send("Generating poem from rhyming lines...")
+                    prompt = "From the following list of lines and their syllable counts, find lines that rhyme and have the same syllable count. Arrange them into a poem. Only return the poem text, no introductory or concluding remarks. Lines:\n" + "\n".join(collected_lines)
+
+                    # run_query returns (response, duration)
+                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt, "You are a poetic assistant.", 512)
+
+                    if response:
+                        await interaction.channel.send(f"**Poem Generated from Analysis:**\n\n{response}")
+
+                await interaction.followup.send("Syllable analysis and poem generation complete.")
 
             except Exception as e:
-                logger.exception(f"Error during analyze (syllables) in {interaction.channel.name}: {e}")
+                logger.exception(f"Error during analyze (syllables/poem) in {interaction.channel.name}: {e}")
                 await interaction.followup.send(f"Error during analyze: {e}")
 
         async def connect_to_world(self, guild):
@@ -511,8 +510,6 @@ try:
         if not discord.opus.is_loaded():
             try: discord.opus.load_opus('libopus.so.0')
             except: pass
-
-        _executor = ThreadPoolExecutor(max_workers=1)
 
         bot = TranscriptionBot()
         bot.run(TOKEN)
