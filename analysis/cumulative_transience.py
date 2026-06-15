@@ -197,6 +197,7 @@ def generate_video(audio_path, data):
             '-i', audio_path,
             '-c:v', 'copy',
             '-c:a', 'aac',
+            '-ac', '1',
             '-shortest',
             output_video
         ]
@@ -219,7 +220,7 @@ def analyze_audio(file_path):
     print(f"Analyzing {file_path}...")
     try:
         # Load audio file. sr=None preserves original sampling rate.
-        y, sr = librosa.load(file_path, sr=None)
+        y, sr = librosa.load(file_path, sr=None, mono=True)
 
         # Calculate onset strength (transient envelope)
         # Resolution: 1ms chunks
