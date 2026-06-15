@@ -13,104 +13,156 @@ import shutil
 
 def generate_video(audio_path, data):
     """
-    Generates a video file for the analyzed audio showing a moving playhead over the transient graph
-    and an accumulating 10-second buffer.
+    Generates a video file for the analyzed audio showing a moving playhead over the transient graphs
+    (bass and treble) and an accumulating 10-second buffer.
     Returns the path to the generated MP4 file.
     """
     print(f"Generating video for {audio_path}...")
     try:
         times = data['times']
-        onset_env = np.array(data['onset_env'])
-        peak_times = data['peaks']['times']
-        peak_values = data['peaks']['values']
-        peak_indices = set(data['peaks']['indices'])
+        onset_env_bass = np.array(data['onset_env_bass'])
+        onset_env_treble = np.array(data['onset_env_treble'])
+
+        peak_indices_bass = set(data['peaks_bass']['indices'])
+        peak_indices_treble = set(data['peaks_treble']['indices'])
+
         max_peak = data['max_peak_value']
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [1, 1]})
+        fig, (ax_bass, ax_treble, ax_buf) = plt.subplots(3, 1, figsize=(12, 14), gridspec_kw={'height_ratios': [1, 1, 1]})
 
-        # Top Plot: Transient Envelope
-        ax1.plot(times, onset_env, color='#3498db', lw=2, label='Transient Envelope')
-        ax1.scatter(peak_times, peak_values, color='#e74c3c', marker='x', s=50, label='Peaks')
-        playhead = ax1.axvline(x=0, color='#e67e22', lw=2, ls='--', label='Playhead')
-        cleanup_line = ax1.axvline(x=-15, color='#9b59b6', lw=2, ls=':', label='Cleanup Sweep')
-        ax1.set_title(f"Transient Analysis - {os.path.basename(audio_path)}")
-        ax1.set_ylabel("Onset Strength")
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_xlim(-20, 5)
-        ax1.set_ylim(0, max(onset_env) * 1.1 if len(onset_env) > 0 else 1)
+        # Bass Plot
+        ax_bass.plot(times, onset_env_bass, color='#3498db', lw=2, label='Bass Transient')
+        ax_bass.scatter(data['peaks_bass']['times'], data['peaks_bass']['values'], color='#e74c3c', marker='x', s=50, label='Bass Peaks')
+        playhead_bass = ax_bass.axvline(x=0, color='#e67e22', lw=2, ls='--', label='Playhead')
+        cleanup_bass = ax_bass.axvline(x=-15, color='#9b59b6', lw=2, ls=':', label='Cleanup Sweep')
+        ax_bass.set_title(f"Bass Transient Analysis - {os.path.basename(audio_path)}")
+        ax_bass.set_ylabel("Onset Strength")
+        ax_bass.legend()
+        ax_bass.grid(True, alpha=0.3)
+        ax_bass.set_xlim(-20, 5)
+        ax_bass.set_ylim(0, max(onset_env_bass) * 1.1 if len(onset_env_bass) > 0 else 1)
+
+        # Treble Plot
+        ax_treble.plot(times, onset_env_treble, color='#2ecc71', lw=2, label='Treble Transient')
+        ax_treble.scatter(data['peaks_treble']['times'], data['peaks_treble']['values'], color='#e74c3c', marker='x', s=50, label='Treble Peaks')
+        playhead_treble = ax_treble.axvline(x=0, color='#e67e22', lw=2, ls='--', label='Playhead')
+        cleanup_treble = ax_treble.axvline(x=-15, color='#9b59b6', lw=2, ls=':', label='Cleanup Sweep')
+        ax_treble.set_title(f"Treble Transient Analysis")
+        ax_treble.set_ylabel("Onset Strength")
+        ax_treble.legend()
+        ax_treble.grid(True, alpha=0.3)
+        ax_treble.set_xlim(-20, 5)
+        ax_treble.set_ylim(0, max(onset_env_treble) * 1.1 if len(onset_env_treble) > 0 else 1)
 
         # Bottom Plot: Accumulated 5s Historical Buffer
         buffer_len = 5001  # 5 seconds @ 1ms = 5000 steps + current
         accumulated_buffer = np.zeros(buffer_len)
         buffer_times = np.linspace(-5000, 0, buffer_len)
-        buffer_line, = ax2.plot(buffer_times, accumulated_buffer, color='#2ecc71', lw=2)
-        ax2.set_title("Accumulated 5s Historical Buffer")
-        ax2.set_xlabel("Time Relative to Peak (ms)")
-        ax2.set_ylabel("Accumulated Energy")
-        ax2.grid(True, alpha=0.3)
-        ax2.set_xlim(-5000, 0)
-        ax2.set_ylim(0, 1)
+        buffer_line, = ax_buf.plot(buffer_times, accumulated_buffer, color='#f1c40f', lw=2)
+        ax_buf.set_title("Accumulated 5s Historical Buffer")
+        ax_buf.set_xlabel("Time Relative to Peak (ms)")
+        ax_buf.set_ylabel("Accumulated Energy")
+        ax_buf.grid(True, alpha=0.3)
+        ax_buf.set_xlim(-5000, 0)
+        ax_buf.set_ylim(0, 1)
 
         # Flash and fade storage
         active_flashes = [] # List of (snapshot, frames_remaining)
         flash_fill_artists = []
         peak_lines = []
         peak_labels = []
-        peak_snapshots = {} # frame_idx -> snapshot
 
-        processed_peaks = set()
-        cleaned_peaks = set()
+        # We need to track which band the peak came from to use the correct envelope for the snapshot
+        # But wait, the snapshot is taken from the envelope at the time of the peak.
+        # If a peak happens in Bass, we take a snapshot of onset_env_bass?
+        # The prompt says: "add (and subtract at the cleanup sweep) them both into the accumulated historical buffer"
+        # This implies that a peak in EITHER band triggers an accumulation of THAT band's transient profile.
+
+        peak_snapshots_bass = {} # frame_idx -> snapshot
+        peak_snapshots_treble = {} # frame_idx -> snapshot
+
+        processed_peaks_bass = set()
+        processed_peaks_treble = set()
+        cleaned_peaks_bass = set()
+        cleaned_peaks_treble = set()
 
         def update(frame):
             current_time = times[frame]
-            ax1.set_xlim(current_time - 20, current_time + 5)
+            ax_bass.set_xlim(current_time - 20, current_time + 5)
+            ax_treble.set_xlim(current_time - 20, current_time + 5)
 
-            # Update playhead and cleanup sweep
-            playhead.set_xdata([current_time, current_time])
+            # Update playheads and cleanup sweeps
+            playhead_bass.set_xdata([current_time, current_time])
+            playhead_treble.set_xdata([current_time, current_time])
             cleanup_time = current_time - 15
-            cleanup_line.set_xdata([cleanup_time, cleanup_time])
+            cleanup_bass.set_xdata([cleanup_time, cleanup_time])
+            cleanup_treble.set_xdata([cleanup_time, cleanup_time])
 
-            # Check for peaks passed since last frame (100ms chunks)
-            # frame is the current millisecond index.
-            # We look for peaks in [frame-99, frame]
-            for p_idx in peak_indices:
-                if p_idx > frame - 100 and p_idx <= frame and p_idx not in processed_peaks:
-                    processed_peaks.add(p_idx)
+            # Process Bass Peaks
+            for p_idx in peak_indices_bass:
+                if p_idx > frame - 100 and p_idx <= frame and p_idx not in processed_peaks_bass:
+                    processed_peaks_bass.add(p_idx)
                     start = p_idx - 5000
                     end = p_idx
-
-                    # Extract window with padding
                     if start < 0:
-                        window = onset_env[0 : end + 1]
+                        window = onset_env_bass[0 : end + 1]
                         window = np.pad(window, (abs(start), 0), mode='constant')
                     else:
-                        window = onset_env[start : end + 1]
+                        window = onset_env_bass[start : end + 1]
 
                     if len(window) == buffer_len:
-                        peak_val = onset_env[p_idx]
+                        peak_val = onset_env_bass[p_idx]
                         normalization = peak_val / max_peak if max_peak > 0 else 1.0
                         snapshot = window * normalization
                         accumulated_buffer[:] += snapshot
-                        peak_snapshots[p_idx] = snapshot
+                        peak_snapshots_bass[p_idx] = snapshot
                         buffer_line.set_ydata(accumulated_buffer)
+                        active_flashes.append([snapshot, 20])
 
-                        # Add new flash: (data, initial_lifetime)
+            # Process Treble Peaks
+            for p_idx in peak_indices_treble:
+                if p_idx > frame - 100 and p_idx <= frame and p_idx not in processed_peaks_treble:
+                    processed_peaks_treble.add(p_idx)
+                    start = p_idx - 5000
+                    end = p_idx
+                    if start < 0:
+                        window = onset_env_treble[0 : end + 1]
+                        window = np.pad(window, (abs(start), 0), mode='constant')
+                    else:
+                        window = onset_env_treble[start : end + 1]
+
+                    if len(window) == buffer_len:
+                        peak_val = onset_env_treble[p_idx]
+                        normalization = peak_val / max_peak if max_peak > 0 else 1.0
+                        snapshot = window * normalization
+                        accumulated_buffer[:] += snapshot
+                        peak_snapshots_treble[p_idx] = snapshot
+                        buffer_line.set_ydata(accumulated_buffer)
                         active_flashes.append([snapshot, 20])
 
             # Dynamic Y-axis scaling for buffer (excluding peak at 0ms)
             # We ignore the last 100ms (-99ms to 0ms) to avoid scaling by the alignment peak.
             # This is an arbitrary value but works well in practice.
             current_max = np.max(accumulated_buffer[:-100]) if len(accumulated_buffer) > 100 else 0
-            ax2.set_ylim(0, max(0.1, current_max * 1.1))
+            ax_buf.set_ylim(0, max(0.1, current_max * 1.1))
 
             # Check for peak at cleanup sweep (15 seconds = 15000 frames @ 1ms)
             cleanup_frame_threshold = frame - 15000
-            for p_idx in list(peak_snapshots.keys()):
-                if p_idx <= cleanup_frame_threshold and p_idx not in cleaned_peaks:
-                    accumulated_buffer[:] -= peak_snapshots[p_idx]
-                    cleaned_peaks.add(p_idx)
-                    del peak_snapshots[p_idx]
+
+            # Cleanup Bass
+            for p_idx in list(peak_snapshots_bass.keys()):
+                if p_idx <= cleanup_frame_threshold and p_idx not in cleaned_peaks_bass:
+                    accumulated_buffer[:] -= peak_snapshots_bass[p_idx]
+                    cleaned_peaks_bass.add(p_idx)
+                    del peak_snapshots_bass[p_idx]
+                    buffer_line.set_ydata(accumulated_buffer)
+
+            # Cleanup Treble
+            for p_idx in list(peak_snapshots_treble.keys()):
+                if p_idx <= cleanup_frame_threshold and p_idx not in cleaned_peaks_treble:
+                    accumulated_buffer[:] -= peak_snapshots_treble[p_idx]
+                    cleaned_peaks_treble.add(p_idx)
+                    del peak_snapshots_treble[p_idx]
                     buffer_line.set_ydata(accumulated_buffer)
 
             # Handle Flash and Fade
@@ -123,7 +175,7 @@ def generate_video(audio_path, data):
                 alpha = (lifetime / 20.0) * 0.5 # Max 0.5 alpha
                 # Only plot flash if it has non-zero values
                 if np.any(snapshot > 0):
-                    fill = ax2.fill_between(buffer_times, 0, snapshot, color='#2ecc71', alpha=alpha)
+                    fill = ax_buf.fill_between(buffer_times, 0, snapshot, color='#2ecc71', alpha=alpha)
                     flash_fill_artists.append(fill)
                 flash[1] -= 1
                 if flash[1] <= 0:
@@ -156,15 +208,15 @@ def generate_video(audio_path, data):
                         ms_val = int(buffer_times[p_idx])
                         style = peak_styles[i] if i < len(peak_styles) else peak_styles[-1]
 
-                        line = ax2.axvline(x=ms_val, color=style['color'], lw=style['lw'], alpha=style['alpha'], ls='--')
-                        label = ax2.text(ms_val, ax2.get_ylim()[1]*0.9 - (i * 0.05 * ax2.get_ylim()[1]),
+                        line = ax_buf.axvline(x=ms_val, color=style['color'], lw=style['lw'], alpha=style['alpha'], ls='--')
+                        label = ax_buf.text(ms_val, ax_buf.get_ylim()[1]*0.9 - (i * 0.05 * ax_buf.get_ylim()[1]),
                                         f"{ms_val}ms", color=style['color'],
                                         fontsize=8, ha='center', fontweight='bold',
                                         bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=1))
                         peak_lines.append(line)
                         peak_labels.append(label)
 
-            return [playhead, cleanup_line, buffer_line] + flash_fill_artists + peak_lines + peak_labels
+            return [playhead_bass, playhead_treble, cleanup_bass, cleanup_treble, buffer_line] + flash_fill_artists + peak_lines + peak_labels
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
@@ -214,34 +266,47 @@ def generate_video(audio_path, data):
 
 def analyze_audio(file_path):
     """
-    Analyzes an audio file to extract its transient envelope and identify peaks.
-    Generates a high-resolution SSM image (Base64).
+    Analyzes an audio file to extract its transient envelope (bass and treble bands)
+    and identify peaks. Generates a high-resolution SSM image (Base64).
     """
     print(f"Analyzing {file_path}...")
     try:
         # Load audio file. sr=None preserves original sampling rate.
         y, sr = librosa.load(file_path, sr=None, mono=True)
 
-        # Calculate onset strength (transient envelope)
         # Resolution: 1ms chunks
         hop_length = int(sr * 0.001)
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
-        times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr, hop_length=hop_length)
 
-        # Find peaks in the onset strength
-        # prominence=0.5 and distance=200 are heuristic values for transient detection
+        # Compute Mel Spectrogram
+        # n_mels=128 provides enough resolution to split into two perceptible bands
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, hop_length=hop_length)
+        S_db = librosa.power_to_db(S, ref=np.max)
+
+        # Split into Bass (0-63) and Treble (64-127) Mel bands
+        S_bass = S_db[:64, :]
+        S_treble = S_db[64:, :]
+
+        # Calculate onset strength for each band
+        onset_env_bass = librosa.onset.onset_strength(S=S_bass, sr=sr, hop_length=hop_length)
+        onset_env_treble = librosa.onset.onset_strength(S=S_treble, sr=sr, hop_length=hop_length)
+
+        # Combined envelope for SSM calculation
+        onset_env_combined = librosa.onset.onset_strength(S=S_db, sr=sr, hop_length=hop_length)
+
+        times = librosa.frames_to_time(np.arange(len(onset_env_combined)), sr=sr, hop_length=hop_length)
+
+        # Find peaks in each band
         # distance=200 at 1ms resolution corresponds to 200ms
-        peaks, _ = scipy.signal.find_peaks(onset_env, prominence=0.5, distance=200)
+        peaks_bass, _ = scipy.signal.find_peaks(onset_env_bass, prominence=0.5, distance=200)
+        peaks_treble, _ = scipy.signal.find_peaks(onset_env_treble, prominence=0.5, distance=200)
 
-        peak_times = times[peaks].tolist()
-        peak_values = onset_env[peaks].tolist()
-        peak_indices = peaks.tolist()
-        max_peak_value = float(np.max(peak_values)) if len(peak_values) > 0 else 1.0
+        # Shared normalization factor (max across both bands)
+        all_peak_vals = np.concatenate([onset_env_bass[peaks_bass], onset_env_treble[peaks_treble]])
+        max_peak_value = float(np.max(all_peak_vals)) if len(all_peak_vals) > 0 else 1.0
 
-        # Downsample onset_env for SSM calculation (100ms resolution)
-        # This keeps the SSM calculation performant.
+        # Downsample for SSM calculation (100ms resolution)
         ssm_hop = 100
-        onset_env_ssm = onset_env[::ssm_hop]
+        onset_env_ssm = onset_env_combined[::ssm_hop]
         times_ssm = times[::ssm_hop]
 
         # Normalize onset_env for weighting
@@ -249,16 +314,9 @@ def analyze_audio(file_path):
         norm_onset = onset_env_ssm / max_onset
 
         # Calculate SSM at 100ms resolution
-        # Compute pairwise distance matrix using broadcasting
-        # SSM(i,j) = |onset_env[i] - onset_env[j]|
         dist_matrix = np.abs(onset_env_ssm[:, np.newaxis] - onset_env_ssm[np.newaxis, :])
-
-        # Convert to similarity: 1 - normalized distance
         max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1
         ssm = 1 - (dist_matrix / max_dist)
-
-        # Weight by transient strength: multiply by the smaller of the two transiences
-        # This ensures that only points with high similarity AND high transience are vibrant.
         transience_weight = np.minimum(norm_onset[:, np.newaxis], norm_onset[np.newaxis, :])
         ssm = ssm * transience_weight
 
@@ -278,8 +336,7 @@ def analyze_audio(file_path):
             "final_similarity": float(ssm[i, j])
         }
 
-        # Render SSM to image instead of storing raw JSON data
-        # This keeps the HTML report performant even at 100ms resolution
+        # Render SSM to image
         fig = plt.figure(figsize=(10, 10))
         ax = fig.add_axes([0, 0, 1, 1])
         ax.imshow(ssm, cmap='viridis', origin='lower', aspect='auto', vmin=0, vmax=1)
@@ -294,11 +351,17 @@ def analyze_audio(file_path):
         return {
             "filename": os.path.basename(file_path),
             "times": times.tolist(),
-            "onset_env": onset_env.tolist(),
-            "peaks": {
-                "times": peak_times,
-                "values": peak_values,
-                "indices": peak_indices
+            "onset_env_bass": onset_env_bass.tolist(),
+            "onset_env_treble": onset_env_treble.tolist(),
+            "peaks_bass": {
+                "times": times[peaks_bass].tolist(),
+                "values": onset_env_bass[peaks_bass].tolist(),
+                "indices": peaks_bass.tolist()
+            },
+            "peaks_treble": {
+                "times": times[peaks_treble].tolist(),
+                "values": onset_env_treble[peaks_treble].tolist(),
+                "indices": peaks_treble.tolist()
             },
             "max_peak_value": max_peak_value,
             "ssm_image": ssm_base64,

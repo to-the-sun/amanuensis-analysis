@@ -46,7 +46,8 @@ def main():
         .controls label { font-weight: bold; display: block; margin-bottom: 10px; }
         #file-select { width: 100%; padding: 10px; font-size: 16px; border-radius: 4px; border: 1px solid #ccc; }
         #audio-player { width: 100%; margin-top: 20px; }
-        #graph { width: 100%; height: 400px; margin-top: 20px; }
+        #bass-graph { width: 100%; height: 350px; margin-top: 20px; }
+        #treble-graph { width: 100%; height: 350px; margin-top: 20px; }
         #buffer-graph { width: 100%; height: 400px; margin-top: 20px; }
         #ssm-graph { width: 100%; height: 600px; margin-top: 30px; }
         .footnote { margin-top: 20px; padding: 15px; background: #fdf6e3; border-left: 5px solid #b58900; font-size: 14px; color: #586e75; }
@@ -66,7 +67,8 @@ def main():
             <audio id="audio-player" controls></audio>
         </div>
 
-        <div id="graph"></div>
+        <div id="bass-graph"></div>
+        <div id="treble-graph"></div>
         <div id="buffer-graph"></div>
         <div id="ssm-graph"></div>
         <div id="ssm-footnote" class="footnote"></div>
@@ -80,15 +82,19 @@ def main():
         const data = DATA_PLACEHOLDER;
         const fileSelect = document.getElementById('file-select');
         const audioPlayer = document.getElementById('audio-player');
-        const graphDiv = document.getElementById('graph');
+        const bassGraphDiv = document.getElementById('bass-graph');
+        const trebleGraphDiv = document.getElementById('treble-graph');
         const bufferDiv = document.getElementById('buffer-graph');
         const ssmDiv = document.getElementById('ssm-graph');
         const footnoteDiv = document.getElementById('ssm-footnote');
 
         let accumulatedBuffer = new Array(5001).fill(0);
-        let processedPeaks = new Set();
-        let cleanedPeaks = new Set();
-        let peakSnapshots = {}; // peakIdx -> snapshot
+        let processedPeaksBass = new Set();
+        let processedPeaksTreble = new Set();
+        let cleanedPeaksBass = new Set();
+        let cleanedPeaksTreble = new Set();
+        let peakSnapshotsBass = {}; // peakIdx -> snapshot
+        let peakSnapshotsTreble = {}; // peakIdx -> snapshot
         let activeFlashes = []; // {snapshot: [], lifetime: 20}
         let lastFrameIdx = -1;
 
@@ -108,31 +114,14 @@ def main():
         function updateGraph(filename) {
             const fileData = data[filename];
 
-            const traceTransient = {
-                x: fileData.times,
-                y: fileData.onset_env,
-                mode: 'lines',
-                name: 'Transient Envelope',
-                line: { color: '#3498db', width: 2 },
-                hoverinfo: 'x+y'
+            const config = {
+                responsive: true,
+                displaylogo: false
             };
 
-            const tracePeaks = {
-                x: fileData.peaks.times,
-                y: fileData.peaks.values,
-                mode: 'markers',
-                name: 'Peaks',
-                marker: { color: '#e74c3c', size: 8, symbol: 'cross' },
-                hoverinfo: 'x+y'
-            };
-
-            const layout = {
-                title: {
-                    text: 'Transient Analysis - ' + filename,
-                    font: { size: 18 }
-                },
+            const commonLayout = {
                 xaxis: { title: 'Time (seconds)', gridcolor: '#eee' },
-                yaxis: { title: 'Onset Strength (Energy Flux)', gridcolor: '#eee' },
+                yaxis: { title: 'Onset Strength', gridcolor: '#eee' },
                 plot_bgcolor: '#fff',
                 paper_bgcolor: '#fff',
                 shapes: [{
@@ -142,11 +131,7 @@ def main():
                     y0: 0,
                     y1: 1,
                     yref: 'paper',
-                    line: {
-                        color: '#e67e22',
-                        width: 2,
-                        dash: 'dash'
-                    },
+                    line: { color: '#e67e22', width: 2, dash: 'dash' },
                     name: 'playhead'
                 }, {
                     type: 'line',
@@ -155,11 +140,7 @@ def main():
                     y0: 0,
                     y1: 1,
                     yref: 'paper',
-                    line: {
-                        color: '#9b59b6',
-                        width: 2,
-                        dash: 'dot'
-                    },
+                    line: { color: '#9b59b6', width: 2, dash: 'dot' },
                     name: 'cleanup'
                 }],
                 dragmode: 'zoom',
@@ -168,12 +149,47 @@ def main():
                 legend: { x: 1, xanchor: 'right', y: 1 }
             };
 
-            const config = {
-                responsive: true,
-                displaylogo: false
+            // Bass Graph
+            const traceBass = {
+                x: fileData.times,
+                y: fileData.onset_env_bass,
+                mode: 'lines',
+                name: 'Bass Transient',
+                line: { color: '#3498db', width: 2 },
+                hoverinfo: 'x+y'
             };
+            const tracePeaksBass = {
+                x: fileData.peaks_bass.times,
+                y: fileData.peaks_bass.values,
+                mode: 'markers',
+                name: 'Bass Peaks',
+                marker: { color: '#e74c3c', size: 8, symbol: 'cross' },
+                hoverinfo: 'x+y'
+            };
+            const layoutBass = JSON.parse(JSON.stringify(commonLayout));
+            layoutBass.title = { text: 'Bass Transient Analysis - ' + filename, font: { size: 18 } };
+            Plotly.newPlot(bassGraphDiv, [traceBass, tracePeaksBass], layoutBass, config);
 
-            Plotly.newPlot(graphDiv, [traceTransient, tracePeaks], layout, config);
+            // Treble Graph
+            const traceTreble = {
+                x: fileData.times,
+                y: fileData.onset_env_treble,
+                mode: 'lines',
+                name: 'Treble Transient',
+                line: { color: '#2ecc71', width: 2 },
+                hoverinfo: 'x+y'
+            };
+            const tracePeaksTreble = {
+                x: fileData.peaks_treble.times,
+                y: fileData.peaks_treble.values,
+                mode: 'markers',
+                name: 'Treble Peaks',
+                marker: { color: '#e74c3c', size: 8, symbol: 'cross' },
+                hoverinfo: 'x+y'
+            };
+            const layoutTreble = JSON.parse(JSON.stringify(commonLayout));
+            layoutTreble.title = { text: 'Treble Transient Analysis', font: { size: 18 } };
+            Plotly.newPlot(trebleGraphDiv, [traceTreble, tracePeaksTreble], layoutTreble, config);
 
             // Initialize Buffer Graph
             const traceBuffer = {
@@ -319,9 +335,12 @@ def main():
         fileSelect.addEventListener('change', (e) => {
             currentFile = e.target.value;
             accumulatedBuffer.fill(0);
-            processedPeaks.clear();
-            cleanedPeaks.clear();
-            peakSnapshots = {};
+            processedPeaksBass.clear();
+            processedPeaksTreble.clear();
+            cleanedPeaksBass.clear();
+            cleanedPeaksTreble.clear();
+            peakSnapshotsBass = {};
+            peakSnapshotsTreble = {};
             lastFrameIdx = -1;
             updateGraph(currentFile);
             updateAudio(currentFile);
@@ -334,60 +353,75 @@ def main():
             const frameIdx = Math.floor(currentTime * 1000); // 1ms resolution
             const cleanupFrameIdx = frameIdx - 15000; // 15 seconds behind
 
-            // Reset if seeking (forward or backward to keep it simple and accurate)
-            // Use 100ms threshold for reset
+            // Reset if seeking
             if (Math.abs(frameIdx - lastFrameIdx) > 100) {
                 accumulatedBuffer.fill(0);
-                processedPeaks.clear();
-                cleanedPeaks.clear();
-                peakSnapshots = {};
+                processedPeaksBass.clear();
+                processedPeaksTreble.clear();
+                cleanedPeaksBass.clear();
+                cleanedPeaksTreble.clear();
+                peakSnapshotsBass = {};
+                peakSnapshotsTreble = {};
             }
 
-            // Check for peaks passed since last update
-            const peakIndices = fileData.peaks.indices;
             let bufferUpdated = false;
 
-            for (let i = 0; i < peakIndices.length; i++) {
-                const peakIdx = peakIndices[i];
-
-                // Add peak if it's passed the playhead but not the cleanup sweep
-                if (peakIdx <= frameIdx && peakIdx > cleanupFrameIdx && !processedPeaks.has(peakIdx)) {
-                    processedPeaks.add(peakIdx);
-
+            // Process Bass Peaks
+            const peakIndicesBass = fileData.peaks_bass.indices;
+            for (let i = 0; i < peakIndicesBass.length; i++) {
+                const peakIdx = peakIndicesBass[i];
+                if (peakIdx <= frameIdx && peakIdx > cleanupFrameIdx && !processedPeaksBass.has(peakIdx)) {
+                    processedPeaksBass.add(peakIdx);
                     const start = peakIdx - 5000;
-                    const end = peakIdx;
-                    const window = new Array(5001).fill(0);
-
+                    const snapshot = new Array(5001).fill(0);
                     for (let j = 0; j <= 5000; j++) {
                         const envIdx = start + j;
-                        if (envIdx >= 0 && envIdx < fileData.onset_env.length) {
-                            window[j] = fileData.onset_env[envIdx];
+                        if (envIdx >= 0 && envIdx < fileData.onset_env_bass.length) {
+                            snapshot[j] = (fileData.onset_env_bass[envIdx] * (fileData.peaks_bass.values[i] / fileData.max_peak_value));
+                            accumulatedBuffer[j] += snapshot[j];
                         }
                     }
-
-                    const peakVal = fileData.onset_env[peakIdx];
-                    const normalization = peakVal / fileData.max_peak_value;
-
-                    const snapshot = new Array(5001);
-                    for (let j = 0; j < 5001; j++) {
-                        snapshot[j] = window[j] * normalization;
-                        accumulatedBuffer[j] += snapshot[j];
-                    }
-                    peakSnapshots[peakIdx] = snapshot;
+                    peakSnapshotsBass[peakIdx] = snapshot;
                     activeFlashes.push({snapshot: snapshot, lifetime: 20});
                     bufferUpdated = true;
                 }
-
-                // Subtract peak if it's passed the cleanup sweep
-                if (peakIdx <= cleanupFrameIdx && processedPeaks.has(peakIdx) && !cleanedPeaks.has(peakIdx)) {
-                    const snapshot = peakSnapshots[peakIdx];
+                if (peakIdx <= cleanupFrameIdx && processedPeaksBass.has(peakIdx) && !cleanedPeaksBass.has(peakIdx)) {
+                    const snapshot = peakSnapshotsBass[peakIdx];
                     if (snapshot) {
-                        for (let j = 0; j < 5001; j++) {
-                            accumulatedBuffer[j] -= snapshot[j];
-                        }
-                        delete peakSnapshots[peakIdx];
+                        for (let j = 0; j < 5001; j++) accumulatedBuffer[j] -= snapshot[j];
+                        delete peakSnapshotsBass[peakIdx];
                     }
-                    cleanedPeaks.add(peakIdx);
+                    cleanedPeaksBass.add(peakIdx);
+                    bufferUpdated = true;
+                }
+            }
+
+            // Process Treble Peaks
+            const peakIndicesTreble = fileData.peaks_treble.indices;
+            for (let i = 0; i < peakIndicesTreble.length; i++) {
+                const peakIdx = peakIndicesTreble[i];
+                if (peakIdx <= frameIdx && peakIdx > cleanupFrameIdx && !processedPeaksTreble.has(peakIdx)) {
+                    processedPeaksTreble.add(peakIdx);
+                    const start = peakIdx - 5000;
+                    const snapshot = new Array(5001).fill(0);
+                    for (let j = 0; j <= 5000; j++) {
+                        const envIdx = start + j;
+                        if (envIdx >= 0 && envIdx < fileData.onset_env_treble.length) {
+                            snapshot[j] = (fileData.onset_env_treble[envIdx] * (fileData.peaks_treble.values[i] / fileData.max_peak_value));
+                            accumulatedBuffer[j] += snapshot[j];
+                        }
+                    }
+                    peakSnapshotsTreble[peakIdx] = snapshot;
+                    activeFlashes.push({snapshot: snapshot, lifetime: 20});
+                    bufferUpdated = true;
+                }
+                if (peakIdx <= cleanupFrameIdx && processedPeaksTreble.has(peakIdx) && !cleanedPeaksTreble.has(peakIdx)) {
+                    const snapshot = peakSnapshotsTreble[peakIdx];
+                    if (snapshot) {
+                        for (let j = 0; j < 5001; j++) accumulatedBuffer[j] -= snapshot[j];
+                        delete peakSnapshotsTreble[peakIdx];
+                    }
+                    cleanedPeaksTreble.add(peakIdx);
                     bufferUpdated = true;
                 }
             }
@@ -501,14 +535,16 @@ def main():
 
             lastFrameIdx = frameIdx;
 
-            // Update Transient Graph Playhead and Range
-            Plotly.relayout(graphDiv, {
+            // Update Transient Graphs Playhead and Range
+            const layoutUpdates = {
                 'xaxis.range': [currentTime - 20, currentTime + 5],
                 'shapes[0].x0': currentTime,
                 'shapes[0].x1': currentTime,
                 'shapes[1].x0': currentTime - 15,
                 'shapes[1].x1': currentTime - 15
-            });
+            };
+            Plotly.relayout(bassGraphDiv, layoutUpdates);
+            Plotly.relayout(trebleGraphDiv, layoutUpdates);
 
             // Update SSM Crosshair Playhead
             Plotly.relayout(ssmDiv, {
