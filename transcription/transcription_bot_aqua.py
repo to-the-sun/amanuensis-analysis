@@ -31,7 +31,8 @@ try:
     from nltk.corpus import cmudict
     import syllables
 
-    import llama_query
+    from SoundsLike.SoundsLike import Word_Functions, Pronunciation_Functions
+
     import discord
     from discord import app_commands
     from discord.ext import voice_recv
@@ -204,6 +205,11 @@ try:
         nltk.download('cmudict')
         CMU_DICT = cmudict.dict()
 
+    try:
+        nltk.data.find('taggers/averaged_perceptron_tagger')
+    except LookupError:
+        nltk.download('averaged_perceptron_tagger')
+
     def count_syllables_word(word):
         clean_word = word.lower().strip(".,!?:;()\"'")
         if not clean_word:
@@ -211,6 +217,25 @@ try:
         if clean_word in CMU_DICT:
             return max([len([y for y in x if y[-1].isdigit()]) for x in CMU_DICT[clean_word]])
         return syllables.estimate(clean_word)
+
+    def get_last_stressed_vowel_sound(word):
+        clean_word = word.lower().strip(".,!?:;()\"'")
+        if not clean_word:
+            return None
+        try:
+            pron = Word_Functions.pronunciation(clean_word, generate=True)
+            if not pron:
+                return None
+            idx = Pronunciation_Functions.index_last_stressed_vowel(pron)
+            if idx is None:
+                # Fallback to last vowel if no stress
+                for i in range(len(pron)-1, -1, -1):
+                    if pron[i][-1].isdigit():
+                        return pron[i][:-1]
+                return None
+            return pron[idx][:-1]
+        except Exception:
+            return None
 
     # --- TRANSCRIPTION SINK ---
     class AquaTranscriptionSink(voice_recv.AudioSink):
@@ -333,8 +358,6 @@ try:
         def __init__(self):
             super().__init__(intents=discord.Intents.all())
             self.tree = app_commands.CommandTree(self)
-            self.context_window_size = 2048
-            self.prompt_overhead = 0
 
         async def setup_hook(self):
             @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -344,10 +367,6 @@ try:
             @self.tree.command(name="analyze", description="Count syllables in each line of the world channel and edit messages to display them")
             async def analyze(interaction: discord.Interaction):
                 await self.analyze_logic(interaction)
-
-            self.context_window_size = llama_query.get_context_window_size()
-            self.prompt_overhead = llama_query.get_prompt_overhead()
-            logger.info(f"Context window size: {self.context_window_size}, Prompt overhead: {self.prompt_overhead}")
 
             self.loop.create_task(self.health_check_loop())
             await self.tree.sync()
@@ -389,11 +408,16 @@ try:
                 logger.info(f"Analyze command (syllables + poem) received in {interaction.channel.name} from {interaction.user}")
                 await interaction.followup.send("Starting syllable analysis and poem generation...")
 
-                collected_lines = []
-                async for msg in interaction.channel.history(limit=None):
-                    if msg.author != self.user:
-                        continue
+                collected_data = [] # List of (text, syllable_count)
 
+                # Fetch all bot messages first to process them chronologically
+                bot_messages = []
+                async for msg in interaction.channel.history(limit=None):
+                    if msg.author == self.user:
+                        bot_messages.append(msg)
+                bot_messages.reverse()
+
+                for msg in bot_messages:
                     lines = msg.content.splitlines()
                     new_lines = []
                     changed = False
@@ -408,7 +432,7 @@ try:
                         words = cleaned_content.split()
                         total_syls = sum(count_syllables_word(w) for w in words)
 
-                        collected_lines.append(f"{cleaned_content} ({total_syls})")
+                        collected_data.append((cleaned_content, total_syls))
                         new_line = f"{prefix}{cleaned_content} ({total_syls})"
 
                         if new_line != line:
@@ -419,19 +443,45 @@ try:
                         await msg.edit(content="\n".join(new_lines))
                         await asyncio.sleep(0.5) # Rate limit safety
 
-                if collected_lines:
-                    # We reverse so they are in chronological order for the prompt if desired,
-                    # history(limit=None) usually goes newest to oldest.
-                    collected_lines.reverse()
-
+                if collected_data:
                     await interaction.followup.send("Generating poem from rhyming lines...")
-                    prompt = "From the following list of lines and their syllable counts, find lines that rhyme and have the same syllable count. Arrange them into a poem. Only return the poem text, no introductory or concluding remarks. Lines:\n" + "\n".join(collected_lines)
 
-                    # run_query returns (response, duration)
-                    response, _ = await self.loop.run_in_executor(_executor, llama_query.run_query, prompt, "You are a poetic assistant.", 512)
+                    # Find most common syllable count (excluding 0)
+                    counts = [d[1] for d in collected_data if d[1] > 0]
+                    if not counts:
+                        await interaction.followup.send("No lines with syllables found.")
+                        return
 
-                    if response:
-                        await interaction.channel.send(f"**Poem Generated from Analysis:**\n\n{response}")
+                    most_common_count = collections.Counter(counts).most_common(1)[0][0]
+
+                    # Group by rhyme sound for the most common count
+                    rhyme_groups = collections.defaultdict(list)
+                    for text, count in collected_data:
+                        if count == most_common_count:
+                            words = text.split()
+                            if not words: continue
+                            last_word = words[-1]
+                            rhyme_sound = get_last_stressed_vowel_sound(last_word)
+                            if rhyme_sound:
+                                rhyme_groups[rhyme_sound].append(text)
+
+                    # Assemble poem
+                    poem_lines = []
+                    for sound, lines in rhyme_groups.items():
+                        if len(lines) >= 2:
+                            poem_lines.extend(lines)
+                            poem_lines.append("") # Stanza break
+
+                    if poem_lines:
+                        response = "\n".join(poem_lines).strip()
+                        # Discord message limit is 2000 chars.
+                        # We truncate if it's too long, taking roughly 1800 chars to be safe with the prefix.
+                        if len(response) > 1800:
+                            response = response[:1800] + "\n\n... (truncated due to length)"
+
+                        await interaction.channel.send(f"**Poem Generated from Analysis (Syllables: {most_common_count}):**\n\n{response}")
+                    else:
+                        await interaction.followup.send(f"Could not find enough rhyming lines with {most_common_count} syllables.")
 
                 await interaction.followup.send("Syllable analysis and poem generation complete.")
 
