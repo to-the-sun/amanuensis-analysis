@@ -18,9 +18,6 @@ DEFAULT_CHANNEL = "works-in-progress"  # Channel where the bot will post updates
 CHECK_INTERVAL = 30  # seconds
 VIDEO_OUTPUT_DIR = r'D:\[Library]\[Video]\[Works]\[Uploads]'
 
-# Track active analysis tasks to avoid duplicates
-active_analysis_tasks = set()
-
 # Load credentials from a separate file
 with open('credentials.json') as f:
     credentials = json.load(f)
@@ -100,8 +97,6 @@ def process_transient_analysis(file_path):
                 print(f"Moved video to {dest_path}")
     except Exception as e:
         print(f"Error during transient analysis processing for {file_path}: {e}")
-    finally:
-        active_analysis_tasks.discard(file_path)
 
 async def periodic_task():
     await client.wait_until_ready()
@@ -165,9 +160,7 @@ async def periodic_task():
                                     break
 
                             # Perform transient analysis and generate video in a separate thread backgrounded to avoid blocking the heartbeat
-                            if file_path not in active_analysis_tasks:
-                                active_analysis_tasks.add(file_path)
-                                asyncio.create_task(asyncio.to_thread(process_transient_analysis, file_path))
+                            asyncio.create_task(asyncio.to_thread(process_transient_analysis, file_path))
 
                             await asyncio.sleep(2)  # Add delay to avoid rate limiting
             
