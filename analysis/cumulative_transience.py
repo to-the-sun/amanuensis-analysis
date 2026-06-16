@@ -2,6 +2,8 @@ import librosa
 import numpy as np
 import scipy.signal
 import os
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from tqdm import tqdm
