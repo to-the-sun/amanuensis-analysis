@@ -148,6 +148,14 @@ async def periodic_task():
                             message_content = f"Here's the newest version of **{file_name}**"
                             if description:
                                 message_content += f'\n{description}'
+
+                            # Safety wait: ensure the Discord post timestamp (current time) will be strictly after the file's modified time
+                            while datetime.now(timezone.utc) <= file_modified_time:
+                                now_central = datetime.now(timezone.utc).astimezone(central_tz)
+                                mod_central = file_modified_time.astimezone(central_tz)
+                                print(f"  Waiting for system clock ({now_central}) to pass file modification time ({mod_central})...")
+                                await asyncio.sleep(1)
+
                             await channel.send(
                                 content=message_content,
                                 file=discord.File(mp3_path)
