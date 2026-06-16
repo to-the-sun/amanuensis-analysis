@@ -1,72 +1,106 @@
-# Transient Analysis Tool
+# Audio Analysis and Transcription Suite
 
-This tool analyzes audio files to extract transient information and generate an interactive HTML report. It focuses on identifying rhythmic energy and structural patterns within the audio.
+This repository contains a suite of tools for advanced audio transient analysis and real-time Discord voice transcription. The project is divided into two primary components: `analysis/` for structural audio visualization and `transcription/` for AI-powered voice-to-text.
 
-## Analysis Pipeline
+---
 
-The script performs the following steps for each audio file:
+## 1. Analyze (`analysis/`)
 
-### 1. Audio Loading
-The script uses `librosa` to load audio files. It preserves the original sampling rate (`sr=None`) to ensure high-fidelity analysis of transient peaks.
+The analysis suite focuses on identifying rhythmic energy, structural patterns, and transient density within audio files.
 
-### 2. Onset Strength (Transient Envelope)
-Instead of just looking at raw amplitude, the tool calculates **Onset Strength**. This represents the spectral energy flux across frames. It is a robust way to detect transients because it captures changes in the frequency content (e.g., a drum hit or a note attack) even if the overall volume doesn't change significantly.
+### Interactive Reports (`analyze.py` & `cumulative_transience.py`)
+Generates high-resolution HTML reports and MP4 videos featuring real-time transient tracking.
 
-The analysis is conducted with a temporal resolution of **100 milliseconds** per chunk, ensuring that even very rapid transients are captured and represented.
+**Usage:**
+```bash
+python3 analysis/analyze.py --dir /path/to/audio --output report.html
+```
 
-### 3. Peak Detection
-Using `scipy.signal.find_peaks`, the script identifies specific points in time where the transient envelope has a local maximum with a minimum prominence of 0.5. These peaks correspond to the "attacks" or "hits" in the audio.
+*   **Spectral Division:** Uses a Mel Spectrogram (128 bands) to split audio into **Bass** (bins 0-63) and **Treble** (bins 64-127) for perceptual accuracy.
+*   **Temporal Resolution:** Onset strength is calculated with a **1ms resolution**, ensuring even the fastest attacks are captured.
+*   **Cumulative Buffer:** A 5001-sample (5-second) historical buffer tracks accumulated transient energy.
+    *   **Cleanup Sweep:** To prevent perpetual accumulation, transient contributions are subtracted from the buffer exactly 15 seconds after they are added.
+    *   **Peak Identification:** Identifies and labels the top three peaks in the buffer in real-time:
+        *   **Gold (#f1c40f):** 1st largest peak.
+        *   **Silver (#ecf0f1):** 2nd largest peak.
+        *   **Bronze (#bdc3c7):** 3rd largest peak.
+    *   **Scaling:** Dynamic Y-axis scaling excludes the last 100ms of the buffer to prevent visual distortion from the alignment peak.
+*   **Self-Similarity Matrix (SSM):**
+    *   Visualizes the "rhythmic DNA" by comparing every 100ms chunk of the audio against every other chunk.
+    *   **Weighting:** Uses a transience-weighted similarity score to filter out noise and emphasize rhythmic alignment.
+    *   **Performance:** Rendered as a Base64-encoded PNG to ensure smooth browser performance even for long files.
+*   **Video Generation:** Produces MP4s with synchronized transient graphs and mono audio (forced via FFmpeg for size efficiency).
 
-### 4. Self-Similarity Matrix (SSM)
-The script generates a high-resolution Self-Similarity Matrix based on the transient envelope.
+### Automation: Amanuensis (`Amanuensis.py`)
+A Discord bot that automates the deployment of the analysis pipeline.
 
-#### What is a Self-Similarity Matrix?
-A Self-Similarity Matrix (SSM) is a powerful tool for visualizing the structure of a signal. It is a square matrix where the entry at position $(i, j)$ represents how "similar" the signal at time $i$ is to the signal at time $j$.
+*   **Monitoring:** Watches a local directory for new `.wav` files.
+*   **Conversion:** Automatically converts high-res WAVs to mono MP3s, dynamically adjusting bitrate to stay under Discord's 10MB limit.
+*   **Discord Integration:**
+    *   Uploads the MP3 to a designated `#works-in-progress` channel.
+    *   Posts a notification in `#general` and cleans up previous bot notifications.
+    *   Uses alphanumeric segment-based matching to delete older versions of the same file.
+*   **Background Processing:** Transient analysis and video generation are offloaded to background threads (using `asyncio.to_thread`) to prevent blocking the bot's heartbeat.
+*   **Recency Logic:** Skips files by comparing their Modified/Created UTC timestamps against the timestamp of the bot's most recent post in the history.
 
-In this tool, we construct the SSM as follows:
-1. The transient envelope is analyzed at its full **100ms resolution**.
-2. We compute the pairwise distance between every possible pair of time points: $D_{i,j} = |x_i - x_j|$.
-3. We convert this distance into a base similarity score: $S_{i,j} = 1 - \frac{D_{i,j}}{\max(D)}$.
-4. To emphasize rhythmic activity, we calculate a **transience weight** for each pair, which is the minimum of the normalized transient strengths at those two moments: $W_{i,j} = \min(\text{norm}(x_i), \text{norm}(x_j))$.
-5. The final similarity score is the product of the base similarity and this weight: $S'_{i,j} = S_{i,j} \times W_{i,j}$. This ensures that only points with both high similarity and high transience appear vibrant, effectively filtering out "similarity" in silent or low-energy regions.
-6. For performance and to prevent browser instability with large datasets, the SSM is rendered as a **Base64-encoded PNG image** directly in the Python script.
+---
 
-#### How to Interpret the SSM
-- **The Main Diagonal:** You will always see a bright diagonal line from the bottom-left to the top-right. This represents the signal compared to itself at the same moment ($i=j$), which always has perfect similarity.
-- **Off-Diagonal Patterns:** These are the most interesting parts.
-    - **Checkerboard/Block Patterns:** Large blocks of similar color indicate segments of the audio with consistent energy levels or textures.
-    - **Parallel Diagonals:** Lines parallel to the main diagonal indicate **repetition**. If you see a line offset from the main diagonal, it means the rhythmic pattern at time $i$ is repeating at time $i + \text{offset}$.
-    - **Grid-like Dots:** In highly rhythmic or percussive music (like a drum loop), you will see a grid of dots. These dots represent the alignment of transient hits (e.g., every beat or every snare hit).
+## 2. Transcription (`transcription/`)
 
-#### Why it matters
-The SSM allows you to see the "DNA" of the audio's rhythm. It reveals structural repetitions and rhythmic consistency that might be hard to see in a standard waveform or transient graph.
+The transcription suite provides real-time voice-to-text capabilities for Discord voice channels, with a focus on poetic formatting and linguistic analysis.
 
-## Usage
+### Aqua Transcription Bot (`transcription_bot_aqua.py`)
+A sophisticated Discord bot utilizing the AquaVoice API.
 
-1. **Install Dependencies:**
-   Ensure you have the following Python packages installed:
-   - `librosa`
-   - `numpy`
-   - `scipy`
-   - `matplotlib`
-   - `soundcard`
-   - `soundfile`
+**Usage:**
+```bash
+python3 transcription/transcription_bot_aqua.py
+```
 
-   You can install them via pip:
-   ```bash
-   pip install librosa numpy scipy matplotlib soundcard soundfile
-   ```
+*   **DAVE Decryption:** Implements custom patches for `discord.ext.voice_recv` to handle Discord's End-to-End Encryption (DAVE). It manages AES-GCM decryption and tracks Sequence Numbers/Roll-Over Counters (ROC) for stable audio streams.
+*   **Real-time Transcription:**
+    *   Connects to the `avalon-v1.5` model via the AquaVoice API.
+    *   Uses an in-memory buffer system to process audio chunks only when sufficient activity (RMS threshold) is detected.
+*   **Poetic Parsing:** A deterministic engine that formats raw transcripts into verse:
+    *   Splits lines based on punctuation (`. ! ? , ; : ( ) -`).
+    *   Lowercases the start of every line.
+    *   **Question Marks:** Specifically preserved and re-attached to the end of lines.
+    *   Word-internal punctuation (like apostrophes) is maintained.
+*   **Slash Commands:**
+    *   `/analyze`: Performs a deep dive into the channel's history.
+        *   Counts syllables for every line using NLTK (CMUdict) and the `syllables` library.
+        *   Detects rhymes using the `SoundsLike` library (vowel-class homophones).
+        *   Generates a poem by grouping the most common syllable-count lines by rhyme sound.
+    *   `/purge`: Clears the transcription channel history.
+*   **Stability:** Includes a health-check loop that monitors decryption failures and automatically reconnects the voice client if the stream stalls.
 
-2. **Run the Script:**
-   ```bash
-   python analyze.py --dir /path/to/audio --output report.html
-   ```
+---
 
-3. **View the Report:**
-   Open the generated `.html` file in any modern web browser. Use the dropdown to switch between audio files and use the built-in player to listen while watching the playhead move across the graphs.
+## Installation & Dependencies
 
-## Interactive Features
-- **Synchronized Playhead:** The orange dashed line on both the Transient Graph and the SSM moves in real-time as you play the audio.
-- **High-Resolution SSM:** By rendering the SSM as an image, we maintain the 100ms analysis resolution without sacrificing browser performance.
-- **SSM Crosshair:** On the SSM, the playhead appears as a crosshair, showing you exactly which time-pairs are being compared as the audio progresses.
-- **Zoom/Pan:** Both graphs are interactive (powered by Plotly.js), allowing you to zoom into specific sections of the transient envelope.
+### System Dependencies
+The suite requires standard audio and DSP libraries:
+```bash
+sudo apt-get update && sudo apt-get install -y libsndfile1-dev libaubio-dev libjson-c-dev libfftw3-dev ffmpeg
+```
+
+### Python Environment
+Install the required Python modules:
+```bash
+pip install librosa numpy scipy matplotlib soundcard soundfile discord.py[voice] discord-ext-voice-recv davey cryptography faster-whisper google-genai torch transformers mido plotly playwright openai requests tqdm nltk syllables SoundsLike pydub
+```
+
+### Linguistic Data
+Required for the `/analyze` command in the transcription bot:
+```bash
+python3 -m nltk.downloader cmudict averaged_perceptron_tagger
+```
+
+## Configuration
+Both `Amanuensis.py` and the transcription bots require a `credentials.json` file in the root directory:
+```json
+{
+  "token": "YOUR_DISCORD_BOT_TOKEN",
+  "aqua_key": "YOUR_AQUAVOICE_API_KEY"
+}
+```
