@@ -16,7 +16,11 @@ Generates high-resolution HTML reports and MP4 videos featuring real-time transi
 python3 analysis/analyze.py --dir /path/to/audio --output report.html
 ```
 
-*   **Spectral Division:** Uses a Mel Spectrogram (128 bands) to split audio into **Bass** (bins 0-63) and **Treble** (bins 64-127) for perceptual accuracy.
+*   **Spectral Division:** Uses a Mel Spectrogram (128 bands) to split audio into four distinct bands for perceptual granularity:
+    *   **Sub-Bass (Bins 0-31):** 0 Hz – 1,024 Hz (at 44.1 kHz)
+    *   **Bass/Low-Mid (Bins 32-63):** 992 Hz – 2,849 Hz (at 44.1 kHz)
+    *   **High-Mid (Bins 64-95):** 2,759 Hz – 7,926 Hz (at 44.1 kHz)
+    *   **Treble (Bins 96-127):** 7,676 Hz – 22,050 Hz (at 44.1 kHz)
 *   **Temporal Resolution:** Onset strength is calculated with a **1ms resolution**, ensuring even the fastest attacks are captured.
 *   **Cumulative Buffer:** A 5001-sample (5-second) historical buffer tracks accumulated transient energy.
     *   **Cleanup Sweep:** To prevent perpetual accumulation, transient contributions are subtracted from the buffer exactly 15 seconds after they are added.
