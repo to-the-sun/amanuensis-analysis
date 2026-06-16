@@ -5,6 +5,7 @@ import asyncio
 import re
 import shutil
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from pydub import AudioSegment
 import sys
 
@@ -115,16 +116,25 @@ async def periodic_task():
             for guild in client.guilds:
                 for channel in guild.text_channels:
                     if channel.name == DEFAULT_CHANNEL:
+                        central_tz = ZoneInfo("America/Chicago")
                         last_post_time = await get_last_post_time(channel)
-                        print(f'  Last post time: {last_post_time}')
+                        last_post_time_central = last_post_time.astimezone(central_tz) if last_post_time else None
                         wav_files = [f for f in os.listdir(UPLOADS_DIR) if f.endswith('.wav')]
                         for wav_file in wav_files:
                             file_path = os.path.join(UPLOADS_DIR, wav_file)
                             file_name = os.path.splitext(wav_file)[0]
                             file_modified_time = datetime.fromtimestamp(os.path.getmtime(file_path), tz=timezone.utc)
                             file_created_time = datetime.fromtimestamp(os.path.getctime(file_path), tz=timezone.utc)
+
+                            file_created_central = file_created_time.astimezone(central_tz)
+                            file_modified_central = file_modified_time.astimezone(central_tz)
+
+                            print(f"Checking {wav_file}:")
+                            print(f"  Created:  {file_created_central}")
+                            print(f"  Modified: {file_modified_central}")
+                            print(f"  Compared against Last Post: {last_post_time_central}")
+
                             if last_post_time and (file_modified_time <= last_post_time and file_created_time <= last_post_time):
-                                print(f'Skipping {wav_file} as it is not newer than the last post time.')
                                 continue
                             print(f'Converting {wav_file} to MP3.')
                             mp3_path = os.path.join(UPLOADS_DIR, f"{file_name}.mp3")
