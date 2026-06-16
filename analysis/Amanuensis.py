@@ -129,12 +129,18 @@ async def periodic_task():
                             file_created_central = file_created_time.astimezone(central_tz)
                             file_modified_central = file_modified_time.astimezone(central_tz)
 
+                            # 99-second buffer is an arbitrary cushion to account for clock drift and network latency
+                            # between the local system clock and Discord's server clock, ensuring files aren't
+                            # re-processed due to minor timestamp discrepancies.
+                            comparison_time = last_post_time + timedelta(seconds=99) if last_post_time else None
+                            comparison_time_central = comparison_time.astimezone(central_tz) if comparison_time else None
+
                             print(f"Checking {wav_file}:")
                             print(f"  Created:  {file_created_central}")
                             print(f"  Modified: {file_modified_central}")
-                            print(f"  Compared against Last Post: {last_post_time_central}")
+                            print(f"  Compared against Last Post (with 99s buffer): {comparison_time_central}")
 
-                            if last_post_time and (file_modified_time <= last_post_time and file_created_time <= last_post_time):
+                            if comparison_time and (file_modified_time <= comparison_time and file_created_time <= comparison_time):
                                 continue
                             print(f'Converting {wav_file} to MP3.')
                             mp3_path = os.path.join(UPLOADS_DIR, f"{file_name}.mp3")
@@ -148,13 +154,6 @@ async def periodic_task():
                             message_content = f"Here's the newest version of **{file_name}**"
                             if description:
                                 message_content += f'\n{description}'
-
-                            # Safety wait: ensure the Discord post timestamp (current time) will be strictly after the file's modified time
-                            while datetime.now(timezone.utc) <= file_modified_time:
-                                now_central = datetime.now(timezone.utc).astimezone(central_tz)
-                                mod_central = file_modified_time.astimezone(central_tz)
-                                print(f"  Waiting for system clock ({now_central}) to pass file modification time ({mod_central})...")
-                                await asyncio.sleep(1)
 
                             await channel.send(
                                 content=message_content,
