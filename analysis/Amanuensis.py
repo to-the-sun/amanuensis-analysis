@@ -123,15 +123,12 @@ async def periodic_task():
                             file_modified_time = datetime.fromtimestamp(os.path.getmtime(file_path), tz=timezone.utc)
                             file_created_time = datetime.fromtimestamp(os.path.getctime(file_path), tz=timezone.utc)
 
-                            # 99-second buffer is an arbitrary cushion to account for clock drift and network latency
-                            # between the local system clock and Discord's server clock, ensuring files aren't
-                            # re-processed due to minor timestamp discrepancies.
-                            comparison_time = last_post_time + timedelta(seconds=99) if last_post_time else None
+                            comparison_time = last_post_time if last_post_time else None
 
                             print(f"Checking {wav_file}:")
                             print(f"  Created:  {file_created_time}")
                             print(f"  Modified: {file_modified_time}")
-                            print(f"  Compared against Last Post (with 99s buffer): {comparison_time}")
+                            print(f"  Compared against Last Post: {comparison_time}")
 
                             if comparison_time and (file_modified_time <= comparison_time and file_created_time <= comparison_time):
                                 continue
