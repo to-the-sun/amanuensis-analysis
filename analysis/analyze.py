@@ -463,7 +463,22 @@ def main():
                     });
                 });
 
-                const maxValExcludingZero = Math.max(...accumulatedBuffer.slice(0, -100));
+                const dataToMeasure = accumulatedBuffer.slice(0, -100);
+                const mean = dataToMeasure.reduce((a, b) => a + b, 0) / (dataToMeasure.length || 1);
+                const stdDev = Math.sqrt(dataToMeasure.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b, 0) / (dataToMeasure.length || 1));
+                const contrast = Math.max(...dataToMeasure) / (mean || 1);
+
+                annotations.push({
+                    xref: 'paper', yref: 'paper',
+                    x: 0.02, y: 0.98,
+                    text: `Std Dev: ${stdDev.toFixed(3)}<br>Contrast: ${contrast.toFixed(3)}`,
+                    showarrow: false,
+                    font: { color: '#f1c40f', size: 12, weight: 'bold' },
+                    bgcolor: 'rgba(0,0,0,0.5)',
+                    xanchor: 'left', yanchor: 'top'
+                });
+
+                const maxValExcludingZero = Math.max(...dataToMeasure);
                 const bufferYMax = Math.max(0.1, maxValExcludingZero * 1.1);
 
                 Plotly.react(bufferDiv, traces, {

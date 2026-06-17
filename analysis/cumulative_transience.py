@@ -76,6 +76,11 @@ def generate_video(audio_path, data):
         peak_lines = []
         peak_labels = []
 
+        # Rhythm Metrics text initialization
+        metrics_text = ax_buf.text(0.02, 0.95, '', transform=ax_buf.transAxes,
+                                   verticalalignment='top', fontsize=10, color='#f1c40f',
+                                   fontweight='bold', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
+
         # Track snapshots for cleanup
         peak_snapshots = [{} for _ in range(4)] # List of dictionaries (peak_idx -> snapshot) for each band
         processed_peaks = [set() for _ in range(4)]
@@ -132,6 +137,16 @@ def generate_video(audio_path, data):
             if buffer_updated:
                 buffer_line.set_ydata(accumulated_buffer)
 
+            # Calculate Rhythm Metrics (excluding peak at 0ms)
+            data_to_measure = accumulated_buffer[:-100]
+            if len(data_to_measure) > 0:
+                std_dev = np.std(data_to_measure)
+                mean_val = np.mean(data_to_measure)
+                contrast = np.max(data_to_measure) / mean_val if mean_val > 0 else 0
+                metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}")
+            else:
+                metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000")
+
             # Handle Flash and Fade
             for artist in flash_fill_artists:
                 artist.remove()
@@ -180,7 +195,7 @@ def generate_video(audio_path, data):
                         peak_lines.append(line)
                         peak_labels.append(label)
 
-            return [playhead_transient, cleanup_transient, buffer_line] + flash_fill_artists + peak_lines + peak_labels
+            return [playhead_transient, cleanup_transient, buffer_line, metrics_text] + flash_fill_artists + peak_lines + peak_labels
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
