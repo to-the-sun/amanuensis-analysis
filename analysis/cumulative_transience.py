@@ -7,6 +7,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.ticker as ticker
 from tqdm import tqdm
 import io
 import base64
@@ -55,6 +56,13 @@ def generate_video(audio_path, data):
         ax_transient.grid(True, alpha=0.3)
         ax_transient.set_xlim(-20, 5)
 
+        def format_time(x, pos):
+            m = int(abs(x) // 60)
+            s = int(abs(x) % 60)
+            prefix = "-" if x < 0 else ""
+            return f"{prefix}{m}:{s:02d}"
+        ax_transient.xaxis.set_major_formatter(ticker.FuncFormatter(format_time))
+
         # Determine global max for Y-axis
         all_onset_vals = np.concatenate(onset_envs)
         ax_transient.set_ylim(0, max(all_onset_vals) * 1.1 if len(all_onset_vals) > 0 else 1)
@@ -76,6 +84,7 @@ def generate_video(audio_path, data):
         flash_fill_artists = []
         peak_lines = []
         peak_labels = []
+        active_scores = [] # List of [text_artist, lifetime, initial_y]
 
         # Rhythm Metrics text initialization
         metrics_text = ax_buf.text(0.02, 0.95, '', transform=ax_buf.transAxes,
@@ -119,6 +128,34 @@ def generate_video(audio_path, data):
                             peak_val = onset_envs[band_idx][p_idx]
                             normalization = peak_val / max_peak if max_peak > 0 else 1.0
                             snapshot = window * normalization
+
+                            # Calculate Resonance Score
+                            snapshot_peaks, _ = scipy.signal.find_peaks(snapshot, height=0.01)
+                            total_score = 0
+                            data_to_measure = accumulated_buffer[:-100]
+                            if len(data_to_measure) > 0:
+                                avg = np.mean(data_to_measure)
+                                max_v = np.max(data_to_measure)
+                                min_v = np.min(data_to_measure)
+
+                                for sp_idx in snapshot_peaks:
+                                    multiplier = snapshot[sp_idx]
+                                    val = accumulated_buffer[sp_idx]
+                                    qualifier = 0
+                                    if val > avg:
+                                        if max_v > avg:
+                                            qualifier = (val - avg) / (max_v - avg)
+                                    elif val < avg:
+                                        if avg > min_v:
+                                            qualifier = (val - avg) / (avg - min_v)
+                                    total_score += multiplier * qualifier
+
+                            # Create score animation
+                            score_text = ax_transient.text(times[p_idx], peak_val, f"+{total_score:.2f}",
+                                                        color='#f1c40f', fontsize=10, fontweight='bold',
+                                                        ha='center', va='bottom')
+                            active_scores.append([score_text, 20, peak_val])
+
                             accumulated_buffer[:] += snapshot
                             peak_snapshots[band_idx][p_idx] = snapshot
                             buffer_updated = True
@@ -171,6 +208,22 @@ def generate_video(audio_path, data):
                 if flash[1] <= 0:
                     active_flashes.remove(flash)
 
+            # Handle Score Animations
+            current_ylim = ax_transient.get_ylim()[1]
+            for score in active_scores[:]:
+                txt, lifetime, initial_y = score
+                lifetime -= 1
+                if lifetime <= 0:
+                    txt.remove()
+                    active_scores.remove(score)
+                else:
+                    score[1] = lifetime
+                    # Float upward
+                    progress = (20 - lifetime) / 20.0
+                    new_y = initial_y + (progress * 0.1 * current_ylim)
+                    txt.set_position((txt.get_position()[0], new_y))
+                    txt.set_alpha(lifetime / 20.0)
+
             # Analyze peaks in the accumulated buffer
             for line in peak_lines:
                 line.remove()
@@ -208,7 +261,8 @@ def generate_video(audio_path, data):
                         peak_lines.append(line)
                         peak_labels.append(label)
 
-            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, average_line] + flash_fill_artists + peak_lines + peak_labels
+            score_artists = [s[0] for s in active_scores]
+            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, average_line] + flash_fill_artists + peak_lines + peak_labels + score_artists
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
