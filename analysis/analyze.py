@@ -471,6 +471,16 @@ def main():
 
                 const dataToMeasure = accumulatedBuffer.slice(0, -100);
                 const mean = dataToMeasure.reduce((a, b) => a + b, 0) / (dataToMeasure.length || 1);
+
+                shapes.push({
+                    type: 'line',
+                    x0: -5000,
+                    x1: 0,
+                    y0: mean,
+                    y1: mean,
+                    line: { color: '#ecf0f1', width: 1, dash: 'dot' }
+                });
+
                 const stdDev = Math.sqrt(dataToMeasure.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b, 0) / (dataToMeasure.length || 1));
                 const contrast = Math.max(...dataToMeasure) / (mean || 1);
 

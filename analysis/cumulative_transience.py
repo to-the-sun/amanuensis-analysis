@@ -81,6 +81,8 @@ def generate_video(audio_path, data):
                                    verticalalignment='top', fontsize=10, color='#f1c40f',
                                    fontweight='bold', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
 
+        average_line = ax_buf.axhline(0, color='#ecf0f1', lw=1, ls=':', alpha=0.8, label='Average Energy')
+
         peak_history = []
 
         # Track snapshots for cleanup
@@ -144,11 +146,13 @@ def generate_video(audio_path, data):
             if len(data_to_measure) > 0:
                 std_dev = np.std(data_to_measure)
                 mean_val = np.mean(data_to_measure)
+                average_line.set_ydata([mean_val, mean_val])
                 contrast = np.max(data_to_measure) / mean_val if mean_val > 0 else 0
                 peak_std = np.std(peak_history) if peak_history else 0.0
                 metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}\nPeak Std: {peak_std:.3f}")
             else:
                 metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000\nPeak Std: 0.000")
+                average_line.set_ydata([0, 0])
 
             # Handle Flash and Fade
             for artist in flash_fill_artists:
@@ -202,7 +206,7 @@ def generate_video(audio_path, data):
                         peak_lines.append(line)
                         peak_labels.append(label)
 
-            return [playhead_transient, cleanup_transient, buffer_line, metrics_text] + flash_fill_artists + peak_lines + peak_labels
+            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, average_line] + flash_fill_artists + peak_lines + peak_labels
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
