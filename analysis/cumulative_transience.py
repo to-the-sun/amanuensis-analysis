@@ -81,6 +81,8 @@ def generate_video(audio_path, data):
                                    verticalalignment='top', fontsize=10, color='#f1c40f',
                                    fontweight='bold', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
 
+        peak_history = []
+
         # Track snapshots for cleanup
         peak_snapshots = [{} for _ in range(4)] # List of dictionaries (peak_idx -> snapshot) for each band
         processed_peaks = [set() for _ in range(4)]
@@ -137,15 +139,19 @@ def generate_video(audio_path, data):
             if buffer_updated:
                 buffer_line.set_ydata(accumulated_buffer)
 
+            # Track peak value (at 0ms) stability over time
+            peak_history.append(accumulated_buffer[-1])
+
             # Calculate Rhythm Metrics (excluding peak at 0ms)
             data_to_measure = accumulated_buffer[:-100]
             if len(data_to_measure) > 0:
                 std_dev = np.std(data_to_measure)
                 mean_val = np.mean(data_to_measure)
                 contrast = np.max(data_to_measure) / mean_val if mean_val > 0 else 0
-                metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}")
+                peak_std = np.std(peak_history) if peak_history else 0.0
+                metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}\nPeak Std: {peak_std:.3f}")
             else:
-                metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000")
+                metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000\nPeak Std: 0.000")
 
             # Handle Flash and Fade
             for artist in flash_fill_artists:

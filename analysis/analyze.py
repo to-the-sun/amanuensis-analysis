@@ -86,6 +86,7 @@ def main():
         const footnoteDiv = document.getElementById('ssm-footnote');
 
         let accumulatedBuffer = new Array(5001).fill(0);
+        let peakHistory = [];
 
         let processedPeaks = [new Set(), new Set(), new Set(), new Set()];
         let cleanedPeaks = [new Set(), new Set(), new Set(), new Set()];
@@ -316,6 +317,7 @@ def main():
 
         function resetState() {
             accumulatedBuffer.fill(0);
+            peakHistory = [];
             processedPeaks = [new Set(), new Set(), new Set(), new Set()];
             cleanedPeaks = [new Set(), new Set(), new Set(), new Set()];
             peakSnapshots = [{}, {}, {}, {}];
@@ -376,6 +378,8 @@ def main():
             }
 
             if (bufferUpdated || activeFlashes.length > 0) {
+                peakHistory.push(accumulatedBuffer[5000]);
+
                 activeFlashes = activeFlashes.filter(f => f.lifetime > 0);
                 activeFlashes.forEach(f => f.lifetime--);
 
@@ -468,10 +472,13 @@ def main():
                 const stdDev = Math.sqrt(dataToMeasure.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b, 0) / (dataToMeasure.length || 1));
                 const contrast = Math.max(...dataToMeasure) / (mean || 1);
 
+                const peakMean = peakHistory.reduce((a, b) => a + b, 0) / (peakHistory.length || 1);
+                const peakStd = Math.sqrt(peakHistory.map(x => Math.pow(x - peakMean, 2)).reduce((a, b) => a + b, 0) / (peakHistory.length || 1));
+
                 annotations.push({
                     xref: 'paper', yref: 'paper',
                     x: 0.02, y: 0.98,
-                    text: `Std Dev: ${stdDev.toFixed(3)}<br>Contrast: ${contrast.toFixed(3)}`,
+                    text: `Std Dev: ${stdDev.toFixed(3)}<br>Contrast: ${contrast.toFixed(3)}<br>Peak Std: ${peakStd.toFixed(3)}`,
                     showarrow: false,
                     font: { color: '#f1c40f', size: 12, weight: 'bold' },
                     bgcolor: 'rgba(0,0,0,0.5)',
