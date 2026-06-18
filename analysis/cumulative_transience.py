@@ -15,6 +15,34 @@ import subprocess
 import tempfile
 import shutil
 
+def get_score_color(score, min_score, max_score):
+    """
+    Returns a hex color string based on the resonance score relative to min/max seen.
+    score == min_score (negative): bright red (#ff0000)
+    score == 0: subdued gray (#808080)
+    score == max_score (positive): bright green (#00ff00)
+    Interpolates linearly in between.
+    """
+    if score == 0:
+        return "#808080"
+
+    if score < 0:
+        # Interpolate between gray (#808080) and red (#ff0000)
+        t = score / min_score if min_score < 0 else 1.0
+        t = max(0, min(1, t))
+        r = int(0x80 + (0xff - 0x80) * t)
+        g = int(0x80 + (0x00 - 0x80) * t)
+        b = int(0x80 + (0x00 - 0x80) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    else:
+        # Interpolate between gray (#808080) and green (#00ff00)
+        t = score / max_score if max_score > 0 else 1.0
+        t = max(0, min(1, t))
+        r = int(0x80 + (0x00 - 0x80) * t)
+        g = int(0x80 + (0xff - 0x80) * t)
+        b = int(0x80 + (0x00 - 0x80) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
 def generate_video(audio_path, data):
     """
     Generates a video file for the analyzed audio showing a moving playhead over the transient graphs
@@ -85,6 +113,8 @@ def generate_video(audio_path, data):
         peak_lines = []
         peak_labels = []
         active_scores = [] # List of [text_artist, lifetime, initial_y]
+        min_score_seen = 0.0
+        max_score_seen = 0.0
 
         # Rhythm Metrics text initialization
         metrics_text = ax_buf.text(0.02, 0.95, '', transform=ax_buf.transAxes,
@@ -101,6 +131,7 @@ def generate_video(audio_path, data):
         cleaned_peaks = [set() for _ in range(4)]
 
         def update(frame):
+            nonlocal min_score_seen, max_score_seen
             current_time = times[frame]
             ax_transient.set_xlim(current_time - 20, current_time + 5)
 
@@ -150,11 +181,16 @@ def generate_video(audio_path, data):
                                             qualifier = (val - avg) / (avg - min_v)
                                     total_score += multiplier * qualifier
 
+                            # Update dynamic range
+                            min_score_seen = min(min_score_seen, total_score)
+                            max_score_seen = max(max_score_seen, total_score)
+
                             # Create score animation
-                            score_text = ax_transient.text(times[p_idx], peak_val, f"+{total_score:.2f}",
-                                                        color='#f1c40f', fontsize=10, fontweight='bold',
+                            score_text = ax_transient.text(times[p_idx], peak_val, f"{total_score:+.2f}",
+                                                        color=get_score_color(total_score, min_score_seen, max_score_seen),
+                                                        fontsize=10, fontweight='bold',
                                                         ha='center', va='bottom')
-                            active_scores.append([score_text, 20, peak_val])
+                            active_scores.append([score_text, 20, peak_val, total_score])
 
                             accumulated_buffer[:] += snapshot
                             peak_snapshots[band_idx][p_idx] = snapshot
@@ -211,7 +247,7 @@ def generate_video(audio_path, data):
             # Handle Score Animations
             current_ylim = ax_transient.get_ylim()[1]
             for score in active_scores[:]:
-                txt, lifetime, initial_y = score
+                txt, lifetime, initial_y, val = score
                 lifetime -= 1
                 if lifetime <= 0:
                     txt.remove()
@@ -223,6 +259,8 @@ def generate_video(audio_path, data):
                     new_y = initial_y + (progress * 0.1 * current_ylim)
                     txt.set_position((txt.get_position()[0], new_y))
                     txt.set_alpha(lifetime / 20.0)
+                    # Update color based on current known range
+                    txt.set_color(get_score_color(val, min_score_seen, max_score_seen))
 
             # Analyze peaks in the accumulated buffer
             for line in peak_lines:
