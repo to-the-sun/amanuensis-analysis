@@ -189,8 +189,8 @@ def generate_video(audio_path, data):
                                         found_peak = True
 
                                 if found_peak:
-                                    # Use the scalar of the primary original peak (at the end of the snapshot)
-                                    scalar = snapshot[-1]
+                                    # Use the scalar of the primary original peak from the transient graph
+                                    scalar = peak_val
                                     total_score = scalar * best_qualifier
 
                             # Update dynamic range
