@@ -139,9 +139,6 @@ def generate_video(audio_path, data):
             if buffer_updated:
                 buffer_line.set_ydata(accumulated_buffer)
 
-            # Track peak value (at 0ms) stability over time
-            peak_history.append(accumulated_buffer[-1])
-
             # Calculate Rhythm Metrics (excluding peak at 0ms)
             data_to_measure = accumulated_buffer[:-100]
             if len(data_to_measure) > 0:
@@ -181,6 +178,10 @@ def generate_video(audio_path, data):
                 if len(peaks_in_buf) > 0:
                     peak_heights = props['peak_heights']
                     top_indices = np.argsort(peak_heights)[-3:][::-1]
+
+                    # Track highest peak's X-value stability (ms)
+                    highest_peak_idx = peaks_in_buf[top_indices[0]]
+                    peak_history.append(float(buffer_times[highest_peak_idx]))
 
                     peak_styles = [
                         {'color': '#f1c40f', 'lw': 2, 'alpha': 1.0}, # 1st: Gold

@@ -378,8 +378,6 @@ def main():
             }
 
             if (bufferUpdated || activeFlashes.length > 0) {
-                peakHistory.push(accumulatedBuffer[5000]);
-
                 activeFlashes = activeFlashes.filter(f => f.lifetime > 0);
                 activeFlashes.forEach(f => f.lifetime--);
 
@@ -434,6 +432,10 @@ def main():
                         if (!tooClose) {
                             detectedPeaks.push(peak);
                         }
+                    }
+
+                    if (detectedPeaks.length > 0) {
+                        peakHistory.push(bufferTimes[detectedPeaks[0].idx]);
                     }
                 }
 
