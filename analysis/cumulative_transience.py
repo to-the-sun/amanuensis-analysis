@@ -1,3 +1,4 @@
+import argparse
 import librosa
 import numpy as np
 import scipy.signal
@@ -81,6 +82,8 @@ def generate_video(audio_path, data):
                                    verticalalignment='top', fontsize=10, color='#f1c40f',
                                    fontweight='bold', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
 
+        average_line, = ax_buf.plot(buffer_times, np.zeros(len(buffer_times)), color='#3498db', lw=1.5, ls='-', alpha=0.8, label='Average Energy')
+
         peak_history = []
 
         # Track snapshots for cleanup
@@ -139,16 +142,19 @@ def generate_video(audio_path, data):
             if buffer_updated:
                 buffer_line.set_ydata(accumulated_buffer)
 
-            # Calculate Rhythm Metrics (excluding peak at 0ms)
+            # Calculate Rhythm Metrics (excluding peak at 0ms for consistency with existing metrics)
             data_to_measure = accumulated_buffer[:-100]
             if len(data_to_measure) > 0:
                 std_dev = np.std(data_to_measure)
-                mean_val = np.mean(data_to_measure)
-                contrast = np.max(data_to_measure) / mean_val if mean_val > 0 else 0
+                mean_metrics = np.mean(data_to_measure)
+                mean_val = np.mean(accumulated_buffer) # Average Y value of every point on the graph
+                average_line.set_ydata(np.full(len(buffer_times), mean_val))
+                contrast = np.max(data_to_measure) / mean_metrics if mean_metrics > 0 else 0
                 peak_std = np.std(peak_history) if peak_history else 0.0
                 metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}\nPeak Std: {peak_std:.3f}")
             else:
                 metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000\nPeak Std: 0.000")
+                average_line.set_ydata(np.zeros(len(buffer_times)))
 
             # Handle Flash and Fade
             for artist in flash_fill_artists:
@@ -202,7 +208,7 @@ def generate_video(audio_path, data):
                         peak_lines.append(line)
                         peak_labels.append(label)
 
-            return [playhead_transient, cleanup_transient, buffer_line, metrics_text] + flash_fill_artists + peak_lines + peak_labels
+            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, average_line] + flash_fill_artists + peak_lines + peak_labels
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
@@ -359,3 +365,34 @@ def analyze_audio(file_path):
     except Exception as e:
         print(f"Error analyzing {file_path}: {e}")
         return None
+
+def main():
+    parser = argparse.ArgumentParser(description="Standalone transient analysis and video generation.")
+    parser.add_argument("files", nargs="*", help="Optional list of audio files to process.")
+    args = parser.parse_args()
+
+    audio_files = []
+    if args.files:
+        audio_files = args.files
+    else:
+        # Scan current directory for audio files
+        extensions = ('.wav', '.mp3', '.m4a', '.flac', '.ogg', '.aiff')
+        # Use absolute path to ensure files are found correctly if script is run from elsewhere
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        audio_files = [os.path.join(current_dir, f) for f in os.listdir(current_dir) if f.lower().endswith(extensions)]
+        audio_files.sort()
+
+    if not audio_files:
+        print("No audio files found to process.")
+        return
+
+    for f in audio_files:
+        if not os.path.exists(f):
+            print(f"File not found: {f}")
+            continue
+        result = analyze_audio(f)
+        if result:
+            generate_video(f, result)
+
+if __name__ == "__main__":
+    main()
