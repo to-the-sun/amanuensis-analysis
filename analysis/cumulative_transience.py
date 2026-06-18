@@ -171,8 +171,10 @@ def generate_video(audio_path, data):
                                 max_v = np.max(data_to_measure)
                                 min_v = np.min(data_to_measure)
 
+                                best_qualifier = -1.0 # Qualifiers range from -1 to 1
+                                found_peak = False
+
                                 for sp_idx in snapshot_peaks:
-                                    multiplier = snapshot[sp_idx]
                                     val = accumulated_buffer[sp_idx]
                                     qualifier = 0
                                     if val > avg:
@@ -181,7 +183,15 @@ def generate_video(audio_path, data):
                                     elif val < avg:
                                         if avg > min_v:
                                             qualifier = (val - avg) / (avg - min_v)
-                                    total_score += multiplier * qualifier
+
+                                    if not found_peak or qualifier > best_qualifier:
+                                        best_qualifier = qualifier
+                                        found_peak = True
+
+                                if found_peak:
+                                    # Use the scalar of the primary original peak from the transient graph
+                                    scalar = peak_val
+                                    total_score = scalar * best_qualifier
 
                             # Update dynamic range
                             min_score_seen = min(min_score_seen, total_score)
