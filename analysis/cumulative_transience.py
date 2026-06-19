@@ -135,8 +135,6 @@ def generate_video(audio_path, data):
                                    verticalalignment='top', fontsize=10, color='#f1c40f',
                                    fontweight='bold', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
 
-        average_line, = ax_buf.plot(buffer_times, np.zeros(len(buffer_times)), color='#3498db', lw=1.5, ls='-', alpha=0.8, label='Average Energy')
-
         peak_history = []
 
         # Track snapshots for cleanup
@@ -196,7 +194,7 @@ def generate_video(audio_path, data):
 
                     # Calculate Resonance Score
                     total_score = 0
-                    data_to_measure = accumulated_buffer[:-100]
+                    data_to_measure = accumulated_buffer[:-99]
                     if len(data_to_measure) > 0:
                         avg = np.mean(data_to_measure)
                         max_v = np.max(data_to_measure)
@@ -205,8 +203,8 @@ def generate_video(audio_path, data):
                         qualifier_sum = 0.0
                         found_peak = False
 
-                        # Identify secondary peaks in the 5s window preceding p_idx
-                        secondary_indices = [idx for idx in all_valid_peak_indices if p_idx - 5000 <= idx < p_idx]
+                        # Identify secondary peaks in the 5s window preceding p_idx (ignoring last 99ms)
+                        secondary_indices = [idx for idx in all_valid_peak_indices if p_idx - 5000 <= idx <= p_idx - 99]
 
                         for s_idx in secondary_indices:
                             sp_idx = 5000 - (p_idx - s_idx)
@@ -226,10 +224,9 @@ def generate_video(audio_path, data):
                             q_ms = buffer_times[sp_idx]
                             # Use fixed range -1 to 1 for qualifier colors
                             q_color = get_score_color(qualifier, -1.0, 1.0)
-                            q_line = ax_buf.axvline(x=q_ms, color=q_color, lw=1.5, ls=':', alpha=0.8)
+                            q_line = ax_buf.axvline(x=q_ms, color=q_color, lw=3.0, ls=':', alpha=0.8)
                             q_label = ax_buf.text(q_ms, accumulated_buffer[sp_idx], f"{qualifier:+.2f}",
-                                                  color=q_color, fontsize=8, ha='center', va='bottom',
-                                                  bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
+                                                  color=q_color, fontsize=8, ha='center', va='bottom')
                             active_qualifiers.append([q_line, q_label, 20, qualifier])
 
                         if found_peak:
@@ -257,8 +254,8 @@ def generate_video(audio_path, data):
                     buffer_updated = True
                     active_flashes.append([snapshot, 20])
 
-            # Dynamic Y-axis scaling for buffer (excluding peak at 0ms)
-            current_max = np.max(accumulated_buffer[:-100]) if len(accumulated_buffer) > 100 else 0
+            # Dynamic Y-axis scaling for buffer (ignoring last 99ms)
+            current_max = np.max(accumulated_buffer[:-99]) if len(accumulated_buffer) > 99 else 0
             ax_buf.set_ylim(0, max(0.1, current_max * 1.1))
 
             # Check for peak at cleanup sweep (15 seconds = 15000 frames @ 1ms)
@@ -275,19 +272,16 @@ def generate_video(audio_path, data):
             if buffer_updated:
                 buffer_line.set_ydata(accumulated_buffer)
 
-            # Calculate Rhythm Metrics (excluding peak at 0ms for consistency with existing metrics)
-            data_to_measure = accumulated_buffer[:-100]
+            # Calculate Rhythm Metrics (ignoring last 99ms)
+            data_to_measure = accumulated_buffer[:-99]
             if len(data_to_measure) > 0:
                 std_dev = np.std(data_to_measure)
                 mean_metrics = np.mean(data_to_measure)
-                mean_val = np.mean(accumulated_buffer) # Average Y value of every point on the graph
-                average_line.set_ydata(np.full(len(buffer_times), mean_val))
                 contrast = np.max(data_to_measure) / mean_metrics if mean_metrics > 0 else 0
                 peak_std = np.std(peak_history) if peak_history else 0.0
                 metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}\nPeak Std: {peak_std:.3f}")
             else:
                 metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000\nPeak Std: 0.000")
-                average_line.set_ydata(np.zeros(len(buffer_times)))
 
             # Handle Flash and Fade
             for artist in flash_fill_artists:
@@ -330,11 +324,13 @@ def generate_video(audio_path, data):
             peak_lines.clear()
             peak_labels.clear()
 
-            if np.max(accumulated_buffer) > 0.1:
-                peaks_in_buf, props = scipy.signal.find_peaks(accumulated_buffer, height=np.mean(accumulated_buffer), distance=200)
+            # Analyze peaks in the accumulated buffer (ignoring last 99ms)
+            data_to_measure = accumulated_buffer[:-99]
+            if np.max(data_to_measure) > 0.1:
+                peaks_in_buf, props = scipy.signal.find_peaks(data_to_measure, height=np.mean(data_to_measure), distance=200)
                 if len(peaks_in_buf) > 0:
                     peak_heights = props['peak_heights']
-                    top_indices = np.argsort(peak_heights)[-3:][::-1]
+                    top_indices = np.argsort(peak_heights)[-1:][::-1] # Just keep the highest peak
 
                     # Track highest peak's X-value stability (ms)
                     highest_peak_idx = peaks_in_buf[top_indices[0]]
@@ -342,8 +338,6 @@ def generate_video(audio_path, data):
 
                     peak_styles = [
                         {'color': '#f1c40f', 'lw': 2, 'alpha': 1.0}, # 1st: Gold
-                        {'color': '#ecf0f1', 'lw': 1.5, 'alpha': 0.9}, # 2nd: Silver
-                        {'color': '#bdc3c7', 'lw': 1, 'alpha': 0.8}, # 3rd: Bronze
                     ]
 
                     for i, idx in enumerate(top_indices):
@@ -352,7 +346,7 @@ def generate_video(audio_path, data):
                         style = peak_styles[i] if i < len(peak_styles) else peak_styles[-1]
 
                         line = ax_buf.axvline(x=ms_val, color=style['color'], lw=style['lw'], alpha=style['alpha'], ls='--')
-                        label = ax_buf.text(ms_val, ax_buf.get_ylim()[1]*0.9 - (i * 0.05 * ax_buf.get_ylim()[1]),
+                        label = ax_buf.text(ms_val, ax_buf.get_ylim()[1]*0.9,
                                         f"{ms_val}ms", color=style['color'],
                                         fontsize=8, ha='center', fontweight='bold',
                                         bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=1))
@@ -379,7 +373,7 @@ def generate_video(audio_path, data):
                 qualifier_artists.append(q[0])
                 qualifier_artists.append(q[1])
 
-            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, average_line, rating_text] + threshold_lines + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
+            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, rating_text] + threshold_lines + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
