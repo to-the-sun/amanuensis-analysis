@@ -57,6 +57,7 @@ def generate_video(audio_path, data):
 
         # Load the 4 bands
         onset_envs = [np.array(data[f'onset_env_{i}']) for i in range(4)]
+        rolling_thresholds = [np.array(data[f'rolling_threshold_{i}']) for i in range(4)]
         peak_indices_list = [set(data[f'peaks_{i}']['indices']) for i in range(4)]
         peak_times_list = [data[f'peaks_{i}']['times'] for i in range(4)]
         peak_values_list = [data[f'peaks_{i}']['values'] for i in range(4)]
@@ -72,9 +73,13 @@ def generate_video(audio_path, data):
         labels = ['Sub-Bass', 'Bass/Low-Mid', 'High-Mid', 'Treble']
 
         transient_lines = []
+        threshold_lines = []
         for i in range(4):
             line, = ax_transient.plot(times, onset_envs[i], color=colors[i], lw=2, alpha=alphas[i], label=labels[i])
             transient_lines.append(line)
+            # Add horizontal line for rolling threshold
+            t_line, = ax_transient.plot([times[0], times[-1]], [0, 0], color=colors[i], lw=1, ls='--', alpha=0.5)
+            threshold_lines.append(t_line)
             ax_transient.scatter(peak_times_list[i], peak_values_list[i], color='#e74c3c', marker='x', s=30, alpha=alphas[i])
 
         playhead_transient = ax_transient.axvline(x=0, color='#e67e22', lw=2, ls='--', label='Playhead')
@@ -138,11 +143,17 @@ def generate_video(audio_path, data):
         peak_snapshots = [{} for _ in range(4)] # List of dictionaries (peak_idx -> snapshot) for each band
         processed_peaks = [set() for _ in range(4)]
         cleaned_peaks = [set() for _ in range(4)]
+        all_valid_peak_indices = set().union(*peak_indices_list)
 
         def update(frame):
             nonlocal min_score_seen, max_score_seen
             current_time = times[frame]
             ax_transient.set_xlim(current_time - 20, current_time + 5)
+
+            # Update threshold lines to current rolling average at playhead
+            for i in range(4):
+                threshold_lines[i].set_ydata([rolling_thresholds[i][frame], rolling_thresholds[i][frame]])
+                threshold_lines[i].set_xdata([current_time - 20, current_time + 5])
 
             # Update playheads and cleanup sweeps
             playhead_transient.set_xdata([current_time, current_time])
@@ -184,7 +195,6 @@ def generate_video(audio_path, data):
                     snapshot = window * normalization
 
                     # Calculate Resonance Score
-                    snapshot_peaks, _ = scipy.signal.find_peaks(snapshot, height=np.mean(snapshot))
                     total_score = 0
                     data_to_measure = accumulated_buffer[:-100]
                     if len(data_to_measure) > 0:
@@ -195,7 +205,11 @@ def generate_video(audio_path, data):
                         qualifier_sum = 0.0
                         found_peak = False
 
-                        for sp_idx in snapshot_peaks:
+                        # Identify secondary peaks in the 5s window preceding p_idx
+                        secondary_indices = [idx for idx in all_valid_peak_indices if p_idx - 5000 <= idx < p_idx]
+
+                        for s_idx in secondary_indices:
+                            sp_idx = 5000 - (p_idx - s_idx)
                             val = accumulated_buffer[sp_idx]
                             qualifier = 0
                             if val > avg:
@@ -210,6 +224,7 @@ def generate_video(audio_path, data):
 
                             # Create individual qualifier markers on ax_buf
                             q_ms = buffer_times[sp_idx]
+                            # Use fixed range -1 to 1 for qualifier colors
                             q_color = get_score_color(qualifier, -1.0, 1.0)
                             q_line = ax_buf.axvline(x=q_ms, color=q_color, lw=1.5, ls=':', alpha=0.8)
                             q_label = ax_buf.text(q_ms, accumulated_buffer[sp_idx], f"{qualifier:+.2f}",
@@ -364,7 +379,7 @@ def generate_video(audio_path, data):
                 qualifier_artists.append(q[0])
                 qualifier_artists.append(q[1])
 
-            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, average_line, rating_text] + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
+            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, average_line, rating_text] + threshold_lines + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
@@ -433,14 +448,28 @@ def analyze_audio(file_path):
         # Split into 4 bands (32 bins each)
         onset_envs = []
         peaks_list = []
+        rolling_thresholds = []
+
+        window_size = 15000 # 15 seconds at 1ms resolution
 
         for i in range(4):
             S_band = S_db[i*32 : (i+1)*32, :]
             env = librosa.onset.onset_strength(S=S_band, sr=sr, hop_length=hop_length)
             onset_envs.append(env)
 
-            # Detect peaks that are above the average of this specific band's envelope
-            peaks, _ = scipy.signal.find_peaks(env, prominence=0.5, distance=200, height=np.mean(env))
+            # Calculate 15-second rolling average for thresholding
+            cumsum = np.cumsum(env)
+            rolling_avg = np.zeros_like(env)
+            # Expanding window for the first window_size samples
+            actual_window = min(window_size, len(env))
+            rolling_avg[:actual_window] = cumsum[:actual_window] / np.arange(1, actual_window + 1)
+            # Rolling window for the rest
+            if len(env) > window_size:
+                rolling_avg[window_size:] = (cumsum[window_size:] - cumsum[:-window_size]) / window_size
+            rolling_thresholds.append(rolling_avg)
+
+            # Detect peaks that are above the rolling average threshold
+            peaks, _ = scipy.signal.find_peaks(env, prominence=0.5, distance=200, height=rolling_avg)
             peaks_list.append(peaks)
 
         # Combined envelope for SSM calculation
@@ -512,6 +541,7 @@ def analyze_audio(file_path):
         # Add the 4 bands to the result
         for i in range(4):
             result[f"onset_env_{i}"] = onset_envs[i].tolist()
+            result[f"rolling_threshold_{i}"] = rolling_thresholds[i].tolist()
             result[f"peaks_{i}"] = {
                 "times": times[peaks_list[i]].tolist(),
                 "values": onset_envs[i][peaks_list[i]].tolist(),
