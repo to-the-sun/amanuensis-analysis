@@ -25,7 +25,7 @@ def get_score_color(score, min_score, max_score):
     """
     if score == 0:
         return "#808080"
-    
+
     if score < 0:
         # Interpolate between Red (#ff0000) and Gray (#808080)
         # t=1 at min_score, t=0 at 0
@@ -42,7 +42,7 @@ def get_score_color(score, min_score, max_score):
         r = int(0x80 + (0x00 - 0x80) * t)
         g = int(0x80 + (0xff - 0x80) * t)
         b = int(0x80 + (0x00 - 0x80) * t)
-        
+
     return f"#{r:02x}{g:02x}{b:02x}"
 
 def generate_video(audio_path, data):
@@ -178,7 +178,7 @@ def generate_video(audio_path, data):
                                 max_v = np.max(data_to_measure)
                                 min_v = np.min(data_to_measure)
 
-                                qualifier_sum = 0.0
+                                best_qualifier = -1.0 # Qualifiers range from -1 to 1
                                 found_peak = False
 
                                 for sp_idx in snapshot_peaks:
@@ -191,8 +191,9 @@ def generate_video(audio_path, data):
                                         if avg > min_v:
                                             qualifier = (val - avg) / (avg - min_v)
 
-                                    qualifier_sum += qualifier
-                                    found_peak = True
+                                    if not found_peak or qualifier > best_qualifier:
+                                        best_qualifier = qualifier
+                                        found_peak = True
 
                                     # Create individual qualifier markers on ax_buf
                                     q_ms = buffer_times[sp_idx]
@@ -206,7 +207,7 @@ def generate_video(audio_path, data):
                                 if found_peak:
                                     # Use the scalar of the primary original peak from the transient graph
                                     scalar = peak_val
-                                    total_score = scalar * qualifier_sum
+                                    total_score = scalar * best_qualifier
 
                             # Update dynamic range
                             min_score_seen = min(min_score_seen, total_score)
