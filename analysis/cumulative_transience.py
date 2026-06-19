@@ -128,12 +128,12 @@ def generate_video(audio_path, data):
         # Rating text in the corner of the first graph (ax_transient)
         rating_text = ax_transient.text(0.02, 0.98, 'Rating: 0.00', transform=ax_transient.transAxes,
                                         verticalalignment='top', fontsize=12, color='#f1c40f',
-                                        fontweight='bold', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
+                                        fontweight='bold')
 
         # Rhythm Metrics text initialization
         metrics_text = ax_buf.text(0.02, 0.95, '', transform=ax_buf.transAxes,
                                    verticalalignment='top', fontsize=10, color='#f1c40f',
-                                   fontweight='bold', bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=2))
+                                   fontweight='bold')
 
         peak_history = []
 
@@ -225,8 +225,9 @@ def generate_video(audio_path, data):
                             # Use fixed range -1 to 1 for qualifier colors
                             q_color = get_score_color(qualifier, -1.0, 1.0)
                             q_line = ax_buf.axvline(x=q_ms, color=q_color, lw=3.0, ls=':', alpha=0.8)
-                            q_label = ax_buf.text(q_ms, accumulated_buffer[sp_idx], f"{qualifier:+.2f}",
-                                                  color=q_color, fontsize=8, ha='center', va='bottom')
+                            q_label = ax_buf.text(q_ms, (qualifier + 1) / 2, f"{qualifier:+.2f}",
+                                                  color=q_color, fontsize=8, ha='right', va='center',
+                                                  transform=ax_buf.get_xaxis_transform())
                             active_qualifiers.append([q_line, q_label, 20, qualifier])
 
                         if found_peak:
@@ -242,10 +243,15 @@ def generate_video(audio_path, data):
                     avg_rating = np.mean(all_generated_scores)
                     rating_text.set_text(f"Rating: {avg_rating:.2f}")
 
+                    # Update previous scores to be smaller and not bold
+                    for score in active_scores:
+                        score[0].set_fontsize(10)
+                        score[0].set_fontweight('normal')
+
                     # Create score animation
                     score_text = ax_transient.text(times[p_idx], peak_val, f"{total_score:+.2f}",
                                                 color=get_score_color(total_score, min_score_seen, max_score_seen),
-                                                fontsize=10, fontweight='bold',
+                                                fontsize=20, fontweight='bold',
                                                 ha='center', va='bottom')
                     active_scores.append([score_text, 20, peak_val, total_score])
 
@@ -348,8 +354,7 @@ def generate_video(audio_path, data):
                         line = ax_buf.axvline(x=ms_val, color=style['color'], lw=style['lw'], alpha=style['alpha'], ls='--')
                         label = ax_buf.text(ms_val, ax_buf.get_ylim()[1]*0.9,
                                         f"{ms_val}ms", color=style['color'],
-                                        fontsize=8, ha='center', fontweight='bold',
-                                        bbox=dict(facecolor='black', alpha=0.5, edgecolor='none', pad=1))
+                                        fontsize=8, ha='center', fontweight='bold')
                         peak_lines.append(line)
                         peak_labels.append(label)
 
