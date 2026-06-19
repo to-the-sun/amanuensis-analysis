@@ -158,7 +158,7 @@ def generate_video(audio_path, data):
                     if p_idx > frame - 100 and p_idx <= frame and p_idx not in processed_peaks[band_idx]:
                         new_peaks.append((p_idx, band_idx))
 
-            # Sort peaks chronologically
+            # Sort peaks chronologically to clear markers and flip to newest
             new_peaks.sort()
 
             for p_idx, band_idx in new_peaks:
@@ -192,7 +192,7 @@ def generate_video(audio_path, data):
                         max_v = np.max(data_to_measure)
                         min_v = np.min(data_to_measure)
 
-                        best_qualifier = -1.0 # Qualifiers range from -1 to 1
+                        qualifier_sum = 0.0
                         found_peak = False
 
                         for sp_idx in snapshot_peaks:
@@ -205,9 +205,8 @@ def generate_video(audio_path, data):
                                 if avg > min_v:
                                     qualifier = (val - avg) / (avg - min_v)
 
-                            if not found_peak or qualifier > best_qualifier:
-                                best_qualifier = qualifier
-                                found_peak = True
+                            qualifier_sum += qualifier
+                            found_peak = True
 
                             # Create individual qualifier markers on ax_buf
                             q_ms = buffer_times[sp_idx]
@@ -221,7 +220,7 @@ def generate_video(audio_path, data):
                         if found_peak:
                             # Use the scalar of the primary original peak from the transient graph
                             scalar = peak_val
-                            total_score = scalar * best_qualifier
+                            total_score = scalar * qualifier_sum
 
                     # Update dynamic range
                     min_score_seen = min(min_score_seen, total_score)
@@ -440,7 +439,8 @@ def analyze_audio(file_path):
             env = librosa.onset.onset_strength(S=S_band, sr=sr, hop_length=hop_length)
             onset_envs.append(env)
 
-            peaks, _ = scipy.signal.find_peaks(env, prominence=0.5, distance=200)
+            # Detect peaks that are above the average of this specific band's envelope
+            peaks, _ = scipy.signal.find_peaks(env, prominence=0.5, distance=200, height=np.mean(env))
             peaks_list.append(peaks)
 
         # Combined envelope for SSM calculation

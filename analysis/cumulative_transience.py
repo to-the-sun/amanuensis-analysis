@@ -158,7 +158,7 @@ def generate_video(audio_path, data):
                     if p_idx > frame - 100 and p_idx <= frame and p_idx not in processed_peaks[band_idx]:
                         new_peaks.append((p_idx, band_idx))
 
-            # Sort peaks chronologically
+            # Sort peaks chronologically to clear markers and flip to newest
             new_peaks.sort()
 
             for p_idx, band_idx in new_peaks:
@@ -439,7 +439,8 @@ def analyze_audio(file_path):
             env = librosa.onset.onset_strength(S=S_band, sr=sr, hop_length=hop_length)
             onset_envs.append(env)
 
-            peaks, _ = scipy.signal.find_peaks(env, prominence=0.5, distance=200)
+            # Detect peaks that are above the average of this specific band's envelope
+            peaks, _ = scipy.signal.find_peaks(env, prominence=0.5, distance=200, height=np.mean(env))
             peaks_list.append(peaks)
 
         # Combined envelope for SSM calculation
