@@ -226,7 +226,7 @@ def generate_video(audio_path, data):
                             q_color = get_score_color(qualifier, -1.0, 1.0)
                             q_line = ax_buf.axvline(x=q_ms, color=q_color, lw=3.0, ls=':', alpha=0.8)
                             q_label = ax_buf.text(q_ms, (qualifier + 1) / 2, f"{qualifier:+.2f}",
-                                                  color=q_color, fontsize=8, ha='right', va='center',
+                                                  color=q_color, fontsize=8, ha='left', va='center',
                                                   transform=ax_buf.get_xaxis_transform())
                             active_qualifiers.append([q_line, q_label, 20, qualifier])
 
