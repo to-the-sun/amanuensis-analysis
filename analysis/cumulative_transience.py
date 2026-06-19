@@ -163,7 +163,7 @@ def generate_video(audio_path, data):
                             snapshot = window * normalization
 
                             # Calculate Resonance Score
-                            snapshot_peaks, _ = scipy.signal.find_peaks(snapshot, height=0.01)
+                            snapshot_peaks, _ = scipy.signal.find_peaks(snapshot, height=np.mean(snapshot))
                             total_score = 0
                             data_to_measure = accumulated_buffer[:-100]
                             if len(data_to_measure) > 0:
@@ -283,7 +283,7 @@ def generate_video(audio_path, data):
             peak_labels.clear()
 
             if np.max(accumulated_buffer) > 0.1:
-                peaks_in_buf, props = scipy.signal.find_peaks(accumulated_buffer, height=0.01, distance=200)
+                peaks_in_buf, props = scipy.signal.find_peaks(accumulated_buffer, height=np.mean(accumulated_buffer), distance=200)
                 if len(peaks_in_buf) > 0:
                     peak_heights = props['peak_heights']
                     top_indices = np.argsort(peak_heights)[-3:][::-1]
