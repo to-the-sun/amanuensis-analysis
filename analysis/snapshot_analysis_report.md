@@ -24,7 +24,7 @@ To ensure that rhythmic influence is relative across different audio files and s
 The **Resonance Score** measures how well the rhythmic "history" contained in the new snapshot aligns with the collective history of all previous transients stored in the `accumulated_buffer`.
 
 ### A. Internal Peak Detection
-The module identifies all internal peaks within the new 5-second `snapshot` using `scipy.signal.find_peaks` with a minimum height threshold of **0.01**.
+The module identifies all internal peaks within the new 5-second `snapshot` using `scipy.signal.find_peaks` with a dynamic minimum height threshold equal to the **average of every point in the snapshot** (`np.mean(snapshot)`).
 
 ### B. Historical Context (The 100ms Offset)
 Baseline statistics (`avg`, `max_v`, and `min_v`) are calculated from the current state of the `accumulated_buffer`. Crucially, the **last 100ms of the buffer are excluded** (`accumulated_buffer[:-100]`) from these calculations. This prevents the primary peak—which is always located at the 0ms mark in every snapshot—from artificially inflating the resonance score or biasing the rhythmic average.
