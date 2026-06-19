@@ -152,82 +152,96 @@ def generate_video(audio_path, data):
             buffer_updated = False
 
             # Process Peaks for all 4 bands
+            new_peaks = []
             for band_idx in range(4):
                 for p_idx in peak_indices_list[band_idx]:
                     if p_idx > frame - 100 and p_idx <= frame and p_idx not in processed_peaks[band_idx]:
-                        processed_peaks[band_idx].add(p_idx)
-                        start = p_idx - 5000
-                        end = p_idx
-                        if start < 0:
-                            window = onset_envs[band_idx][0 : end + 1]
-                            window = np.pad(window, (abs(start), 0), mode='constant')
-                        else:
-                            window = onset_envs[band_idx][start : end + 1]
+                        new_peaks.append((p_idx, band_idx))
 
-                        if len(window) == buffer_len:
-                            peak_val = onset_envs[band_idx][p_idx]
-                            normalization = peak_val / max_peak if max_peak > 0 else 1.0
-                            snapshot = window * normalization
+            # Sort peaks chronologically
+            new_peaks.sort()
 
-                            # Calculate Resonance Score
-                            snapshot_peaks, _ = scipy.signal.find_peaks(snapshot, height=np.mean(snapshot))
-                            total_score = 0
-                            data_to_measure = accumulated_buffer[:-100]
-                            if len(data_to_measure) > 0:
-                                avg = np.mean(data_to_measure)
-                                max_v = np.max(data_to_measure)
-                                min_v = np.min(data_to_measure)
+            for p_idx, band_idx in new_peaks:
+                processed_peaks[band_idx].add(p_idx)
 
-                                best_qualifier = -1.0 # Qualifiers range from -1 to 1
-                                found_peak = False
+                # Clear existing qualifiers when a new peak is processed
+                for q in active_qualifiers:
+                    q[0].remove()
+                    q[1].remove()
+                active_qualifiers.clear()
 
-                                for sp_idx in snapshot_peaks:
-                                    val = accumulated_buffer[sp_idx]
-                                    qualifier = 0
-                                    if val > avg:
-                                        if max_v > avg:
-                                            qualifier = (val - avg) / (max_v - avg)
-                                    elif val < avg:
-                                        if avg > min_v:
-                                            qualifier = (val - avg) / (avg - min_v)
+                start = p_idx - 5000
+                end = p_idx
+                if start < 0:
+                    window = onset_envs[band_idx][0 : end + 1]
+                    window = np.pad(window, (abs(start), 0), mode='constant')
+                else:
+                    window = onset_envs[band_idx][start : end + 1]
 
-                                    if not found_peak or qualifier > best_qualifier:
-                                        best_qualifier = qualifier
-                                        found_peak = True
+                if len(window) == buffer_len:
+                    peak_val = onset_envs[band_idx][p_idx]
+                    normalization = peak_val / max_peak if max_peak > 0 else 1.0
+                    snapshot = window * normalization
 
-                                    # Create individual qualifier markers on ax_buf
-                                    q_ms = buffer_times[sp_idx]
-                                    q_color = get_score_color(qualifier, -1.0, 1.0)
-                                    q_line = ax_buf.axvline(x=q_ms, color=q_color, lw=1.5, ls=':', alpha=0.8)
-                                    q_label = ax_buf.text(q_ms, accumulated_buffer[sp_idx], f"{qualifier:+.2f}",
-                                                          color=q_color, fontsize=8, ha='center', va='bottom',
-                                                          bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
-                                    active_qualifiers.append([q_line, q_label, 20, qualifier])
+                    # Calculate Resonance Score
+                    snapshot_peaks, _ = scipy.signal.find_peaks(snapshot, height=np.mean(snapshot))
+                    total_score = 0
+                    data_to_measure = accumulated_buffer[:-100]
+                    if len(data_to_measure) > 0:
+                        avg = np.mean(data_to_measure)
+                        max_v = np.max(data_to_measure)
+                        min_v = np.min(data_to_measure)
 
-                                if found_peak:
-                                    # Use the scalar of the primary original peak from the transient graph
-                                    scalar = peak_val
-                                    total_score = scalar * best_qualifier
+                        best_qualifier = -1.0 # Qualifiers range from -1 to 1
+                        found_peak = False
 
-                            # Update dynamic range
-                            min_score_seen = min(min_score_seen, total_score)
-                            max_score_seen = max(max_score_seen, total_score)
+                        for sp_idx in snapshot_peaks:
+                            val = accumulated_buffer[sp_idx]
+                            qualifier = 0
+                            if val > avg:
+                                if max_v > avg:
+                                    qualifier = (val - avg) / (max_v - avg)
+                            elif val < avg:
+                                if avg > min_v:
+                                    qualifier = (val - avg) / (avg - min_v)
 
-                            all_generated_scores.append(total_score)
-                            avg_rating = np.mean(all_generated_scores)
-                            rating_text.set_text(f"Rating: {avg_rating:.2f}")
+                            if not found_peak or qualifier > best_qualifier:
+                                best_qualifier = qualifier
+                                found_peak = True
 
-                            # Create score animation
-                            score_text = ax_transient.text(times[p_idx], peak_val, f"{total_score:+.2f}",
-                                                        color=get_score_color(total_score, min_score_seen, max_score_seen),
-                                                        fontsize=10, fontweight='bold',
-                                                        ha='center', va='bottom')
-                            active_scores.append([score_text, 20, peak_val, total_score])
+                            # Create individual qualifier markers on ax_buf
+                            q_ms = buffer_times[sp_idx]
+                            q_color = get_score_color(qualifier, -1.0, 1.0)
+                            q_line = ax_buf.axvline(x=q_ms, color=q_color, lw=1.5, ls=':', alpha=0.8)
+                            q_label = ax_buf.text(q_ms, accumulated_buffer[sp_idx], f"{qualifier:+.2f}",
+                                                  color=q_color, fontsize=8, ha='center', va='bottom',
+                                                  bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
+                            active_qualifiers.append([q_line, q_label, 20, qualifier])
 
-                            accumulated_buffer[:] += snapshot
-                            peak_snapshots[band_idx][p_idx] = snapshot
-                            buffer_updated = True
-                            active_flashes.append([snapshot, 20])
+                        if found_peak:
+                            # Use the scalar of the primary original peak from the transient graph
+                            scalar = peak_val
+                            total_score = scalar * best_qualifier
+
+                    # Update dynamic range
+                    min_score_seen = min(min_score_seen, total_score)
+                    max_score_seen = max(max_score_seen, total_score)
+
+                    all_generated_scores.append(total_score)
+                    avg_rating = np.mean(all_generated_scores)
+                    rating_text.set_text(f"Rating: {avg_rating:.2f}")
+
+                    # Create score animation
+                    score_text = ax_transient.text(times[p_idx], peak_val, f"{total_score:+.2f}",
+                                                color=get_score_color(total_score, min_score_seen, max_score_seen),
+                                                fontsize=10, fontweight='bold',
+                                                ha='center', va='bottom')
+                    active_scores.append([score_text, 20, peak_val, total_score])
+
+                    accumulated_buffer[:] += snapshot
+                    peak_snapshots[band_idx][p_idx] = snapshot
+                    buffer_updated = True
+                    active_flashes.append([snapshot, 20])
 
             # Dynamic Y-axis scaling for buffer (excluding peak at 0ms)
             current_max = np.max(accumulated_buffer[:-100]) if len(accumulated_buffer) > 100 else 0
