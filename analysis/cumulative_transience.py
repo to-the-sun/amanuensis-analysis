@@ -352,11 +352,7 @@ def generate_video(audio_path, data):
                         style = peak_styles[i] if i < len(peak_styles) else peak_styles[-1]
 
                         line = ax_buf.axvline(x=ms_val, color=style['color'], lw=style['lw'], alpha=style['alpha'], ls='--')
-                        label = ax_buf.text(ms_val, ax_buf.get_ylim()[1]*0.9,
-                                        f"{ms_val}ms", color=style['color'],
-                                        fontsize=8, ha='center', fontweight='bold')
                         peak_lines.append(line)
-                        peak_labels.append(label)
 
             # Handle Qualifier Animations
             for q in active_qualifiers[:]:
