@@ -143,6 +143,12 @@ def generate_video(audio_path, data):
                                    fontweight='bold')
 
         peak_history = []
+        final_metrics = {
+            'rating': 0.0,
+            'std_dev': 0.0,
+            'contrast': 0.0,
+            'peak_std': 0.0
+        }
 
         # Track snapshots for cleanup
         peak_snapshots = [{} for _ in range(4)] # List of dictionaries (peak_idx -> snapshot) for each band
@@ -249,6 +255,7 @@ def generate_video(audio_path, data):
                     all_generated_scores.append(total_score)
                     avg_rating = np.mean(all_generated_scores)
                     rating_text.set_text(f"Rating: {avg_rating:.2f}")
+                    final_metrics['rating'] = avg_rating
 
                     # Update previous scores to be smaller and not bold
                     for score in active_scores:
@@ -294,6 +301,9 @@ def generate_video(audio_path, data):
                 contrast = np.max(data_to_measure) / mean_metrics if mean_metrics > 0 else 0
                 peak_std = np.std(peak_history) if peak_history else 0.0
                 metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}\nPeak Std: {peak_std:.3f}")
+                final_metrics['std_dev'] = std_dev
+                final_metrics['contrast'] = contrast
+                final_metrics['peak_std'] = peak_std
             else:
                 metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000\nPeak Std: 0.000")
 
@@ -418,6 +428,23 @@ def generate_video(audio_path, data):
         ani.save(temp_video_path, writer=writer, progress_callback=progress_callback)
         pbar.close()
         plt.close(fig)
+
+        # Record final metrics to ratings.txt
+        try:
+            song_name = os.path.splitext(os.path.basename(audio_path))[0]
+            project_dir = rf'D:\[Library]\[Audio]\[Works]\[Projects]\{song_name}'
+            if not os.path.exists(project_dir):
+                os.makedirs(project_dir, exist_ok=True)
+
+            ratings_file = os.path.join(project_dir, 'ratings.txt')
+            with open(ratings_file, 'w', encoding='utf-8') as f:
+                f.write(f"Rating: {final_metrics['rating']:.2f}\n")
+                f.write(f"Standard Deviation: {final_metrics['std_dev']:.3f}\n")
+                f.write(f"Contrast: {final_metrics['contrast']:.3f}\n")
+                f.write(f"bar length deviation: {final_metrics['peak_std']:.3f}\n")
+            print(f"Metrics recorded to {ratings_file}")
+        except Exception as e:
+            print(f"Error recording metrics: {e}")
 
         # Merge with original audio using ffmpeg
         output_video = os.path.splitext(audio_path)[0] + ".mp4"
