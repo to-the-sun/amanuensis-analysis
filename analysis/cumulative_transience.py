@@ -445,7 +445,7 @@ def generate_video(audio_path, data):
                 f.write(f"Rating: {final_rating:.2f}\n")
                 f.write(f"Standard Deviation: {final_std_dev:.3f}\n")
                 f.write(f"Contrast: {final_contrast:.3f}\n")
-                f.write(f"bar length deviation: {final_peak_std:.3f}\n")
+                f.write(f"Bar Length Deviation: {final_peak_std:.3f}\n")
             print(f"Metrics recorded to {ratings_file}")
         except Exception as e:
             print(f"Error recording metrics: {e}")

@@ -64,4 +64,4 @@ Upon completion of the analysis and video generation, the script records the fin
     *   **Rating**: The mean of all generated resonance scores.
     *   **Standard Deviation**: The running standard deviation of the energy in the accumulated buffer (excluding the last 99ms).
     *   **Contrast**: The ratio of the maximum energy to the mean energy in the accumulated buffer.
-    *   **bar length deviation**: The standard deviation of the temporal position (in ms) of the highest detected peaks in the historical buffer, tracking rhythmic stability.
+    *   **Bar Length Deviation**: The standard deviation of the temporal position (in ms) of the highest detected peaks in the historical buffer, tracking rhythmic stability.
