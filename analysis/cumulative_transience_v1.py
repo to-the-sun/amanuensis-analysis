@@ -377,9 +377,18 @@ def generate_video(audio_path, data):
                     q_label.set_alpha(alpha)
 
             # Update Score display with rolling average of past 9ms
-            recent_scores = [s for idx, s in score_history if frame - 9 <= idx <= frame]
-            if recent_scores:
-                last_score_avg = np.mean(recent_scores)
+            # We update only when a score enters (idx) or leaves (idx + 10) the window.
+            events = {frame}
+            for idx, s in score_history:
+                if max(0, frame - 99) <= idx <= frame:
+                    events.add(idx)
+                if max(0, frame - 99) <= idx + 10 <= frame:
+                    events.add(idx + 10)
+
+            for t in sorted(list(events)):
+                recent_scores = [s for idx, s in score_history if t - 9 <= idx <= t]
+                if recent_scores:
+                    last_score_avg = np.mean(recent_scores)
 
             score_display_text.set_text(f"Score: {last_score_avg:+.2f}")
             score_display_text.set_color(get_score_color(last_score_avg, min_score_seen, max_score_seen))
