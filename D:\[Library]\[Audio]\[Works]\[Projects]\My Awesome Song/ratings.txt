@@ -1,4 +1,0 @@
-Rating: 4.57
-Standard Deviation: 0.123
-Contrast: 10.988
-Peak Deviation: 2.346
