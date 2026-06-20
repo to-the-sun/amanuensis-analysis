@@ -124,9 +124,16 @@ def generate_video(audio_path, data):
         all_generated_scores = []
         min_score_seen = 0.0
         max_score_seen = 0.0
+        score_history = []
+        last_score_avg = 0.0
+
+        # Score parameter above Rating
+        score_display_text = ax_transient.text(0.02, 0.98, 'Score: +0.00', transform=ax_transient.transAxes,
+                                              verticalalignment='top', fontsize=20, color='#808080',
+                                              fontweight='bold')
 
         # Rating text in the corner of the first graph (ax_transient)
-        rating_text = ax_transient.text(0.02, 0.98, 'Rating: 0.00', transform=ax_transient.transAxes,
+        rating_text = ax_transient.text(0.02, 0.93, 'Rating: 0.00', transform=ax_transient.transAxes,
                                         verticalalignment='top', fontsize=12, color='#f1c40f',
                                         fontweight='bold')
 
@@ -144,7 +151,7 @@ def generate_video(audio_path, data):
         all_valid_peak_indices = set().union(*peak_indices_list)
 
         def update(frame):
-            nonlocal min_score_seen, max_score_seen
+            nonlocal min_score_seen, max_score_seen, last_score_avg
             current_time = times[frame]
             ax_transient.set_xlim(current_time - 20, current_time + 5)
 
@@ -254,6 +261,7 @@ def generate_video(audio_path, data):
                                                 fontsize=20, fontweight='bold',
                                                 ha='center', va='bottom')
                     active_scores.append([score_text, 20, peak_val, total_score])
+                    score_history.append((p_idx, total_score))
 
                     accumulated_buffer[:] += snapshot
                     peak_snapshots[band_idx][p_idx] = snapshot
@@ -368,13 +376,30 @@ def generate_video(audio_path, data):
                     q_line.set_alpha(alpha * 0.8)
                     q_label.set_alpha(alpha)
 
+            # Update Score display with rolling average of past 9ms
+            # We update only when a score enters (idx) or leaves (idx + 10) the window.
+            events = {frame}
+            for idx, s in score_history:
+                if max(0, frame - 99) <= idx <= frame:
+                    events.add(idx)
+                if max(0, frame - 99) <= idx + 10 <= frame:
+                    events.add(idx + 10)
+
+            for t in sorted(list(events)):
+                recent_scores = [s for idx, s in score_history if t - 9 <= idx <= t]
+                if recent_scores:
+                    last_score_avg = np.mean(recent_scores)
+
+            score_display_text.set_text(f"Score: {last_score_avg:+.2f}")
+            score_display_text.set_color(get_score_color(last_score_avg, min_score_seen, max_score_seen))
+
             score_artists = [s[0] for s in active_scores]
             qualifier_artists = []
             for q in active_qualifiers:
                 qualifier_artists.append(q[0])
                 qualifier_artists.append(q[1])
 
-            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, rating_text] + threshold_lines + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
+            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, rating_text, score_display_text] + threshold_lines + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
