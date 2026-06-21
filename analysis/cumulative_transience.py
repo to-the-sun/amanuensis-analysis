@@ -107,6 +107,7 @@ def generate_video(audio_path, data):
         accumulated_buffer = np.zeros(buffer_len)
         buffer_times = np.linspace(-5000, 0, buffer_len)
         buffer_line, = ax_buf.plot(buffer_times, accumulated_buffer, color='#f1c40f', lw=2)
+        mean_line, = ax_buf.plot([-5000, 0], [0, 0], color='#808080', lw=1, ls='--', alpha=0.5, label='Mean Energy')
         ax_buf.set_title("Accumulated 5s Historical Buffer")
         ax_buf.set_xlabel("Time Relative to Peak (ms)")
         ax_buf.set_ylabel("Accumulated Energy")
@@ -291,10 +292,12 @@ def generate_video(audio_path, data):
             if len(data_to_measure) > 0:
                 std_dev = np.std(data_to_measure)
                 mean_metrics = np.mean(data_to_measure)
+                mean_line.set_ydata([mean_metrics, mean_metrics])
                 contrast = np.max(data_to_measure) / mean_metrics if mean_metrics > 0 else 0
                 peak_std = np.std(peak_history) if peak_history else 0.0
                 metrics_text.set_text(f"Std Dev: {std_dev:.3f}\nContrast: {contrast:.3f}\nPeak Std: {peak_std:.3f}")
             else:
+                mean_line.set_ydata([0, 0])
                 metrics_text.set_text("Std Dev: 0.000\nContrast: 0.000\nPeak Std: 0.000")
 
             # Handle Flash and Fade
@@ -399,7 +402,7 @@ def generate_video(audio_path, data):
                 qualifier_artists.append(q[0])
                 qualifier_artists.append(q[1])
 
-            return [playhead_transient, cleanup_transient, buffer_line, metrics_text, rating_text, score_display_text] + threshold_lines + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
+            return [playhead_transient, cleanup_transient, buffer_line, mean_line, metrics_text, rating_text, score_display_text] + threshold_lines + flash_fill_artists + peak_lines + peak_labels + score_artists + qualifier_artists
 
         # Update every 100ms, stepping 100 frames (1ms each)
         frame_indices = range(0, len(times), 100)
