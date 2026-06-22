@@ -15,7 +15,10 @@ class TransientAnalyzer:
         self.min_score_seen = 0.0
         self.max_score_seen = 0.0
         self.all_generated_scores = []
-        self.score_history = [] # List of (p_idx, score)
+
+        # rolling score calculation optimization
+        self.upcoming_events = [] # List of (p_idx, type, score) where type is 'ADD' or 'REMOVE'
+        self.current_window_scores = [] # Current scores in the 9ms window
         self.last_score_avg = 0.0
 
         self.peak_history = []
@@ -111,7 +114,10 @@ class TransientAnalyzer:
 
                 peak_results['total_score'] = total_score
 
-                self.score_history.append((p_idx, total_score))
+                # Add to event queue for optimized rolling average
+                self.upcoming_events.append((p_idx, 'ADD', total_score))
+                self.upcoming_events.append((p_idx + 10, 'REMOVE', total_score))
+
                 self.accumulated_buffer[:] += snapshot
                 self.peak_snapshots[band_idx][p_idx] = snapshot
 
@@ -169,20 +175,20 @@ class TransientAnalyzer:
 
             metrics['peak_std'] = np.std(self.peak_history) if self.peak_history else 0.0
 
-        # Update rolling score average (past 9ms window)
-        # Iterate through events in the last 100ms to ensure persistence of scores
-        # that entered/exited between animation frames.
-        events = {frame}
-        for idx, s in self.score_history:
-            if frame - 99 <= idx <= frame:
-                events.add(idx)
-            if frame - 99 <= idx + 10 <= frame:
-                events.add(idx + 10)
+        # Optimized rolling score calculation using event queue
+        # Sort and process all events up to the current frame
+        self.upcoming_events.sort()
+        while self.upcoming_events and self.upcoming_events[0][0] <= frame:
+            evt_time, evt_type, score = self.upcoming_events.pop(0)
+            if evt_type == 'ADD':
+                self.current_window_scores.append(score)
+            elif evt_type == 'REMOVE':
+                if score in self.current_window_scores:
+                    self.current_window_scores.remove(score)
 
-        for t in sorted(list(events)):
-            recent_scores = [s for idx, s in self.score_history if t - 9 <= idx <= t]
-            if recent_scores:
-                self.last_score_avg = np.mean(recent_scores)
+            # Update average if window is non-empty; otherwise persist last avg
+            if self.current_window_scores:
+                self.last_score_avg = np.mean(self.current_window_scores)
 
         metrics['rolling_score'] = self.last_score_avg
 
