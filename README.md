@@ -29,10 +29,6 @@ python3 analysis/analyze.py --dir /path/to/audio --output report.html
         *   **Silver (#ecf0f1):** 2nd largest peak.
         *   **Bronze (#bdc3c7):** 3rd largest peak.
     *   **Scaling:** Dynamic Y-axis scaling excludes the last 100ms of the buffer to prevent visual distortion from the alignment peak.
-*   **Self-Similarity Matrix (SSM):**
-    *   Visualizes the "rhythmic DNA" by comparing every 100ms chunk of the audio against every other chunk.
-    *   **Weighting:** Uses a transience-weighted similarity score to filter out noise and emphasize rhythmic alignment.
-    *   **Performance:** Rendered as a Base64-encoded PNG to ensure smooth browser performance even for long files.
 *   **Video Generation:** Produces MP4s with synchronized transient graphs and mono audio (forced via FFmpeg for size efficiency).
 
 ### Automation: Amanuensis (`Amanuensis.py`)
