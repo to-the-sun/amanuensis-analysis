@@ -69,7 +69,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         query = " ".join(sys.argv[1:])
     else:
-        query = "Explain what a Self-Similarity Matrix is in the context of audio analysis."
+        query = "Explain the importance of transient analysis in audio engineering."
 
     print(f"Context window size: {get_context_window_size()}")
     print(f"Prompt overhead: {get_prompt_overhead()}")

@@ -308,11 +308,6 @@ def analyze_audio(file_path):
     result = cumulative_transience.analyze_audio(y, sr)
     result['filename'] = os.path.basename(file_path)
 
-    ssm_base64, peak_similarity = cumulative_transience.generate_ssm(result['onset_env_combined'], result['times'])
-    result['ssm_image'] = ssm_base64
-    result['peak_similarity'] = peak_similarity
-    result['ssm_extent'] = [float(result['times'][0]), float(result['times'][-1])]
-
     # Compatibility with existing result format
     result['times'] = result['times'].tolist()
     for i in range(4):
