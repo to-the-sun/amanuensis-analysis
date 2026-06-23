@@ -1,9 +1,6 @@
 import librosa
 import numpy as np
 import scipy.signal
-import io
-import base64
-import matplotlib.pyplot as plt
 
 class TransientAnalyzer:
     def __init__(self, max_peak_value=1.0):
@@ -233,10 +230,8 @@ def analyze_audio(y, sr):
         peaks, _ = scipy.signal.find_peaks(env, prominence=0.5, distance=200, height=rolling_avg)
         peaks_list.append(peaks)
 
-    # Combined envelope for SSM calculation
-    onset_env_combined = librosa.onset.onset_strength(S=S_db, sr=sr, hop_length=hop_length)
-
-    times = librosa.frames_to_time(np.arange(len(onset_env_combined)), sr=sr, hop_length=hop_length)
+    # Use first band for time calculation (all bands have same length)
+    times = librosa.frames_to_time(np.arange(len(onset_envs[0])), sr=sr, hop_length=hop_length)
 
     # Shared normalization factor (max across all bands)
     all_peak_vals = []
@@ -251,56 +246,5 @@ def analyze_audio(y, sr):
         "max_peak_value": max_peak_value,
         "onset_envs": onset_envs,
         "rolling_thresholds": rolling_thresholds,
-        "peaks_list": peaks_list,
-        "onset_env_combined": onset_env_combined
+        "peaks_list": peaks_list
     }
-
-def generate_ssm(onset_env_combined, times):
-    """
-    Generates a high-resolution SSM image (Base64) from combined onset envelope.
-    """
-    # Downsample for SSM calculation (100ms resolution)
-    ssm_hop = 100
-    onset_env_ssm = onset_env_combined[::ssm_hop]
-    times_ssm = times[::ssm_hop]
-
-    # Normalize onset_env for weighting
-    max_onset = np.max(onset_env_ssm) if np.max(onset_env_ssm) > 0 else 1
-    norm_onset = onset_env_ssm / max_onset
-
-    # Calculate SSM at 100ms resolution
-    dist_matrix = np.abs(onset_env_ssm[:, np.newaxis] - onset_env_ssm[np.newaxis, :])
-    max_dist = np.max(dist_matrix) if np.max(dist_matrix) > 0 else 1
-    ssm = 1 - (dist_matrix / max_dist)
-    transience_weight = np.minimum(norm_onset[:, np.newaxis], norm_onset[np.newaxis, :])
-    ssm = ssm * transience_weight
-
-    # Find peak off-diagonal similarity for footnote
-    ssm_off_diag = ssm.copy()
-    np.fill_diagonal(ssm_off_diag, -1)
-    peak_idx = np.unravel_index(np.argmax(ssm_off_diag), ssm_off_diag.shape)
-    i, j = peak_idx
-
-    peak_similarity_data = {
-        "time_i": float(times_ssm[i]),
-        "time_j": float(times_ssm[j]),
-        "onset_i": float(onset_env_ssm[i]),
-        "onset_j": float(onset_env_ssm[j]),
-        "max_dist": float(max_dist),
-        "max_onset": float(max_onset),
-        "final_similarity": float(ssm[i, j])
-    }
-
-    # Render SSM to image
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.imshow(ssm, cmap='viridis', origin='lower', aspect='auto', vmin=0, vmax=1)
-    ax.axis('off')
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    ssm_base64 = base64.b64encode(buf.read()).decode('utf-8')
-
-    return ssm_base64, peak_similarity_data
