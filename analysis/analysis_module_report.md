@@ -55,6 +55,11 @@ Performs spectral decomposition and peak detection on raw audio.
     - `sr` (int): Sample rate.
 - **Outputs**: A dictionary containing `times`, `onset_envs` (4 bands), `rolling_thresholds`, and `peaks_list`.
 
+#### `generate_ssm(onset_env_combined, times)`
+Generates a Self-Similarity Matrix (SSM) visualization.
+- **Inputs**: `onset_env_combined` (array), `times` (array).
+- **Outputs**: `ssm_base64` (string), `peak_similarity_data` (dict).
+
 ---
 
 ## Input/Output Specification
@@ -68,6 +73,7 @@ Performs spectral decomposition and peak detection on raw audio.
 - **Structured Analysis**: Envelopes and peak indices for Sub-Bass, Bass/Low-Mid, High-Mid, and Treble.
 - **Resonance Scores**: Quantitative measures of how well a new peak aligns with the historical energy in the buffer.
 - **Rhythmic Stats**: Real-time metrics reflecting the "tightness" and "contrast" of the accumulated transients.
+- **Visual Artifacts**: Base64 encoded SSM images for report embedding.
 
 ---
 

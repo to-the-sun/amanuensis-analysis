@@ -24,7 +24,7 @@ def get_score_color(score, min_score, max_score):
     """
     if score == 0:
         return "#808080"
-
+    
     if score < 0:
         # Interpolate between Red (#ff0000) and Gray (#808080)
         t = score / min_score if min_score < 0 else 0.0
@@ -39,7 +39,7 @@ def get_score_color(score, min_score, max_score):
         r = int(0x80 + (0x00 - 0x80) * t)
         g = int(0x80 + (0xff - 0x80) * t)
         b = int(0x80 + (0x00 - 0x80) * t)
-
+        
     return f"#{r:02x}{g:02x}{b:02x}"
 
 def generate_video(audio_path, data):
@@ -55,7 +55,7 @@ def generate_video(audio_path, data):
         rolling_thresholds = data['rolling_thresholds']
         peak_indices_list = data['peaks_list']
         max_peak = data['max_peak_value']
-
+        
         # Helper for secondary peak lookup
         all_valid_peak_indices = set().union(*peak_indices_list)
 
@@ -142,7 +142,7 @@ def generate_video(audio_path, data):
 
             # Process Peaks
             new_peak_data = analyzer.process_new_peaks(frame, peak_indices_list, onset_envs, all_valid_peak_indices, times)
-
+            
             for p_data in new_peak_data:
                 # Clear existing qualifiers when a new peak is processed
                 for q in active_qualifiers:
@@ -178,10 +178,10 @@ def generate_video(audio_path, data):
 
             # Update Metrics and Cleanup
             metrics = analyzer.update_metrics(frame)
-
+            
             if metrics['buffer_updated'] or new_peak_data:
                 buffer_line.set_ydata(analyzer.accumulated_buffer)
-
+            
             # Dynamic Y-axis scaling for buffer
             current_max = np.max(analyzer.accumulated_buffer[:-99]) if len(analyzer.accumulated_buffer) > 99 else 0
             ax_buf.set_ylim(0, max(0.1, current_max * 1.1))
@@ -307,7 +307,12 @@ def analyze_audio(file_path):
     y, sr = librosa.load(file_path, sr=None, mono=True)
     result = cumulative_transience.analyze_audio(y, sr)
     result['filename'] = os.path.basename(file_path)
-
+    
+    ssm_base64, peak_similarity = cumulative_transience.generate_ssm(result['onset_env_combined'], result['times'])
+    result['ssm_image'] = ssm_base64
+    result['peak_similarity'] = peak_similarity
+    result['ssm_extent'] = [float(result['times'][0]), float(result['times'][-1])]
+    
     # Compatibility with existing result format
     result['times'] = result['times'].tolist()
     for i in range(4):
@@ -318,7 +323,7 @@ def analyze_audio(file_path):
             "values": result['onset_envs'][i][result['peaks_list'][i]].tolist(),
             "indices": result['peaks_list'][i].tolist()
         }
-
+    
     return result
 
 def main():
