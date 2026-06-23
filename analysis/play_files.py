@@ -45,7 +45,22 @@ def play_and_analyze(file_path, mock=False, device=None):
                 # Try to get device info
                 device_info = sd.query_devices(device, kind='output')
                 device_name = device_info['name']
-                print(f"Starting audible playback on device: {device_name}")
+                device_sr = device_info['default_samplerate']
+                device_channels = device_info['max_output_channels']
+
+                print(f"Device: {device_name}")
+                print(f"Device Default Sample Rate: {device_sr} Hz")
+                print(f"Device Max Output Channels: {device_channels}")
+                print(f"File Sample Rate: {sr} Hz")
+
+                # Check output settings
+                try:
+                    sd.check_output_settings(device=device, samplerate=sr, channels=1)
+                    print(f"Output settings (SR={sr}, Channels=1) are supported.")
+                except Exception as check_err:
+                    print(f"Warning: Output settings may not be supported: {check_err}")
+
+                print("Starting audible playback...")
                 sd.play(y, sr, device=device)
             except Exception as e:
                 print(f"Error starting playback: {e}")
@@ -96,9 +111,9 @@ def play_and_analyze(file_path, mock=False, device=None):
                         # Highlight peak events
                         for p in new_peak_data:
                             band_names = ['Sub-Bass', 'Bass/Low-Mid', 'High-Mid', 'Treble']
-                            print(f"{output}  <-- PEAK [{band_names[p['band_idx']]}] Score: {p['total_score']:+.2f}")
+                            print(f"{output}  <-- PEAK [{band_names[p['band_idx']]}] Score: {p['total_score']:+.2f}", flush=True)
                     else:
-                        print(output)
+                        print(output, flush=True)
 
                 last_printed_frame = current_frame
 
@@ -108,14 +123,14 @@ def play_and_analyze(file_path, mock=False, device=None):
     except KeyboardInterrupt:
         if not mock and SOUNDDEVICE_AVAILABLE:
             sd.stop()
-        print("\nPlayback interrupted by user.")
+        print("\nPlayback interrupted by user.", flush=True)
         return
 
     if not mock and SOUNDDEVICE_AVAILABLE:
         sd.wait()
 
-    print("-" * 65)
-    print("Analysis Complete.")
+    print("-" * 65, flush=True)
+    print("Analysis Complete.", flush=True)
 
 def main():
     parser = argparse.ArgumentParser(description="Real-time transient analysis and audible playback.")
