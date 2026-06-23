@@ -24,6 +24,11 @@ Audibly plays audio files while simultaneously running the transient analysis en
 python3 analysis/play_files.py "path/to/audio.wav"
 ```
 
+**Diagnostic Options:**
+*   `--list-devices`: Displays all available audio output devices and their indices.
+*   `--device INDEX_OR_NAME`: Manually specify a playback device if the default is incorrect.
+*   `--mock`: Runs the analysis without attempting audio output (useful for headless environments).
+
 *   **Spectral Division:** Uses a Mel Spectrogram (128 bands) to split audio into four distinct bands for perceptual granularity:
     *   **Sub-Bass (Bins 0-31):** 0 Hz – 1,024 Hz (at 44.1 kHz)
     *   **Bass/Low-Mid (Bins 32-63):** 992 Hz – 2,849 Hz (at 44.1 kHz)

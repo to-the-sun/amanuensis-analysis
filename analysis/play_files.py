@@ -7,16 +7,18 @@ import sys
 import cumulative_transience
 
 # Try to import sounddevice for real-time playback
+SOUNDDEVICE_AVAILABLE = False
+SD_ERROR = ""
 try:
     import sounddevice as sd
     SOUNDDEVICE_AVAILABLE = True
 except ImportError:
-    SOUNDDEVICE_AVAILABLE = False
-except OSError:
+    SD_ERROR = "sounddevice module not found. Install with 'pip install sounddevice'."
+except OSError as e:
     # This can happen if PortAudio is not found
-    SOUNDDEVICE_AVAILABLE = False
+    SD_ERROR = f"PortAudio library not found or error loading it: {e}"
 
-def play_and_analyze(file_path, mock=False):
+def play_and_analyze(file_path, mock=False, device=None):
     print(f"\n--- Playing and Analyzing: {os.path.basename(file_path)} ---")
 
     # Load audio
@@ -39,10 +41,19 @@ def play_and_analyze(file_path, mock=False):
     # Start playback if not mocking
     if not mock:
         if SOUNDDEVICE_AVAILABLE:
-            print("Starting audible playback...")
-            sd.play(y, sr)
+            try:
+                # Try to get device info
+                device_info = sd.query_devices(device, kind='output')
+                device_name = device_info['name']
+                print(f"Starting audible playback on device: {device_name}")
+                sd.play(y, sr, device=device)
+            except Exception as e:
+                print(f"Error starting playback: {e}")
+                print("Falling back to mock mode.")
+                mock = True
         else:
-            print("Warning: sounddevice or PortAudio not found. Falling back to mock mode (no audio).")
+            print(f"Warning: {SD_ERROR}")
+            print("Falling back to mock mode (no audio).")
             mock = True
     else:
         print("Mock mode enabled: Simulating real-time playback.")
@@ -71,7 +82,6 @@ def play_and_analyze(file_path, mock=False):
                 metrics = analyzer.update_metrics(current_frame)
 
                 # Print results if a new peak was found or at regular intervals
-                # To avoid flooding, we can print every 100ms or when a peak happens
                 if new_peak_data or current_frame % 500 == 0:
                     time_str = f"{int(elapsed // 60)}:{elapsed % 60:05.2f}"
                     score_str = f"{metrics['rolling_score']:+8.2f}"
@@ -111,7 +121,22 @@ def main():
     parser = argparse.ArgumentParser(description="Real-time transient analysis and audible playback.")
     parser.add_argument("files", nargs="*", help="Optional list of audio files to process.")
     parser.add_argument("--mock", action="store_true", help="Simulate real-time playback without audio output.")
+    parser.add_argument("--list-devices", action="store_true", help="List available audio output devices and exit.")
+    parser.add_argument("--device", help="Audio device ID or name substring.")
     args = parser.parse_args()
+
+    if args.list_devices:
+        if SOUNDDEVICE_AVAILABLE:
+            print("\nAvailable Audio Devices:")
+            print(sd.query_devices())
+        else:
+            print(f"Cannot list devices: {SD_ERROR}")
+        return
+
+    # Handle device argument (convert to int if numeric)
+    device = args.device
+    if device and device.isdigit():
+        device = int(device)
 
     audio_files = []
     if args.files:
@@ -135,7 +160,7 @@ def main():
         if not os.path.exists(f):
             print(f"File not found: {f}")
             continue
-        play_and_analyze(f, mock=args.mock)
+        play_and_analyze(f, mock=args.mock, device=device)
 
 if __name__ == "__main__":
     main()
