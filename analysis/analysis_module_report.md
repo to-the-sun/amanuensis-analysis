@@ -74,7 +74,7 @@ Performs spectral decomposition and peak detection on raw audio.
 ## Contexts for Future Use
 
 1. **Real-Time Audio Streams**:
-   By feeding 100ms chunks of audio into `analyze_audio` and passing the results to `TransientAnalyzer.process_new_peaks` sequentially, this module can power live dashboards for DJs or performers.
+   By feeding 100ms chunks of audio into `analyze_audio` and passing the results to `TransientAnalyzer.process_new_peaks` sequentially, this module can power live dashboards for DJs or performers. This is demonstrated in the `play_files.py` script.
 
 2. **Alternative Frontends**:
    Since the module no longer depends on Matplotlib for analysis, it could be used as a backend for:

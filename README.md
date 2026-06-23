@@ -8,12 +8,20 @@ This repository contains a suite of tools for advanced audio transient analysis 
 
 The analysis suite focuses on identifying rhythmic energy, structural patterns, and transient density within audio files.
 
-### Interactive Reports (`analyze.py` & `cumulative_transience.py`)
+### Interactive Reports (`analyze_files.py` & `cumulative_transience.py`)
 Generates high-resolution HTML reports and MP4 videos featuring real-time transient tracking.
 
 **Usage:**
 ```bash
-python3 analysis/analyze.py --dir /path/to/audio --output report.html
+python3 analysis/analyze_files.py "path/to/audio.wav"
+```
+
+### Real-Time Playback (`play_files.py`)
+Audibly plays audio files while simultaneously running the transient analysis engine and printing results to the console.
+
+**Usage:**
+```bash
+python3 analysis/play_files.py "path/to/audio.wav"
 ```
 
 *   **Spectral Division:** Uses a Mel Spectrogram (128 bands) to split audio into four distinct bands for perceptual granularity:
