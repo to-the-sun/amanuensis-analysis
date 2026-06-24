@@ -5,6 +5,51 @@
 #include <math.h>
 #include <float.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// Internal FFT implementation to remove external dependencies (like FFTW3)
+// Simple Radix-2 FFT
+static void fft(double* real, double* imag, int n) {
+    int j = 0;
+    for (int i = 0; i < n - 1; i++) {
+        if (i < j) {
+            double tr = real[i]; real[i] = real[j]; real[j] = tr;
+            double ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
+        }
+        int k = n >> 1;
+        while (k <= j) {
+            j -= k;
+            k >>= 1;
+        }
+        j += k;
+    }
+
+    for (int len = 2; len <= n; len <<= 1) {
+        double ang = 2.0 * M_PI / len;
+        double wlen_r = cos(ang);
+        double wlen_i = -sin(ang);
+        for (int i = 0; i < n; i += len) {
+            double w_r = 1.0;
+            double w_i = 0.0;
+            for (int k = 0; k < len / 2; k++) {
+                double u_r = real[i + k];
+                double u_i = imag[i + k];
+                double v_r = real[i + k + len / 2] * w_r - imag[i + k + len / 2] * w_i;
+                double v_i = real[i + k + len / 2] * w_i + imag[i + k + len / 2] * w_r;
+                real[i + k] = u_r + v_r;
+                imag[i + k] = u_i + v_i;
+                real[i + k + len / 2] = u_r - v_r;
+                imag[i + k + len / 2] = u_i - v_i;
+                double tmp_r = w_r * wlen_r - w_i * wlen_i;
+                w_i = w_r * wlen_i + w_i * wlen_r;
+                w_r = tmp_r;
+            }
+        }
+    }
+}
+
 TransientAnalyzer* analyzer_create(double max_peak_value) {
     TransientAnalyzer* self = (TransientAnalyzer*)calloc(1, sizeof(TransientAnalyzer));
     if (!self) return NULL;
@@ -288,14 +333,6 @@ double* analyzer_get_buffer(TransientAnalyzer* self) {
     return self->accumulated_buffer;
 }
 
-// FFTW Forward Declarations
-typedef struct fftw_plan_s *fftw_plan;
-extern fftw_plan fftw_plan_dft_r2c_1d(int n, double *in, double *out, unsigned flags);
-extern void fftw_execute(fftw_plan p);
-extern void fftw_destroy_plan(fftw_plan p);
-#define FFTW_ESTIMATE (1U << 6)
-
-// Constants for STFT
 #define N_FFT 2048
 #define N_MELS 128
 
@@ -363,9 +400,6 @@ int analyzer_analyze_audio(const float* y, int len, int sr, FullAnalysisResult* 
     }
 
     double* mel_filters = create_mel_filterbank(sr, n_fft, n_mels);
-    double* fft_in = (double*)malloc(sizeof(double) * n_fft);
-    double* fft_out = (double*)malloc(sizeof(double) * (n_fft / 2 + 1) * 2);
-    fftw_plan p = fftw_plan_dft_r2c_1d(n_fft, fft_in, fft_out, FFTW_ESTIMATE);
 
     double* window = (double*)malloc(sizeof(double) * n_fft);
     for (int i = 0; i < n_fft; i++) {
@@ -375,6 +409,9 @@ int analyzer_analyze_audio(const float* y, int len, int sr, FullAnalysisResult* 
     float* mel_spectrogram = (float*)malloc(sizeof(float) * n_mels * num_frames);
     memset(mel_spectrogram, 0, sizeof(float) * n_mels * num_frames);
 
+    double* real = (double*)malloc(sizeof(double) * n_fft);
+    double* imag = (double*)malloc(sizeof(double) * n_fft);
+
     for (int f = 0; f < num_frames; f++) {
         int center = f * hop_length;
         int start = center;
@@ -382,23 +419,27 @@ int analyzer_analyze_audio(const float* y, int len, int sr, FullAnalysisResult* 
         for (int i = 0; i < n_fft; i++) {
             int idx = start + i;
             if (idx >= 0 && idx < len) {
-                fft_in[i] = y[idx] * window[i];
+                real[i] = y[idx] * window[i];
             } else {
-                fft_in[i] = 0;
+                real[i] = 0;
             }
+            imag[i] = 0;
         }
-        fftw_execute(p);
+
+        fft(real, imag, n_fft);
 
         for (int m = 0; m < n_mels; m++) {
             double mel_val = 0;
             for (int i = 0; i < (n_fft / 2 + 1); i++) {
-                double re = fft_out[i * 2];
-                double im = fft_out[i * 2 + 1];
+                double re = real[i];
+                double im = imag[i];
                 mel_val += (re * re + im * im) * mel_filters[m * (n_fft / 2 + 1) + i];
             }
             mel_spectrogram[m * num_frames + f] = (float)mel_val;
         }
     }
+    free(real);
+    free(imag);
 
     float max_power = 0;
     for (int i = 0; i < n_mels * num_frames; i++) {
@@ -477,9 +518,6 @@ int analyzer_analyze_audio(const float* y, int len, int sr, FullAnalysisResult* 
         free(temp_peaks);
     }
 
-    fftw_destroy_plan(p);
-    free(fft_in);
-    free(fft_out);
     free(window);
     free(mel_filters);
     free(mel_spectrogram);
