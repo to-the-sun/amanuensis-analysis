@@ -339,11 +339,16 @@ def main():
         print("No audio files found to process.")
         return
 
-    for f in audio_files:
-        if not os.path.exists(f): continue
-        result = analyze_audio(f)
-        if result:
-            generate_video(f, result)
+    try:
+        for f in audio_files:
+            if not os.path.exists(f): continue
+            result = analyze_audio(f)
+            if result:
+                generate_video(f, result)
+    except Exception as e:
+        print(f"\nAn error occurred during processing: {e}")
+    finally:
+        input("\nAnalysis complete. Press Enter to exit...")
 
 if __name__ == "__main__":
     main()
