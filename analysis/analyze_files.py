@@ -12,7 +12,7 @@ from tqdm import tqdm
 import subprocess
 import tempfile
 import shutil
-import cumulative_transience
+import cumulative_transience_c as cumulative_transience
 
 def get_score_color(score, min_score, max_score):
     """
