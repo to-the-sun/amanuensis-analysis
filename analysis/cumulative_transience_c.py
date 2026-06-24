@@ -63,7 +63,26 @@ class FullAnalysisResult(ctypes.Structure):
 class TransientAnalyzer:
     def __init__(self, max_peak_value=1.0):
         # Load the shared library
-        lib_path = os.path.join(os.path.dirname(__file__), "libtransience.so")
+        lib_name = "libtransience.so" if os.name != 'nt' else "libtransience.dll"
+        lib_path = os.path.join(os.path.dirname(__file__), lib_name)
+
+        if not os.path.exists(lib_path):
+            print(f"Warning: {lib_name} not found in {os.path.dirname(__file__)}. Attempting to compile...")
+            current_dir = os.getcwd()
+            try:
+                os.chdir(os.path.dirname(__file__))
+                # Attempt to run make; this works on Linux/macOS and Windows if a build env is present
+                ret = os.system("make all")
+                if ret != 0 and os.name == 'nt':
+                    print("Compilation failed. Ensure you have 'make' and 'gcc' installed (e.g., via MinGW or MSYS2).")
+            except Exception as compile_err:
+                print(f"Auto-compilation failed: {compile_err}")
+            finally:
+                os.chdir(current_dir)
+
+        if not os.path.exists(lib_path):
+            raise FileNotFoundError(f"Shared library {lib_name} could not be found or compiled at {lib_path}")
+
         self.lib = ctypes.CDLL(lib_path)
 
         # Configure function signatures
@@ -153,7 +172,13 @@ class TransientAnalyzer:
         }
 
 def analyze_audio(y, sr):
-    lib_path = os.path.join(os.path.dirname(__file__), "libtransience.so")
+    lib_name = "libtransience.so" if os.name != 'nt' else "libtransience.dll"
+    lib_path = os.path.join(os.path.dirname(__file__), lib_name)
+
+    if not os.path.exists(lib_path):
+        # Trigger compilation via constructor logic if called standalone
+        TransientAnalyzer()
+
     lib = ctypes.CDLL(lib_path)
 
     lib.analyzer_batch_analyze.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int, ctypes.POINTER(FullAnalysisResult)]
