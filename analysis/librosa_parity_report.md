@@ -1,6 +1,6 @@
 # Librosa Parity Report: C vs. Python Audio Analysis
 
-This document serves as a technical log and roadmap for achieving 100% (minimum 99%) numerical parity between the C-based `cumulative_transience.c` analysis engine and the reference Python implementation using `librosa` and `scipy`.
+This document serves as a technical log and roadmap for achieving 100% numerical parity between the C-based `cumulative_transience.c` analysis engine and the reference Python implementation using `librosa` and `scipy`.
 
 ## Current Status
 As of the current session, the C implementation has been refactored to include:
@@ -49,7 +49,7 @@ The development process must follow an autonomous iterative loop:
 3.  **Analyze Results:** If correlation < 0.99, identify the source of the discrepancy (e.g., is the peak too early? is the magnitude scaled differently?).
 4.  **Repeat:** **Continue this cycle until 99% parity is achieved.**
 
-**CRITICAL INSTRUCTION:** Do NOT bring a human into the loop or ask for advice until the 99% parity threshold is met. You have all the tools and reference code (the Python implementation) needed to verify your work.
+**CRITICAL INSTRUCTION:** Do NOT bring a human into the loop or ask for advice until 100% parity is met. You have all the tools and reference code (the Python implementation) needed to verify your work.
 
 ## References
 - `analysis/cumulative_transience.py`: The "Source of Truth" for the desired behavior.
