@@ -65,16 +65,29 @@ class TransientAnalyzer:
         # Load the shared library
         lib_name = "libtransience.so" if os.name != 'nt' else "libtransience.dll"
         lib_path = os.path.join(os.path.dirname(__file__), lib_name)
+        c_source_path = os.path.join(os.path.dirname(__file__), "cumulative_transience.c")
 
-        if not os.path.exists(lib_path):
-            print(f"Warning: {lib_name} not found in {os.path.dirname(__file__)}. Attempting to compile...")
+        # Check if source is newer than binary to trigger recompile
+        should_compile = not os.path.exists(lib_path)
+        if not should_compile and os.path.exists(c_source_path):
+            if os.path.getmtime(c_source_path) > os.path.getmtime(lib_path):
+                print(f"Notice: {c_source_path} has been updated. Recompiling {lib_name}...")
+                should_compile = True
+
+        if should_compile:
+            if not os.path.exists(lib_path):
+                print(f"Warning: {lib_name} not found in {os.path.dirname(__file__)}. Attempting to compile...")
+
             current_dir = os.getcwd()
             try:
                 os.chdir(os.path.dirname(__file__))
                 # Attempt to run make; this works on Linux/macOS and Windows if a build env is present
                 ret = os.system("make all")
-                if ret != 0 and os.name == 'nt':
-                    print("Compilation failed. Ensure you have 'make' and 'gcc' installed (e.g., via MinGW or MSYS2).")
+                if ret != 0:
+                    if os.name == 'nt':
+                        print("Compilation failed. Ensure you have 'make' and 'gcc' installed (e.g., via MinGW or MSYS2).")
+                    else:
+                        print("Compilation failed. Check your build environment.")
             except Exception as compile_err:
                 print(f"Auto-compilation failed: {compile_err}")
             finally:

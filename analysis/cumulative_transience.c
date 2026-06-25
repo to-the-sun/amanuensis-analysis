@@ -448,19 +448,25 @@ int analyzer_analyze_audio(const float* y, int len, int sr, FullAnalysisResult* 
     float ref = max_power;
     for (int i = 0; i < n_mels * num_frames; i++) {
         float val = mel_spectrogram[i];
-        if (val < 1e-10) val = 1e-10;
+        if (val < 1e-10f) val = 1e-10f;
         mel_spectrogram[i] = 10.0f * log10f(val / ref);
         if (mel_spectrogram[i] < -80.0f) mel_spectrogram[i] = -80.0f;
     }
+
+    int lag = 1;
+    int center_shift = n_fft / (2 * hop_length);
 
     for (int b = 0; b < MAX_BANDS; b++) {
         result_out->bands[b].envelope = (float*)malloc(sizeof(float) * num_frames);
         memset(result_out->bands[b].envelope, 0, sizeof(float) * num_frames);
 
-        for (int f = 1; f < num_frames; f++) {
+        for (int f = 0; f < num_frames; f++) {
+            int src_f = f - center_shift;
+            if (src_f < lag || src_f >= num_frames) continue;
+
             float flux = 0;
             for (int m = b * 32; m < (b + 1) * 32; m++) {
-                float diff = mel_spectrogram[m * num_frames + f] - mel_spectrogram[m * num_frames + f - 1];
+                float diff = mel_spectrogram[m * num_frames + src_f] - mel_spectrogram[m * num_frames + src_f - lag];
                 if (diff > 0) flux += diff;
             }
             result_out->bands[b].envelope[f] = flux / 32.0f;
