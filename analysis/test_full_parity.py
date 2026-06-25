@@ -9,7 +9,7 @@ def test_full_analysis():
     print("Testing full analysis parity (Python/librosa vs C/Internal FFT)...")
 
     # Load a fixed control file
-    audio_file = "analysis/01 sustained bass [2025-12-29-22-19-46].wav"
+    audio_file = "analysis/01 sustained bass [2026-06-24 181817].wav"
     if not os.path.exists(audio_file):
         print(f"Error: {audio_file} not found. Using random data with seed.")
         np.random.seed(42)
