@@ -24,6 +24,15 @@ To ensure 100% parity, verification must go beyond simple envelope correlation. 
 4.  **Resonance Scores:** The final calculated resonance scores and qualifiers must be identical.
 5.  **Historical Buffers:** The state of the 5-second accumulation buffer after identical processing steps.
 
+## System-Level Verification (The "Rating" Test)
+The repository contains four primary control WAV files for verification:
+- `analysis/01 sustained bass [2026-06-24 181817].wav`
+- `analysis/02 sustained treble [2026-06-24 181817].wav`
+- `analysis/03 transient bass [2026-06-24 181817].wav`
+- `analysis/04 transient treble [2026-06-24 181817].wav`
+
+An ideal verification test is to run `analysis/analyze_files.py` (which uses the C engine) and `analysis/legacy/analyze_files.py` (which uses the original Python engine) on these files. **The final "Rating" metric produced by both must be exactly identical.**
+
 ## Strategy & Critique
 Continued iteration is the core philosophy. We must constantly critique existing emulation strategies. If a C-based FFT or Mel-filterbank cannot match Librosa's output exactly, we must identify why (e.g., windowing, scaling, padding) and adjust until it does.
 
@@ -36,11 +45,12 @@ Continued iteration is the core philosophy. We must constantly critique existing
 ## Autonomous Execution
 This work is to be conducted autonomously. The agent is instructed to:
 1.  **Trust Intuition:** Make informed decisions based on the reference code and mathematical principles.
-2.  **Iterate Rapidly:** Use the `test_full_parity.py` script to verify every change.
+2.  **Iterate Rapidly:** Use the `test_full_parity.py` script and the Rating test to verify every change.
 3.  **No Human-in-the-Loop:** Do not pause for approval or ask for clarification. The mandate is clear: 100% parity.
 4.  **Continuous Improvement:** Keep working until the verification suite confirms absolute identity between the two implementations.
 
 ## References
 - `analysis/cumulative_transience.py`: The "Source of Truth" for the desired behavior.
+- `analysis/legacy/cumulative_transience.py`: The original Python implementation.
 - `analysis/test_full_parity.py`: The verification tool.
 - `analysis/cumulative_transience.c`: The target for optimization.
