@@ -12,12 +12,22 @@ from tqdm import tqdm
 import subprocess
 import tempfile
 import shutil
+import traceback
+import sys
+import ct_utils
+
 try:
     import static_ffmpeg
     static_ffmpeg.add_paths()
 except ImportError:
     pass
-import cumulative_transience_c as cumulative_transience
+
+# Ensure built before attempt import
+ct_utils.ensure_extension_built()
+try:
+    import cumulative_transience
+except ImportError:
+    cumulative_transience = None
 
 def get_score_color(score, min_score, max_score):
     """
@@ -53,6 +63,9 @@ def generate_video(audio_path, data):
     (overlapping 4-band analysis) and an accumulating 10-second buffer.
     Returns the path to the generated MP4 file.
     """
+    if cumulative_transience is None:
+        raise ImportError("The 'cumulative_transience' extension module could not be loaded.")
+
     print(f"Generating video for {audio_path}...")
     try:
         times = data['times']
@@ -280,16 +293,16 @@ def generate_video(audio_path, data):
             final_metrics = analyzer.update_metrics(len(times)-1)
             song_name = os.path.splitext(os.path.basename(audio_path))[0]
             project_dir = rf'D:\[Library]\[Audio]\[Works]\[Projects]\{song_name}'
-            if not os.path.exists(project_dir):
-                os.makedirs(project_dir, exist_ok=True)
-
-            ratings_file = os.path.join(project_dir, 'ratings.txt')
-            with open(ratings_file, 'w', encoding='utf-8') as f:
-                f.write(f"Rating: {final_metrics['rating']:.2f}\n")
-                f.write(f"Standard Deviation: {final_metrics['std_dev']:.3f}\n")
-                f.write(f"Contrast: {final_metrics['contrast']:.3f}\n")
-                f.write(f"Bar Length Deviation: {final_metrics['peak_std']:.3f}\n")
-            print(f"Metrics recorded to {ratings_file}")
+            if os.path.exists(project_dir):
+                ratings_file = os.path.join(project_dir, 'ratings.txt')
+                with open(ratings_file, 'w', encoding='utf-8') as f:
+                    f.write(f"Rating: {final_metrics['rating']:.2f}\n")
+                    f.write(f"Standard Deviation: {final_metrics['std_dev']:.3f}\n")
+                    f.write(f"Contrast: {final_metrics['contrast']:.3f}\n")
+                    f.write(f"Bar Length Deviation: {final_metrics['peak_std']:.3f}\n")
+                print(f"Metrics recorded to {ratings_file}")
+            else:
+                print(f"Skipping recording metrics: {project_dir} does not exist.")
         except Exception as e:
             print(f"Error recording metrics: {e}")
 
@@ -308,6 +321,14 @@ def generate_video(audio_path, data):
         return None
 
 def analyze_audio(file_path):
+    """
+    Analyzes raw audio data to extract its transient envelope (4-band analysis)
+    and identify peaks. Returns a dictionary with all analysis data.
+    """
+    global cumulative_transience
+    if cumulative_transience is None:
+        raise ImportError("The 'cumulative_transience' extension module could not be loaded.")
+
     print(f"Analyzing {file_path}...")
     y, sr = librosa.load(file_path, sr=None, mono=True)
     result = cumulative_transience.analyze_audio(y, sr)
@@ -327,6 +348,10 @@ def analyze_audio(file_path):
     return result
 
 def main():
+    global cumulative_transience
+    # Module is imported at top level after ensure_extension_built()
+    import cumulative_transience
+
     parser = argparse.ArgumentParser(description="Standalone transient analysis and video generation.")
     parser.add_argument("files", nargs="*", help="Optional list of audio files to process.")
     args = parser.parse_args()
@@ -344,16 +369,25 @@ def main():
         print("No audio files found to process.")
         return
 
-    try:
-        for f in audio_files:
-            if not os.path.exists(f): continue
-            result = analyze_audio(f)
-            if result:
-                generate_video(f, result)
-    except Exception as e:
-        print(f"\nAn error occurred during processing: {e}")
-    finally:
-        input("\nAnalysis complete. Press Enter to exit...")
+    for f in audio_files:
+        if not os.path.exists(f): continue
+        result = analyze_audio(f)
+        if result:
+            generate_video(f, result)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        print("\nAnalysis complete.")
+    except Exception as e:
+        print("\n" + "="*60)
+        print("CRITICAL ERROR")
+        print("="*60)
+        traceback.print_exc()
+        print("="*60)
+    finally:
+        # Keep window open for user to see output/errors
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass

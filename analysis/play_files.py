@@ -4,7 +4,16 @@ import numpy as np
 import os
 import time
 import sys
-import cumulative_transience
+import subprocess
+import traceback
+import ct_utils
+
+# Ensure built before attempt import
+ct_utils.ensure_extension_built()
+try:
+    import cumulative_transience
+except ImportError:
+    cumulative_transience = None
 
 # Try to import sounddevice for real-time playback
 SOUNDDEVICE_AVAILABLE = False
@@ -19,6 +28,9 @@ except OSError as e:
     SD_ERROR = f"PortAudio library not found or error loading it: {e}"
 
 def play_and_analyze(file_path, mock=False, device=None):
+    if cumulative_transience is None:
+        raise ImportError("The 'cumulative_transience' extension module could not be loaded.")
+
     print(f"\n--- Playing and Analyzing: {os.path.basename(file_path)} ---")
 
     # Load audio
@@ -175,7 +187,18 @@ def main():
         if not os.path.exists(f):
             print(f"File not found: {f}")
             continue
-        play_and_analyze(f, mock=args.mock, device=device)
+        try:
+            play_and_analyze(f, mock=args.mock, device=device)
+        except Exception as e:
+            print(f"Error processing {f}:")
+            traceback.print_exc()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass

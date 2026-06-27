@@ -1,12 +1,28 @@
 import numpy as np
-import cumulative_transience
-import cumulative_transience_c
+import sys
+import os
+import importlib.util
+import subprocess
 import time
 import librosa
-import os
+import ct_utils
+import traceback
+
+def load_legacy_ref():
+    legacy_path = os.path.join(os.path.dirname(__file__), "legacy", "cumulative_transience.py")
+    spec = importlib.util.spec_from_file_location("cumulative_transience_legacy", legacy_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+# Ensure built before attempt import
+ct_utils.ensure_extension_built()
+import cumulative_transience as cumulative_transience_c
 
 def test_full_analysis():
-    print("Testing full analysis parity (Python/librosa vs C/Internal FFT)...")
+    print("Testing full analysis parity (Python/librosa vs C extension)...")
+
+    cumulative_transience_py = load_legacy_ref()
 
     # Load a fixed control file
     audio_file = "analysis/01 sustained bass [2026-06-24 181817].wav"
@@ -24,7 +40,7 @@ def test_full_analysis():
     print(f"Analyzing {len(y)/sr:.2f}s of audio...")
 
     start = time.time()
-    py_res = cumulative_transience.analyze_audio(y, sr)
+    py_res = cumulative_transience_py.analyze_audio(y, sr)
     py_time = time.time() - start
     print(f"Python analysis took: {py_time:.4f}s")
 
@@ -50,4 +66,12 @@ def test_full_analysis():
         print(f"Band {i} correlation: {corr:.6f}")
 
 if __name__ == "__main__":
-    test_full_analysis()
+    try:
+        test_full_analysis()
+    except Exception as e:
+        traceback_str = "".join(traceback.format_exception(None, e, e.__traceback__))
+        print(traceback_str)
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass

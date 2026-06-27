@@ -1,6 +1,6 @@
 # Comparison Report: Python vs. C Transient Analysis
 
-This report outlines the technical differences between the original Python-based audio analysis (`cumulative_transience.py`) and the new optimized C-based implementation (`cumulative_transience.c`).
+This report outlines the technical differences between the reference Python-based audio analysis (`analysis/legacy/cumulative_transience.py`) and the optimized C-based implementation (`cumulative_transience.c`).
 
 ## 1. Temporal Resolution
 Both implementations operate at a **1ms temporal resolution**.

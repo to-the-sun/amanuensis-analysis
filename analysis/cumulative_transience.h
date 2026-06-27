@@ -121,5 +121,6 @@ typedef struct {
 int analyzer_analyze_audio(const float* y, int len, int sr, FullAnalysisResult* result_out);
 int analyzer_batch_analyze(const float* y, int len, int sr, FullAnalysisResult* result_out);
 void analyzer_free_analysis(FullAnalysisResult* result);
+void analyzer_debug_mel_filters(int sr, int n_fft, int n_mels, double* filters_out);
 
 #endif

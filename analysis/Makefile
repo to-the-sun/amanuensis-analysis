@@ -11,18 +11,24 @@ ifeq ($(OS),Windows_NT)
     CFLAGS = -O3 -Wall -fPIC
     LDFLAGS = -shared
     TARGET = $(TARGET_DLL)
+    RM = del /Q
+    RMDIR = rd /s /q
+    PYTHON = python
 else
     OS_NAME = $(shell uname -s)
     CC = gcc
     CFLAGS = -O3 -Wall -fPIC
     LDFLAGS = -shared
     TARGET = $(TARGET_SO)
+    RM = rm -f
+    RMDIR = rm -rf
+    PYTHON = python3
 endif
 
 SRCS = cumulative_transience.c
 OBJS = $(SRCS:.c=.o)
 
-all: $(TARGET)
+all: $(TARGET) extension
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ -lm
@@ -30,8 +36,10 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-mock_external: mock_external.c $(TARGET)
-	$(CC) $(CFLAGS) mock_external.c ./$(TARGET) -o $@ -lm
+extension:
+	$(PYTHON) setup.py build_ext --inplace
 
 clean:
-	rm -f $(OBJS) $(TARGET_SO) $(TARGET_DLL) mock_external mock_external.exe
+	$(RM) $(OBJS) $(TARGET_SO) $(TARGET_DLL)
+	$(RM) ct_extension.c cumulative_transience.cpython*
+	$(RMDIR) build

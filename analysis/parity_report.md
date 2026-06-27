@@ -3,7 +3,7 @@
 This document serves as the primary technical log and roadmap for achieving **100% numerical parity** between the C-based `cumulative_transience.c` analysis engine and the reference Python implementation (`analysis/legacy/cumulative_transience.py`).
 
 ## Mission Objective: Absolute Parity
-The goal of this project is **absolute 100% verification-verified parity**. Every aspect of the C implementation must produce outputs that are mathematically identical to the Python reference implementation across all dimensions (envelopes, peaks, scores, ratings).
+The goal of this project is **absolute 100% verification-verified parity**. Every aspect of the C implementation (now integrated via a Cython extension) must produce outputs that are mathematically identical to the Python reference implementation across all dimensions (envelopes, peaks, scores, ratings).
 
 ## Current Status (June 2026)
 We are prioritizing the largest algorithmic dissimilarities first. Recent exploration has identified a critical temporal alignment mismatch that explains the previously low correlation scores.
