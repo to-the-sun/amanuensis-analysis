@@ -17,7 +17,47 @@ try:
     static_ffmpeg.add_paths()
 except ImportError:
     pass
-import cumulative_transience_c as cumulative_transience
+
+# Auto-compilation logic
+def ensure_extension_built():
+    """Checks if the extension is built and builds it if necessary."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    ext_file = None
+    for f in os.listdir(current_dir):
+        if f.startswith("cumulative_transience.") and (f.endswith(".so") or f.endswith(".pyd")):
+            ext_file = os.path.join(current_dir, f)
+            break
+
+    source_pyx = os.path.join(current_dir, "ct_extension.pyx")
+    source_c = os.path.join(current_dir, "cumulative_transience.c")
+
+    needs_build = False
+    if ext_file is None:
+        needs_build = True
+    else:
+        ext_mtime = os.path.getmtime(ext_file)
+        if os.path.exists(source_pyx) and os.path.getmtime(source_pyx) > ext_mtime:
+            needs_build = True
+        elif os.path.exists(source_c) and os.path.getmtime(source_c) > ext_mtime:
+            needs_build = True
+
+    if needs_build:
+        print("Notice: Extension module is missing or outdated. Attempting to build...")
+        old_cwd = os.getcwd()
+        os.chdir(current_dir)
+        try:
+            # Use the same command as the Makefile
+            python_cmd = "python" if os.name == "nt" else "python3"
+            subprocess.run([python_cmd, "setup.py", "build_ext", "--inplace"], check=True)
+            print("Extension module built successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to build extension module: {e}")
+            print("The script may fail to import 'cumulative_transience'.")
+        finally:
+            os.chdir(old_cwd)
+
+ensure_extension_built()
+import cumulative_transience
 
 def get_score_color(score, min_score, max_score):
     """
@@ -280,16 +320,16 @@ def generate_video(audio_path, data):
             final_metrics = analyzer.update_metrics(len(times)-1)
             song_name = os.path.splitext(os.path.basename(audio_path))[0]
             project_dir = rf'D:\[Library]\[Audio]\[Works]\[Projects]\{song_name}'
-            if not os.path.exists(project_dir):
-                os.makedirs(project_dir, exist_ok=True)
-
-            ratings_file = os.path.join(project_dir, 'ratings.txt')
-            with open(ratings_file, 'w', encoding='utf-8') as f:
-                f.write(f"Rating: {final_metrics['rating']:.2f}\n")
-                f.write(f"Standard Deviation: {final_metrics['std_dev']:.3f}\n")
-                f.write(f"Contrast: {final_metrics['contrast']:.3f}\n")
-                f.write(f"Bar Length Deviation: {final_metrics['peak_std']:.3f}\n")
-            print(f"Metrics recorded to {ratings_file}")
+            if os.path.exists(project_dir):
+                ratings_file = os.path.join(project_dir, 'ratings.txt')
+                with open(ratings_file, 'w', encoding='utf-8') as f:
+                    f.write(f"Rating: {final_metrics['rating']:.2f}\n")
+                    f.write(f"Standard Deviation: {final_metrics['std_dev']:.3f}\n")
+                    f.write(f"Contrast: {final_metrics['contrast']:.3f}\n")
+                    f.write(f"Bar Length Deviation: {final_metrics['peak_std']:.3f}\n")
+                print(f"Metrics recorded to {ratings_file}")
+            else:
+                print(f"Skipping recording metrics: {project_dir} does not exist.")
         except Exception as e:
             print(f"Error recording metrics: {e}")
 
