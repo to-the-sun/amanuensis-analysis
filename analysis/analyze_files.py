@@ -12,6 +12,11 @@ from tqdm import tqdm
 import subprocess
 import tempfile
 import shutil
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except ImportError:
+    pass
 import cumulative_transience_c as cumulative_transience
 
 def get_score_color(score, min_score, max_score):
