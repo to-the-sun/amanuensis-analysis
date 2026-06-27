@@ -5,45 +5,15 @@ import os
 import time
 import sys
 import subprocess
+import traceback
+import ct_utils
 
-# Auto-compilation logic
-def ensure_extension_built():
-    """Checks if the extension is built and builds it if necessary."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    ext_file = None
-    for f in os.listdir(current_dir):
-        if f.startswith("cumulative_transience.") and (f.endswith(".so") or f.endswith(".pyd")):
-            ext_file = os.path.join(current_dir, f)
-            break
-
-    source_pyx = os.path.join(current_dir, "ct_extension.pyx")
-    source_c = os.path.join(current_dir, "cumulative_transience.c")
-
-    needs_build = False
-    if ext_file is None:
-        needs_build = True
-    else:
-        ext_mtime = os.path.getmtime(ext_file)
-        if os.path.exists(source_pyx) and os.path.getmtime(source_pyx) > ext_mtime:
-            needs_build = True
-        elif os.path.exists(source_c) and os.path.getmtime(source_c) > ext_mtime:
-            needs_build = True
-
-    if needs_build:
-        print("Notice: Extension module is missing or outdated. Attempting to build...")
-        old_cwd = os.getcwd()
-        os.chdir(current_dir)
-        try:
-            python_cmd = "python" if os.name == "nt" else "python3"
-            subprocess.run([python_cmd, "setup.py", "build_ext", "--inplace"], check=True)
-            print("Extension module built successfully.")
-        except Exception as e:
-            print(f"Warning: Failed to build extension module: {e}")
-        finally:
-            os.chdir(old_cwd)
-
-ensure_extension_built()
-import cumulative_transience
+# Ensure built before attempt import
+ct_utils.ensure_extension_built()
+try:
+    import cumulative_transience
+except ImportError:
+    cumulative_transience = None
 
 # Try to import sounddevice for real-time playback
 SOUNDDEVICE_AVAILABLE = False
@@ -58,6 +28,9 @@ except OSError as e:
     SD_ERROR = f"PortAudio library not found or error loading it: {e}"
 
 def play_and_analyze(file_path, mock=False, device=None):
+    if cumulative_transience is None:
+        raise ImportError("The 'cumulative_transience' extension module could not be loaded.")
+
     print(f"\n--- Playing and Analyzing: {os.path.basename(file_path)} ---")
 
     # Load audio
@@ -214,7 +187,18 @@ def main():
         if not os.path.exists(f):
             print(f"File not found: {f}")
             continue
-        play_and_analyze(f, mock=args.mock, device=device)
+        try:
+            play_and_analyze(f, mock=args.mock, device=device)
+        except Exception as e:
+            print(f"Error processing {f}:")
+            traceback.print_exc()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass
