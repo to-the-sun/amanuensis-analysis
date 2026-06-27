@@ -1,4 +1,0 @@
-Rating: -0.17
-Standard Deviation: 0.029
-Contrast: 3.483
-Bar Length Deviation: 1192.666
