@@ -1,6 +1,6 @@
 # Cumulative Transient Analysis: Snapshot & Resonance Score Logic
 
-This report details the technical operations that occur when a "snapshot" is taken for calculating the resonance score of a primary peak in the `cumulative_transience.py` module.
+This report details the technical operations that occur when a "snapshot" is taken for calculating the resonance score of a primary peak in the `cumulative_transience` extension module.
 
 ## 1. Triggering and Window Extraction
 
