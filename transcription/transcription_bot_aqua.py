@@ -452,12 +452,20 @@ try:
                         await interaction.followup.send("No lines with syllables found.")
                         return
 
-                    most_common_count = collections.Counter(counts).most_common(1)[0][0]
+                    # Calculate weighted scores: syllables * frequency
+                    counter = collections.Counter(counts)
+                    best_syllable_count = 0
+                    max_score = -1
+                    for syl_count, freq in counter.items():
+                        score = syl_count * freq
+                        if score > max_score:
+                            max_score = score
+                            best_syllable_count = syl_count
 
-                    # Group by rhyme sound for the most common count
+                    # Group by rhyme sound for the highest scoring syllable count
                     rhyme_groups = collections.defaultdict(list)
                     for text, count in collected_data:
-                        if count == most_common_count:
+                        if count == best_syllable_count:
                             words = text.split()
                             if not words: continue
                             last_word = words[-1]
@@ -479,9 +487,9 @@ try:
                         if len(response) > 1800:
                             response = response[:1800] + "\n\n... (truncated due to length)"
 
-                        await interaction.channel.send(f"**Poem Generated from Analysis (Syllables: {most_common_count}):**\n\n{response}")
+                        await interaction.channel.send(f"**Poem Generated from Analysis (Syllables: {best_syllable_count}):**\n\n{response}")
                     else:
-                        await interaction.followup.send(f"Could not find enough rhyming lines with {most_common_count} syllables.")
+                        await interaction.followup.send(f"Could not find enough rhyming lines with {best_syllable_count} syllables.")
 
                 await interaction.followup.send("Syllable analysis and poem generation complete.")
 

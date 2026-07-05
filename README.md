@@ -83,7 +83,7 @@ python3 transcription/transcription_bot_aqua.py
     *   `/analyze`: Performs a deep dive into the channel's history.
         *   Counts syllables for every line using NLTK (CMUdict) and the `syllables` library.
         *   Detects rhymes using the `SoundsLike` library (vowel-class homophones).
-        *   Generates a poem by grouping the most common syllable-count lines by rhyme sound.
+        *   Generates a poem by grouping lines by rhyme sound, selecting the syllable count with the highest weighted score (syllables * frequency).
     *   `/purge`: Clears the transcription channel history.
 *   **Stability:** Includes a health-check loop that monitors decryption failures and automatically reconnects the voice client if the stream stalls.
 
