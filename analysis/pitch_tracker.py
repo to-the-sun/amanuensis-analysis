@@ -193,113 +193,107 @@ def midi_to_note_and_cents(midi_val):
     return note_name, deviation_str
 
 def generate_visualization(times, f0, confidence, midi_vals, y, sr, args, output_img):
-    """Generates a beautiful 2-panel pitch tracking visualization."""
+    """Generates a beautiful, large single-panel pitch tracking visualization focusing on Linear MIDI Pitch & Tuning Regression."""
     import matplotlib
     if not args.interactive:
         matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import librosa.display
 
-    print("Generating visualization...")
+    print("Generating single-panel visualization...")
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    # Create a single, larger, high-resolution panel focusing entirely on MIDI Pitch
+    fig, ax = plt.subplots(figsize=(15, 8))
 
-    # --- Panel 1: Spectrogram and Hz Overlay ---
-    # Compute spectrogram
-    stft_matrix = librosa.stft(y, hop_length=args.hop_length)
-    stft_db = librosa.amplitude_to_db(np.abs(stft_matrix), ref=np.max)
-
-    # Show spectrogram as background
-    img1 = librosa.display.specshow(
-        stft_db, sr=sr, hop_length=args.hop_length,
-        x_axis='time', y_axis='log', ax=ax1, cmap='inferno'
-    )
-
-    # Restrict y-axis limits to tracked range with some headroom
-    ax1.set_ylim(args.fmin * 0.8, min(args.fmax * 1.2, sr / 2))
-
-    # Overlay tracked pitch
-    # Filter out nan values for plotting continuous lines cleanly
     valid_idx = ~np.isnan(f0)
-    if np.any(valid_idx):
-        ax1.plot(
-            times[valid_idx], f0[valid_idx],
-            color='cyan', linewidth=2.5, alpha=0.9,
-            label=f'Tracked Pitch ({args.algo.upper()})'
-        )
-        # Highlight high-confidence points
-        sc = ax1.scatter(
-            times[valid_idx], f0[valid_idx],
-            c=confidence[valid_idx], cmap='cool',
-            s=12, zorder=3, alpha=0.7
-        )
-
-    ax1.set_title(f"Polyphonic Spectrogram & Tracked Pitch (Algorithm: {args.algo.upper()})", fontsize=12, fontweight='bold')
-    ax1.set_ylabel("Frequency (Hz - Log Scale)", fontsize=10)
-    ax1.legend(loc='upper right')
-
-    # --- Panel 2: Linear MIDI Pitch & Tuning Regression ---
     if np.any(valid_idx):
         valid_midi = midi_vals[valid_idx]
         valid_times = times[valid_idx]
-        valid_conf = confidence[valid_idx]
 
-        # Plot continuous thin line
-        ax2.plot(valid_times, valid_midi, color='#888888', linestyle='-', alpha=0.5, linewidth=1)
+        # Plot continuous thin guiding line
+        ax.plot(valid_times, valid_midi, color='#666666', linestyle='-', alpha=0.3, linewidth=1, zorder=1)
 
-        # Scatter plot colored by confidence
-        sc2 = ax2.scatter(
+        # Compute custom colors for each point based on tuning deviation
+        point_colors = []
+        for m_val in valid_midi:
+            closest_midi = int(round(m_val))
+            dev = m_val - closest_midi # range: [-0.5, 0.5]
+            abs_dev = abs(dev)
+
+            # Base color: interpolate from bright green [0,1,0] to bright red [1,0,0]
+            s = abs_dev / 0.5  # scale 0.0 to 1.0
+            base_color = np.array([s, 1.0 - s, 0.0])
+
+            # Shading blend factor (maximum blend 60% white/black to preserve red/green hue)
+            max_blend = 0.6
+            blend_amt = s * max_blend
+
+            if dev >= 0:
+                # Tint with white (sharp notes)
+                final_color = (1.0 - blend_amt) * base_color + blend_amt * np.array([1.0, 1.0, 1.0])
+            else:
+                # Shade with black (flat notes)
+                final_color = (1.0 - blend_amt) * base_color + blend_amt * np.array([0.0, 0.0, 0.0])
+
+            point_colors.append(final_color)
+
+        point_colors = np.array(point_colors)
+
+        # Scatter plot with custom colors
+        sc = ax.scatter(
             valid_times, valid_midi,
-            c=valid_conf, cmap='viridis',
-            s=15, alpha=0.8, edgecolors='none', label='Detected Pitch'
+            c=point_colors,
+            s=25, alpha=0.9, edgecolors='none', zorder=3, label='Detected Pitch (Continuous)'
         )
-        fig.colorbar(sc2, ax=ax2, label="Confidence / Magnitude")
 
-        # Add horizontal reference lines for semitones in range
+        # Add horizontal reference lines at each and every integer MIDI note in range
         min_m = int(np.floor(np.min(valid_midi)))
         max_m = int(np.ceil(np.max(valid_midi)))
 
-        # Determine step size for note labels based on pitch range
-        midi_range = max_m - min_m
-        if midi_range <= 24:
-            # Show every semitone
-            semitones_to_show = range(min_m, max_m + 1)
-        elif midi_range <= 48:
-            # Show natural semitones
-            semitones_to_show = [m for m in range(min_m, max_m + 1) if (m % 12) in [0, 2, 4, 5, 7, 9, 11]]
-        else:
-            # Show only octaves (C notes)
-            semitones_to_show = [m for m in range(min_m, max_m + 1) if (m % 12) == 0]
+        semitones_to_show = range(min_m, max_m + 1)
 
         # Draw the note horizontal lines and label them
         notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
         tick_locs = []
         tick_labels = []
         for m in semitones_to_show:
-            freq = librosa.midi_to_hz(m)
-            ax2.axhline(y=m, color='gray', linestyle=':', alpha=0.4, linewidth=0.8)
+            # Draw strong dashed lines for each integer MIDI note
+            ax.axhline(y=m, color='#555555', linestyle='--', alpha=0.5, linewidth=0.8, zorder=2)
             note_name = f"{notes[m % 12]}{(m // 12) - 1}"
             tick_locs.append(m)
             tick_labels.append(f"{note_name} ({m})")
 
-        ax2.set_yticks(tick_locs)
-        ax2.set_yticklabels(tick_labels, fontsize=8)
+        ax.set_yticks(tick_locs)
+        ax.set_yticklabels(tick_labels, fontsize=9, fontweight='bold')
 
         # Set y-limits with some padding
-        ax2.set_ylim(min_m - 1, max_m + 1)
+        ax.set_ylim(min_m - 0.6, max_m + 0.6)
     else:
-        ax2.text(0.5, 0.5, "No pitch detected", ha='center', va='center', transform=ax2.transAxes)
+        ax.text(0.5, 0.5, "No pitch detected", ha='center', va='center', transform=ax.transAxes, fontsize=14)
 
-    ax2.set_title("Tuning Deviation & Linear Pitch Regression (MIDI scale)", fontsize=12, fontweight='bold')
-    ax2.set_ylabel("MIDI Pitch (Equal Temperament Ref)", fontsize=10)
-    ax2.set_xlabel("Time (seconds)", fontsize=10)
-    ax2.grid(True, axis='x', linestyle='--', alpha=0.5)
+    ax.set_title(f"Tuning Deviation & Linear Pitch Regression (MIDI scale)\nAlgorithm: {args.algo.upper()} | File: {os.path.basename(args.audio_path)}", fontsize=14, fontweight='bold', pad=15)
+    ax.set_ylabel("MIDI Pitch (Equal Temperament References)", fontsize=11, fontweight='bold')
+    ax.set_xlabel("Time (seconds)", fontsize=11, fontweight='bold')
+    ax.grid(True, axis='x', linestyle=':', alpha=0.5)
+
+    # Add a custom color legend to explain the dynamic point coloring
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='none', label='Perfectly In-Tune (0.0c deviation, Bright Green)',
+               markerfacecolor='#00ff00', markersize=10, markeredgecolor='none'),
+        Line2D([0], [0], marker='o', color='none', label='Perfectly Sharp/Out-of-Tune (+50c deviation, Shaded White)',
+               markerfacecolor=(np.array([1.0, 0.0, 0.0]) * 0.4 + np.array([1.0, 1.0, 1.0]) * 0.6), markersize=10, markeredgecolor='none'),
+        Line2D([0], [0], marker='o', color='none', label='Perfectly Flat/Out-of-Tune (-50c deviation, Shaded Black)',
+               markerfacecolor=(np.array([1.0, 0.0, 0.0]) * 0.4), markersize=10, markeredgecolor='none'),
+        Line2D([0], [0], linestyle='-', color='#666666', alpha=0.5, linewidth=1, label='Guiding Pitch Curve')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', framealpha=0.9, facecolor='#f5f5f5')
 
     plt.tight_layout()
 
     # Save image
     plt.savefig(output_img, dpi=300, bbox_inches='tight')
-    print(f"Saved visualization to: {output_img}")
+    print(f"Saved larger single-panel visualization to: {output_img}")
 
     if args.interactive:
         plt.show()
