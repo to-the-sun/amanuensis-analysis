@@ -451,17 +451,16 @@ class DesktopTranscriberBot(discord.Client):
             logger.error(f"Error in _run_transcribe_task: {e}")
 
     def _poetic_parse(self, text):
-        normalized = re.sub(r'—|–|--|\s-\s', '|', text)
-        parts = re.split(r'([.!?,;:()|])', normalized)
+        # Split sentences only on periods, exclamation points, and question marks.
+        parts = re.split(r'([.!?])', text)
         lines = []
         for part in parts:
-            if part in ".!?,;:()|":
-                if part == "?" and lines:
-                    lines[-1] += "?"
+            if part in ".!?":
+                if lines:
+                    lines[-1] += part
                 continue
             clean = part.strip()
             if clean:
-                clean = clean[0].lower() + clean[1:]
                 lines.append(clean)
         return '\n'.join(lines)
 

@@ -254,24 +254,18 @@ try:
         def wants_opus(self): return False
 
         def _poetic_parse(self, text):
-            # Split by punctuation: . ! ? , ; : ( ) and dashes (em, en, double-hyphen, spaced-hyphen)
-            # but NOT internal hyphens.
-            # We use | as a temporary delimiter for dashes to simplify splitting
-            normalized = re.sub(r'—|–|--|\s-\s', '|', text)
-            # Use capturing groups to keep track of delimiters
-            parts = re.split(r'([.!?,;:()|])', normalized)
+            # Split sentences only on periods, exclamation points, and question marks.
+            parts = re.split(r'([.!?])', text)
 
             lines = []
             for part in parts:
-                if part in ".!?,;:()|":
-                    if part == "?" and lines:
-                        lines[-1] += "?"
+                if part in ".!?":
+                    if lines:
+                        lines[-1] += part
                     continue
 
                 clean = part.strip()
                 if clean:
-                    # Lowercase the first character
-                    clean = clean[0].lower() + clean[1:]
                     lines.append(clean)
             return '\n'.join(lines)
 
