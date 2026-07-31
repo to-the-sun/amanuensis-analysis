@@ -29,6 +29,28 @@ python3 analysis/play_files.py "path/to/audio.wav"
 *   `--device INDEX_OR_NAME`: Manually specify a playback device if the default is incorrect.
 *   `--mock`: Runs the analysis without attempting audio output (useful for headless environments).
 
+### Pitch Tracking & Tuning Regression (`pitch_tracker.py`)
+Analyzes polyphonic recordings (such as guitar tracks) for continuous dominant pitch and steady tuning regression over time, without needing complex sound separation.
+
+**Usage:**
+```bash
+python3 analysis/pitch_tracker.py "path/to/audio.wav" [options]
+```
+
+**Options & Customization:**
+*   `--algo {yin, pyin, piptrack}`: Pitch tracking algorithm to use. `piptrack` is highly recommended for finding the single most prominent spectral peak in dense polyphonic mixtures (default: `yin`).
+*   `--fmin HZ` & `--fmax HZ`: Customize tracking frequency range (default: 50Hz to 1000Hz).
+*   `--hop_length SAMPLES`: Specify analysis frame hop size (default: 512).
+*   `--output-img PATH` & `--output-csv PATH`: Custom output paths for the plot and CSV export.
+*   `--no-plot`: Disable generating/saving the matplotlib figure.
+*   `--interactive`: Show the plot in an interactive Matplotlib window.
+
+**Outputs:**
+*   **High-Resolution Visualization Plot (`.png`):** Generates a beautiful 2-panel visual analysis:
+    1.  *Spectrogram with Hz Overlay:* Displays the full polyphonic spectral context as a background with the tracked pitch curve overlaid.
+    2.  *Linear MIDI Timeline:* Plots the pitch as fractional MIDI numbers. Includes horizontal equal-tempered gridlines labeled with standard musical note names (e.g. C4, D#3) so tuning drift, vibratos, slides, and regression are instantly visible.
+*   **Detailed CSV Dataset (`.csv`):** Exports timestamps, continuous frequency (Hz), fractional MIDI values, closest note, tuning deviation in cents (e.g., `+12c`, `-34c`), and confidence scores.
+
 *   **Spectral Division:** Uses a Mel Spectrogram (128 bands) to split audio into four distinct bands for perceptual granularity:
     *   **Sub-Bass (Bins 0-31):** 0 Hz – 1,024 Hz (at 44.1 kHz)
     *   **Bass/Low-Mid (Bins 32-63):** 992 Hz – 2,849 Hz (at 44.1 kHz)
