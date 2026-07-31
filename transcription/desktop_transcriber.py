@@ -451,6 +451,8 @@ class DesktopTranscriberBot(discord.Client):
             logger.error(f"Error in _run_transcribe_task: {e}")
 
     def _poetic_parse(self, text):
+        # Remove any periods that come directly after a capital letter.
+        text = re.sub(r'(?<=[A-Z])\.', '', text)
         # Split sentences only on periods, exclamation points, and question marks.
         parts = re.split(r'([.!?])', text)
         lines = []

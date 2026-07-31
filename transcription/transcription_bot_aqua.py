@@ -254,6 +254,8 @@ try:
         def wants_opus(self): return False
 
         def _poetic_parse(self, text):
+            # Remove any periods that come directly after a capital letter.
+            text = re.sub(r'(?<=[A-Z])\.', '', text)
             # Split sentences only on periods, exclamation points, and question marks.
             parts = re.split(r'([.!?])', text)
 
