@@ -32,6 +32,7 @@ try:
     import syllables
 
     from SoundsLike.SoundsLike import Word_Functions, Pronunciation_Functions
+    import pronouncing
 
     import discord
     from discord import app_commands
@@ -236,6 +237,18 @@ try:
             return pron[idx][:-1]
         except Exception:
             return None
+
+    def do_words_rhyme(w1, w2):
+        cw1 = w1.lower().strip(".,!?:;()\"'")
+        cw2 = w2.lower().strip(".,!?:;()\"'")
+        if not cw1 or not cw2:
+            return False
+        if cw1 == cw2:
+            return True
+        try:
+            return cw2 in pronouncing.rhymes(cw1) or cw1 in pronouncing.rhymes(cw2)
+        except Exception:
+            return False
 
     # --- TRANSCRIPTION SINK ---
     class AquaTranscriptionSink(voice_recv.AudioSink):
@@ -472,9 +485,25 @@ try:
                     # Assemble poem
                     poem_lines = []
                     for sound, lines in rhyme_groups.items():
-                        if len(lines) >= 2:
-                            poem_lines.extend(lines)
-                            poem_lines.append("") # Stanza break
+                        subgroups = []
+                        for line in lines:
+                            words = line.split()
+                            if not words:
+                                continue
+                            last_word = words[-1]
+                            placed = False
+                            for sg in subgroups:
+                                if all(do_words_rhyme(last_word, sg_line.split()[-1]) for sg_line in sg if sg_line.split()):
+                                    sg.append(line)
+                                    placed = True
+                                    break
+                            if not placed:
+                                subgroups.append([line])
+
+                        for sg in subgroups:
+                            if len(sg) >= 2:
+                                poem_lines.extend(sg)
+                                poem_lines.append("") # Stanza break
 
                     if poem_lines:
                         response = "\n".join(poem_lines).strip()
