@@ -58,11 +58,10 @@ try:
     from nltk.corpus import cmudict
     import syllables
     from SoundsLike.SoundsLike import Word_Functions, Pronunciation_Functions
-    import pronouncing
     NLTK_AVAILABLE = True
 except ImportError as e:
     NLTK_AVAILABLE = False
-    logger.warning(f"Linguistic libraries (nltk, syllables, SoundsLike, pronouncing) are not available. /analyze command will use basic fallbacks: {e}")
+    logger.warning(f"Linguistic libraries (nltk, syllables, SoundsLike) are not available. /analyze command will use basic fallbacks: {e}")
 
 # Load CMUdict if available
 CMU_DICT = None
@@ -82,6 +81,53 @@ if NLTK_AVAILABLE:
             nltk.download('averaged_perceptron_tagger')
         except Exception as e:
             logger.warning(f"Failed to download NLTK taggers: {e}")
+
+# Custom Pronouncing Implementation
+RHYME_LOOKUP = None
+
+def rhyming_part(phones):
+    phones_list = phones.split()
+    for i in range(len(phones_list) - 1, 0, -1):
+        if phones_list[i][-1] in '12':
+            return ' '.join(phones_list[i:])
+    return phones
+
+def init_rhyme_lookup():
+    global RHYME_LOOKUP
+    if RHYME_LOOKUP is None:
+        RHYME_LOOKUP = {}
+        if CMU_DICT:
+            for word, prons in CMU_DICT.items():
+                for pron in prons:
+                    phones_str = ' '.join(pron)
+                    rp = rhyming_part(phones_str)
+                    if rp:
+                        RHYME_LOOKUP.setdefault(rp, []).append(word)
+
+def phones_for_word(word):
+    if not CMU_DICT:
+        return []
+    cw = word.lower().strip(".,!?:;()\"'")
+    if cw in CMU_DICT:
+        return [' '.join(p) for p in CMU_DICT[cw]]
+    return []
+
+def pronouncing_rhymes(word):
+    if not CMU_DICT:
+        return []
+    init_rhyme_lookup()
+    phones = phones_for_word(word)
+    combined_rhymes = []
+    cw = word.lower().strip(".,!?:;()\"'")
+    if phones:
+        for element in phones:
+            rp = rhyming_part(element)
+            for w in RHYME_LOOKUP.get(rp, []):
+                if w != cw:
+                    combined_rhymes.append(w)
+        return sorted(set(combined_rhymes))
+    else:
+        return []
 
 # --- SYLLABLE AND RHYME UTILITIES ---
 def count_syllables_word(word):
@@ -141,7 +187,7 @@ def do_words_rhyme(w1, w2):
     if cw1 == cw2:
         return True
     try:
-        return cw2 in pronouncing.rhymes(cw1) or cw1 in pronouncing.rhymes(cw2)
+        return cw2 in pronouncing_rhymes(cw1) or cw1 in pronouncing_rhymes(cw2)
     except Exception:
         return False
 
@@ -345,12 +391,54 @@ class DesktopTranscriberBot(discord.Client):
                     await interaction.followup.send("Could not identify any rhyming vowel sounds in the final syllable slot.")
                     return
 
-                # Assemble poem by truncating every matching line to exactly 5 syllables
-                poem_lines = []
+                # Assemble candidates by truncating every matching line to exactly 5 syllables
+                candidates = []
                 for prefix, cleaned_content, vowels in collected_phrases:
                     if vowels[-1] == best_vowel:
                         truncated, _ = truncate_line_beginning(cleaned_content, 5)
-                        poem_lines.append(truncated)
+                        if truncated:
+                            candidates.append((prefix, cleaned_content, vowels, truncated))
+
+                # Count rhyming partners for each candidate's last word
+                partner_counts = {}
+                for i, (prefix, cleaned_content, vowels, truncated) in enumerate(candidates):
+                    words = truncated.split()
+                    if not words:
+                        partner_counts[i] = 0
+                        continue
+                    w_i = words[-1].lower().strip(".,!?:;()\"'")
+
+                    # Count how many other candidates rhyme with w_i
+                    rhyme_count = 0
+                    for j, (prefix2, cleaned_content2, vowels2, truncated2) in enumerate(candidates):
+                        if i == j:
+                            continue
+                        words2 = truncated2.split()
+                        if not words2:
+                            continue
+                        w_j = words2[-1].lower().strip(".,!?:;()\"'")
+                        if do_words_rhyme(w_i, w_j):
+                            rhyme_count += 1
+                    partner_counts[i] = rhyme_count
+
+                # Find the candidate line with the maximum number of rhyming partners
+                max_partners = -1
+                best_index = -1
+                for idx, count in partner_counts.items():
+                    if count > max_partners:
+                        max_partners = count
+                        best_index = idx
+
+                poem_lines = []
+                if max_partners > 0:
+                    anchor_word = candidates[best_index][3].split()[-1].lower().strip(".,!?:;()\"'")
+                    for prefix, cleaned_content, vowels, truncated in candidates:
+                        words = truncated.split()
+                        if not words:
+                            continue
+                        w = words[-1].lower().strip(".,!?:;()\"'")
+                        if w == anchor_word or do_words_rhyme(w, anchor_word):
+                            poem_lines.append(truncated)
 
                 if poem_lines:
                     response = "\n".join(poem_lines).strip()
@@ -359,7 +447,7 @@ class DesktopTranscriberBot(discord.Client):
                     if len(response) > 1800:
                         response = response[:1800] + "\n\n... (truncated due to length)"
 
-                    await interaction.channel.send(f"**Poem Generated from Analysis (Best Final Vowel: {best_vowel}):**\n\n{response}")
+                    await interaction.channel.send(f"**Poem Generated from Analysis (Best Final Vowel: {best_vowel}, Rhyme Anchor: {candidates[best_index][3].split()[-1]}):**\n\n{response}")
                 else:
                     await interaction.followup.send(f"Could not find enough rhyming lines with final vowel '{best_vowel}'.")
 
