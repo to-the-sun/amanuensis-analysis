@@ -32,6 +32,7 @@ try:
     import syllables
 
     from SoundsLike.SoundsLike import Word_Functions, Pronunciation_Functions
+    import pronouncing
 
     import discord
     from discord import app_commands
@@ -237,6 +238,41 @@ try:
         except Exception:
             return None
 
+    def do_words_rhyme(w1, w2):
+        cw1 = w1.lower().strip(".,!?:;()\"'")
+        cw2 = w2.lower().strip(".,!?:;()\"'")
+        if not cw1 or not cw2:
+            return False
+        if cw1 == cw2:
+            return True
+        try:
+            return cw2 in pronouncing.rhymes(cw1) or cw1 in pronouncing.rhymes(cw2)
+        except Exception:
+            return False
+
+    def get_phrase_vowels(phrase):
+        words = phrase.split()
+        vowels = []
+        for word in words:
+            clean_word = word.lower().strip(".,!?:;()\"'")
+            if not clean_word:
+                continue
+            pron = None
+            if CMU_DICT and clean_word in CMU_DICT:
+                pron = CMU_DICT[clean_word][0]
+            else:
+                try:
+                    pron = Word_Functions.pronunciation(clean_word, generate=True)
+                except Exception:
+                    pass
+
+            if pron:
+                for phone in pron:
+                    if phone[-1].isdigit():
+                        vowel_sound = phone[:-1]
+                        vowels.append(vowel_sound)
+        return vowels
+
     # --- TRANSCRIPTION SINK ---
     class AquaTranscriptionSink(voice_recv.AudioSink):
         def __init__(self, bot, text_id):
@@ -404,7 +440,8 @@ try:
                 logger.info(f"Analyze command (syllables + poem) received in {interaction.channel.name} from {interaction.user}")
                 await interaction.followup.send("Starting syllable analysis and poem generation...")
 
-                collected_data = [] # List of (text, syllable_count)
+                collected_phrases = [] # list of (prefix, cleaned_content, vowels)
+                histogram = collections.defaultdict(collections.Counter)
 
                 # Fetch all bot messages first to process them chronologically
                 bot_messages = []
@@ -428,52 +465,62 @@ try:
                         words = cleaned_content.split()
                         total_syls = sum(count_syllables_word(w) for w in words)
 
-                        collected_data.append((cleaned_content, total_syls))
                         new_line = f"{prefix}{cleaned_content} ({total_syls})"
 
                         if new_line != line:
                             changed = True
                         new_lines.append(new_line)
 
+                        # Extract vowels for histogram
+                        vowels = get_phrase_vowels(cleaned_content)
+                        if vowels:
+                            collected_phrases.append((prefix, cleaned_content, vowels))
+                            reversed_vowels = list(reversed(vowels))
+                            for idx, v in enumerate(reversed_vowels):
+                                histogram[idx][v] += 1
+
                     if changed:
                         await msg.edit(content="\n".join(new_lines))
                         await asyncio.sleep(0.5) # Rate limit safety
 
-                if collected_data:
-                    await interaction.followup.send("Generating poem from rhyming lines...")
+                if collected_phrases:
+                    await interaction.followup.send("Generating poem from rhyming lines using backward syllable histogram analysis...")
 
-                    # Find most common syllable count (excluding 0)
-                    counts = [d[1] for d in collected_data if d[1] > 0]
-                    if not counts:
-                        await interaction.followup.send("No lines with syllables found.")
+                    best_vowel = None
+                    if 0 in histogram and histogram[0]:
+                        best_vowel, highest_count = histogram[0].most_common(1)[0]
+
+                    if not best_vowel:
+                        await interaction.followup.send("Could not identify any rhyming vowel sounds in the final syllable slot.")
                         return
 
-                    # Calculate weighted scores: syllables * frequency
-                    counter = collections.Counter(counts)
-                    best_syllable_count = 0
-                    max_score = -1
-                    for syl_count, freq in counter.items():
-                        score = syl_count * freq
-                        if score > max_score:
-                            max_score = score
-                            best_syllable_count = syl_count
+                    # Filter phrases that have that rhyming vowel in position 0
+                    selected_phrases = []
+                    for prefix, cleaned_content, vowels in collected_phrases:
+                        if vowels[-1] == best_vowel:
+                            selected_phrases.append(f"{prefix}{cleaned_content}")
 
-                    # Group by rhyme sound for the highest scoring syllable count
-                    rhyme_groups = collections.defaultdict(list)
-                    for text, count in collected_data:
-                        if count == best_syllable_count:
-                            words = text.split()
-                            if not words: continue
-                            last_word = words[-1]
-                            rhyme_sound = get_last_stressed_vowel_sound(last_word)
-                            if rhyme_sound:
-                                rhyme_groups[rhyme_sound].append(text)
+                    # Group these selected phrases into subgroups that pairwise rhyme
+                    subgroups = []
+                    for line in selected_phrases:
+                        words = line.split()
+                        if not words:
+                            continue
+                        last_word = words[-1]
+                        placed = False
+                        for sg in subgroups:
+                            if all(do_words_rhyme(last_word, sg_line.split()[-1]) for sg_line in sg if sg_line.split()):
+                                sg.append(line)
+                                placed = True
+                                break
+                        if not placed:
+                            subgroups.append([line])
 
                     # Assemble poem
                     poem_lines = []
-                    for sound, lines in rhyme_groups.items():
-                        if len(lines) >= 2:
-                            poem_lines.extend(lines)
+                    for sg in subgroups:
+                        if len(sg) >= 2:
+                            poem_lines.extend(sg)
                             poem_lines.append("") # Stanza break
 
                     if poem_lines:
@@ -483,9 +530,9 @@ try:
                         if len(response) > 1800:
                             response = response[:1800] + "\n\n... (truncated due to length)"
 
-                        await interaction.channel.send(f"**Poem Generated from Analysis (Syllables: {best_syllable_count}):**\n\n{response}")
+                        await interaction.channel.send(f"**Poem Generated from Analysis (Best Final Vowel: {best_vowel}):**\n\n{response}")
                     else:
-                        await interaction.followup.send(f"Could not find enough rhyming lines with {best_syllable_count} syllables.")
+                        await interaction.followup.send(f"Could not find enough rhyming lines with final vowel '{best_vowel}'.")
 
                 await interaction.followup.send("Syllable analysis and poem generation complete.")
 
