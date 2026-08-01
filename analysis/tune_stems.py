@@ -9,6 +9,8 @@ import sys
 import argparse
 import subprocess
 import tempfile
+import shutil
+import traceback
 import numpy as np
 import librosa
 import soundfile as sf
@@ -90,6 +92,12 @@ def parse_args():
         default=0.1,
         help="Minimum confidence threshold for pitch tracking (default: %(default)s)."
     )
+    parser.add_argument(
+        "--rubberband-path",
+        type=str,
+        default=None,
+        help="Direct path to the rubberband executable (if not in system PATH)."
+    )
     return parser.parse_args()
 
 def identify_base_and_targets(stems):
@@ -170,6 +178,8 @@ def track_pitch(audio_mono, sr, algo, fmin, fmax, hop_length):
 
 def get_continuous_midi(times, f0, confidence, grid_times, confidence_threshold=0.1):
     """Interpolates fractional MIDI values onto a regular grid times array, with voiced masking."""
+    from scipy.ndimage import binary_dilation
+
     midi = np.full_like(f0, np.nan)
     valid = (~np.isnan(f0)) & (f0 > 0)
     if np.any(valid):
@@ -187,9 +197,19 @@ def get_continuous_midi(times, f0, confidence, grid_times, confidence_threshold=
     grid_midi = np.interp(grid_times, voiced_times, voiced_midi)
 
     # Voice proximity check: within 0.25 seconds of any voiced frame
-    grid_voiced = np.zeros_like(grid_times, dtype=bool)
-    for vt in voiced_times:
-        grid_voiced |= (np.abs(grid_times - vt) <= 0.25)
+    # Optimized from O(N*M) to O(N) using SciPy's binary_dilation
+    dt = grid_times[1] - grid_times[0]
+    grid_voiced_raw = np.zeros_like(grid_times, dtype=bool)
+
+    # Map voiced times to closest grid indices
+    voiced_indices = np.round(voiced_times / dt).astype(int)
+    voiced_indices = np.clip(voiced_indices, 0, len(grid_times) - 1)
+    grid_voiced_raw[voiced_indices] = True
+
+    # Dilate by K steps where K * dt ≈ 0.25s
+    K = max(1, int(round(0.25 / dt)))
+    structure = np.ones(2 * K + 1, dtype=bool)
+    grid_voiced = binary_dilation(grid_voiced_raw, structure=structure)
 
     grid_midi[~grid_voiced] = np.nan
     return grid_midi, grid_voiced
@@ -271,20 +291,25 @@ def process_tuning(base_path, target_path, args):
         print(f"    Maximum absolute correction: {max_abs_corr * 100:.1f} cents")
 
     # Generate the Rubber Band pitch map file
-    # Format: sample_frame pitch_offset_in_semitones
+    # Format: sample_frame pitch_ratio (raw numbers treated as frequency ratio multipliers)
     temp_map = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
     try:
+        # Helper to convert semitones to frequency ratio
+        # corr is in semitones, multiplier = 2.0 ** (corr / 12.0)
+        def to_ratio(semitones):
+            return 2.0 ** (semitones / 12.0)
+
         # Write first frame at sample 0
-        temp_map.write(f"0 {smoothed_corr[0]:.6f}\n")
+        temp_map.write(f"0 {to_ratio(smoothed_corr[0]):.6f}\n")
 
         num_samples_target = int(round(duration_target * sr_target))
         for idx, (t, corr) in enumerate(zip(grid_times, smoothed_corr)):
             sample_frame = int(round(t * sr_target))
             if 0 < sample_frame < num_samples_target:
-                temp_map.write(f"{sample_frame} {corr:.6f}\n")
+                temp_map.write(f"{sample_frame} {to_ratio(corr):.6f}\n")
 
         # Write final sample frame
-        temp_map.write(f"{num_samples_target} {smoothed_corr[-1]:.6f}\n")
+        temp_map.write(f"{num_samples_target} {to_ratio(smoothed_corr[-1]):.6f}\n")
         temp_map.close()
 
         # Build output filepath
@@ -295,7 +320,7 @@ def process_tuning(base_path, target_path, args):
 
         # Run rubberband
         print(f"  Running Rubber Band to pitch shift stem...")
-        cmd = ["rubberband"]
+        cmd = [args.rubberband_path]
         if args.engine == "fine":
             cmd.append("--fine")
         else:
@@ -320,10 +345,51 @@ def process_tuning(base_path, target_path, args):
         if os.path.exists(temp_map.name):
             os.remove(temp_map.name)
 
-import traceback
+def resolve_rubberband_path(args):
+    """Resolves and validates the Rubber Band executable path."""
+    import shutil
+
+    exe_candidate = args.rubberband_path
+    if not exe_candidate:
+        for candidate in ["rubberband", "rubberband.exe", "rubberband-r3", "rubberband-r3.exe"]:
+            resolved = shutil.which(candidate)
+            if resolved:
+                exe_candidate = resolved
+                break
+        else:
+            exe_candidate = "rubberband"
+
+    # Test running
+    try:
+        subprocess.run([exe_candidate, "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Update args with the resolved path
+        args.rubberband_path = exe_candidate
+    except FileNotFoundError:
+        print("\n" + "="*80, file=sys.stderr)
+        print("ERROR: Rubber Band command-line utility was not found on your system!", file=sys.stderr)
+        print("="*80, file=sys.stderr)
+        print("Rubber Band is required to perform high-quality continuous pitch shifting.", file=sys.stderr)
+        print("\nHow to install and configure Rubber Band:", file=sys.stderr)
+        print("\n--- WINDOWS ---", file=sys.stderr)
+        print("1. Download the pre-compiled Windows zip archive from the official website:", file=sys.stderr)
+        print("   https://breakfastquay.com/rubberband/", file=sys.stderr)
+        print("2. Extract the archive (e.g., to C:\\Program Files\\rubberband).", file=sys.stderr)
+        print("3. Either:", file=sys.stderr)
+        print("   A) Add the folder containing 'rubberband.exe' to your system's PATH environment variable.", file=sys.stderr)
+        print("   B) Pass the direct path using the '--rubberband-path' argument, like so:", file=sys.stderr)
+        print("      python tune_stems.py ... --rubberband-path \"C:\\Program Files\\rubberband\\rubberband.exe\"", file=sys.stderr)
+        print("\n--- MACOS ---", file=sys.stderr)
+        print("Install via Homebrew:", file=sys.stderr)
+        print("   brew install rubberband", file=sys.stderr)
+        print("\n--- LINUX (Ubuntu/Debian) ---", file=sys.stderr)
+        print("Install via apt:", file=sys.stderr)
+        print("   sudo apt-get install -y rubberband-cli", file=sys.stderr)
+        print("="*80, file=sys.stderr)
+        sys.exit(1)
 
 def main():
     args = parse_args()
+    resolve_rubberband_path(args)
     base_stem, target_stems = identify_base_and_targets(args.stems)
 
     print("=== Continuous Stem Tuning Pipeline ===")
