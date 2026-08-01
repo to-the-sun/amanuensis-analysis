@@ -273,6 +273,26 @@ try:
                         vowels.append(vowel_sound)
         return vowels
 
+    def truncate_line_beginning(line_text, target_syls):
+        words = line_text.split()
+        if not words:
+            return "", 0
+        accumulated_words = []
+        current_syllables = 0
+        for word in reversed(words):
+            word_syls = count_syllables_word(word)
+            if current_syllables + word_syls <= target_syls:
+                accumulated_words.append(word)
+                current_syllables += word_syls
+            else:
+                break
+        if not accumulated_words:
+            last_word = words[-1]
+            accumulated_words = [last_word]
+            current_syllables = count_syllables_word(last_word)
+        truncated_line = " ".join(reversed(accumulated_words))
+        return truncated_line, current_syllables
+
     # --- TRANSCRIPTION SINK ---
     class AquaTranscriptionSink(voice_recv.AudioSink):
         def __init__(self, bot, text_id):
@@ -378,11 +398,18 @@ try:
         def _get_cleaned_content(self, line):
             prefix = ""
             content = line
-            if line.startswith("**"):
-                parts = line.split("**: ", 1)
-                if len(parts) > 1:
-                    prefix = parts[0] + "**: "
-                    content = parts[1]
+            bold_match = re.match(r'^(\*\*([^*]+)\*\*\s*:\s*)(.*)', line)
+            if bold_match:
+                prefix = bold_match.group(1)
+                content = bold_match.group(3)
+            else:
+                if not line.startswith("http://") and not line.startswith("https://"):
+                    plain_match = re.match(r'^([A-Za-z0-9_\-\s#@\[\]\(\)]+):\s*(.*)', line)
+                    if plain_match:
+                        name_part = plain_match.group(1)
+                        if len(name_part) < 40 and len(name_part.split()) <= 5:
+                            prefix = name_part + ": "
+                            content = plain_match.group(2)
 
             cleaned_content = re.sub(r'\s*\(\d+\)$', '', content).strip()
             return prefix, cleaned_content
@@ -504,14 +531,12 @@ try:
                         await interaction.followup.send("Could not identify any rhyming vowel sounds in the final syllable slot.")
                         return
 
-                    # Filter phrases that have that rhyming vowel in position 0
-                    selected_phrases = []
+                    # Assemble poem by truncating every matching line to exactly 5 syllables
+                    poem_lines = []
                     for prefix, cleaned_content, vowels in collected_phrases:
                         if vowels[-1] == best_vowel:
-                            selected_phrases.append(f"{prefix}{cleaned_content}")
-
-                    # Assemble poem (no pairwise rhyming constraint, just matching final vowel sound)
-                    poem_lines = selected_phrases
+                            truncated, _ = truncate_line_beginning(cleaned_content, 5)
+                            poem_lines.append(truncated)
 
                     if poem_lines:
                         response = "\n".join(poem_lines).strip()
