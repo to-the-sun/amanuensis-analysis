@@ -345,20 +345,20 @@ class DesktopTranscriberBot(discord.Client):
                     await interaction.followup.send("Could not identify any rhyming vowel sounds in the final syllable slot.")
                     return
 
-                # Assemble poem (no pairwise rhyming constraint, just matching final vowel sound)
-                # and truncate the beginning of each line to the shortest rhyming line so far.
-                poem_lines = []
-                shortest_syls = None
+                # Filter candidates that have that rhyming vowel in position 0
+                matching_candidates = []
                 for prefix, cleaned_content, vowels in collected_phrases:
                     if vowels[-1] == best_vowel:
-                        if shortest_syls is None:
-                            line_syls = sum(count_syllables_word(w) for w in cleaned_content.split())
-                            poem_lines.append(cleaned_content)
-                            shortest_syls = line_syls
-                        else:
-                            truncated, truncated_syls = truncate_line_beginning(cleaned_content, shortest_syls)
-                            poem_lines.append(truncated)
-                            shortest_syls = min(shortest_syls, truncated_syls)
+                        line_syls = sum(count_syllables_word(w) for w in cleaned_content.split())
+                        matching_candidates.append((cleaned_content, line_syls))
+
+                poem_lines = []
+                if matching_candidates:
+                    # Find the minimum syllable count once before constructing the poem
+                    min_syls = min(syl_count for _, syl_count in matching_candidates)
+                    for cleaned_content, _ in matching_candidates:
+                        truncated, _ = truncate_line_beginning(cleaned_content, min_syls)
+                        poem_lines.append(truncated)
 
                 if poem_lines:
                     response = "\n".join(poem_lines).strip()
