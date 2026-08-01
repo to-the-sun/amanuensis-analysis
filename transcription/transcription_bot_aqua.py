@@ -32,6 +32,7 @@ try:
     import syllables
 
     from SoundsLike.SoundsLike import Word_Functions, Pronunciation_Functions
+    import pronouncing
 
     import discord
     from discord import app_commands
@@ -210,53 +211,6 @@ try:
     except LookupError:
         nltk.download('averaged_perceptron_tagger')
 
-    # Custom Pronouncing Implementation
-    RHYME_LOOKUP = None
-
-    def rhyming_part(phones):
-        phones_list = phones.split()
-        for i in range(len(phones_list) - 1, 0, -1):
-            if phones_list[i][-1] in '12':
-                return ' '.join(phones_list[i:])
-        return phones
-
-    def init_rhyme_lookup():
-        global RHYME_LOOKUP
-        if RHYME_LOOKUP is None:
-            RHYME_LOOKUP = {}
-            if CMU_DICT:
-                for word, prons in CMU_DICT.items():
-                    for pron in prons:
-                        phones_str = ' '.join(pron)
-                        rp = rhyming_part(phones_str)
-                        if rp:
-                            RHYME_LOOKUP.setdefault(rp, []).append(word)
-
-    def phones_for_word(word):
-        if not CMU_DICT:
-            return []
-        cw = word.lower().strip(".,!?:;()\"'")
-        if cw in CMU_DICT:
-            return [' '.join(p) for p in CMU_DICT[cw]]
-        return []
-
-    def pronouncing_rhymes(word):
-        if not CMU_DICT:
-            return []
-        init_rhyme_lookup()
-        phones = phones_for_word(word)
-        combined_rhymes = []
-        cw = word.lower().strip(".,!?:;()\"'")
-        if phones:
-            for element in phones:
-                rp = rhyming_part(element)
-                for w in RHYME_LOOKUP.get(rp, []):
-                    if w != cw:
-                        combined_rhymes.append(w)
-            return sorted(set(combined_rhymes))
-        else:
-            return []
-
     def count_syllables_word(word):
         clean_word = word.lower().strip(".,!?:;()\"'")
         if not clean_word:
@@ -292,7 +246,7 @@ try:
         if cw1 == cw2:
             return True
         try:
-            return cw2 in pronouncing_rhymes(cw1) or cw1 in pronouncing_rhymes(cw2)
+            return cw2 in pronouncing.rhymes(cw1) or cw1 in pronouncing.rhymes(cw2)
         except Exception:
             return False
 
