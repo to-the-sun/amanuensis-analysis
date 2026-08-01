@@ -320,6 +320,8 @@ def process_tuning(base_path, target_path, args):
         if os.path.exists(temp_map.name):
             os.remove(temp_map.name)
 
+import traceback
+
 def main():
     args = parse_args()
     base_stem, target_stems = identify_base_and_targets(args.stems)
@@ -334,4 +336,17 @@ def main():
     print("\nAll target stems successfully processed!")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        print("\nTuning complete.")
+    except Exception as e:
+        print("\n" + "="*60)
+        print("CRITICAL ERROR DURING STEM TUNING")
+        print("="*60)
+        traceback.print_exc()
+        print("="*60)
+    finally:
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass
