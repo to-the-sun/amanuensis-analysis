@@ -483,6 +483,16 @@ try:
                         await msg.edit(content="\n".join(new_lines))
                         await asyncio.sleep(0.5) # Rate limit safety
 
+                # Save the histogram as JSON in the same directory as the script
+                serializable_histogram = {str(k): dict(v) for k, v in histogram.items()}
+                vowel_histogram_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vowel_histogram.json")
+                try:
+                    with open(vowel_histogram_path, "w") as f:
+                        json.dump(serializable_histogram, f, indent=4)
+                    logger.info(f"Vowel histogram saved to {vowel_histogram_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save vowel histogram: {e}")
+
                 if collected_phrases:
                     await interaction.followup.send("Generating poem from rhyming lines using backward syllable histogram analysis...")
 
@@ -500,28 +510,8 @@ try:
                         if vowels[-1] == best_vowel:
                             selected_phrases.append(f"{prefix}{cleaned_content}")
 
-                    # Group these selected phrases into subgroups that pairwise rhyme
-                    subgroups = []
-                    for line in selected_phrases:
-                        words = line.split()
-                        if not words:
-                            continue
-                        last_word = words[-1]
-                        placed = False
-                        for sg in subgroups:
-                            if all(do_words_rhyme(last_word, sg_line.split()[-1]) for sg_line in sg if sg_line.split()):
-                                sg.append(line)
-                                placed = True
-                                break
-                        if not placed:
-                            subgroups.append([line])
-
-                    # Assemble poem
-                    poem_lines = []
-                    for sg in subgroups:
-                        if len(sg) >= 2:
-                            poem_lines.extend(sg)
-                            poem_lines.append("") # Stanza break
+                    # Assemble poem (no pairwise rhyming constraint, just matching final vowel sound)
+                    poem_lines = selected_phrases
 
                     if poem_lines:
                         response = "\n".join(poem_lines).strip()
