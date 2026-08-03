@@ -344,10 +344,14 @@ try:
 
             syllables_list.append(phones[start:])
 
+            word_ipa_syls = []
             for syl in syllables_list:
                 ipa_val = phonemes_to_ipa(syl)
                 if ipa_val:
-                    results.append(f"/{ipa_val}/")
+                    word_ipa_syls.append(ipa_val)
+            if word_ipa_syls:
+                word_ipa_str = "/".join(word_ipa_syls)
+                results.append(f"/{word_ipa_str}/")
 
         return " ".join(results)
 
@@ -355,7 +359,15 @@ try:
         ipa_str = get_ipa_syllables(line)
         if not ipa_str:
             return []
-        syls = ipa_str.split()
+        # Split on whitespace to get word-level IPA representations (e.g. "/syl1/syl2/")
+        words = ipa_str.split()
+        syls = []
+        for word in words:
+            # Strip outer slashes first (e.g. "syl1/syl2")
+            stripped_word = word.strip("/")
+            # Split on single slash to get syllables
+            syls.extend(stripped_word.split("/"))
+
         vowels = []
         ipa_vowels_sorted = ["ər", "eɪ", "aʊ", "aɪ", "oʊ", "ɔɪ", "ə", "ɑ", "æ", "ɔ", "ɛ", "ɪ", "ʊ", "u", "i"]
         for syl in syls:
@@ -434,7 +446,7 @@ try:
     def truncate_line_beginning(line_text, target_syls):
         words = line_text.split()
         if not words:
-            return "", 0
+            return None, 0
         accumulated_words = []
         current_syllables = 0
         for word in reversed(words):
@@ -444,10 +456,9 @@ try:
                 current_syllables += word_syls
             else:
                 break
-        if not accumulated_words:
-            last_word = words[-1]
-            accumulated_words = [last_word]
-            current_syllables = count_syllables_word(last_word)
+        if current_syllables != target_syls:
+            # Truncation would cut a word into two, so return None
+            return None, current_syllables
         truncated_line = " ".join(reversed(accumulated_words))
         return truncated_line, current_syllables
 
@@ -720,7 +731,8 @@ try:
                                 truncated = cleaned_content
                             else:
                                 truncated, _ = truncate_line_beginning(cleaned_content, 4)
-                            poem_lines.append(truncated)
+                            if truncated is not None:
+                                poem_lines.append(truncated)
 
                     if poem_lines:
                         response = "\n".join(poem_lines).strip()
