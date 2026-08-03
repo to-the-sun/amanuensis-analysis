@@ -304,31 +304,6 @@ def do_words_rhyme(w1, w2):
     except Exception:
         return False
 
-def get_phrase_vowels(phrase):
-    if not NLTK_AVAILABLE:
-        return []
-    words = phrase.split()
-    vowels = []
-    for word in words:
-        clean_word = word.lower().strip(".,!?:;()\"'")
-        if not clean_word:
-            continue
-        pron = None
-        if CMU_DICT and clean_word in CMU_DICT:
-            pron = CMU_DICT[clean_word][0]
-        else:
-            try:
-                pron = Word_Functions.pronunciation(clean_word, generate=True)
-            except Exception:
-                pass
-
-        if pron:
-            for phone in pron:
-                if phone[-1].isdigit():
-                    vowel_sound = phone[:-1]
-                    vowels.append(vowel_sound)
-    return vowels
-
 def truncate_line_beginning(line_text, target_syls):
     words = line_text.split()
     if not words:
@@ -479,12 +454,8 @@ class DesktopTranscriberBot(discord.Client):
                         changed = True
                     new_lines.append(new_line)
 
-                    # Extract vowels for histogram using IPA if available
-                    vowels = []
-                    if ENG_TO_IPA_AVAILABLE:
-                        vowels = extract_ipa_vowels_from_line(cleaned_content)
-                    if not vowels:
-                        vowels = get_phrase_vowels(cleaned_content)
+                    # Extract vowels for histogram using IPA
+                    vowels = extract_ipa_vowels_from_line(cleaned_content)
 
                     if vowels:
                         collected_phrases.append((prefix, cleaned_content, vowels))
@@ -493,7 +464,10 @@ class DesktopTranscriberBot(discord.Client):
                             histogram[idx][v] += 1
 
                 if changed:
-                    await msg.edit(content="\n".join(new_lines))
+                    edited_content = "\n".join(new_lines)
+                    if len(edited_content) > 2000:
+                        edited_content = edited_content[:1997] + "..."
+                    await msg.edit(content=edited_content)
                     await asyncio.sleep(0.5) # Rate limit safety
 
             # Save the histogram as JSON in the same directory as the script

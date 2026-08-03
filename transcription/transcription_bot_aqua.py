@@ -672,12 +672,8 @@ try:
                             changed = True
                         new_lines.append(new_line)
 
-                        # Extract vowels for histogram using IPA if available
-                        vowels = []
-                        if ENG_TO_IPA_AVAILABLE:
-                            vowels = extract_ipa_vowels_from_line(cleaned_content)
-                        if not vowels:
-                            vowels = get_phrase_vowels(cleaned_content)
+                        # Extract vowels for histogram using IPA
+                        vowels = extract_ipa_vowels_from_line(cleaned_content)
 
                         if vowels:
                             collected_phrases.append((prefix, cleaned_content, vowels))
@@ -686,7 +682,10 @@ try:
                                 histogram[idx][v] += 1
 
                     if changed:
-                        await msg.edit(content="\n".join(new_lines))
+                        edited_content = "\n".join(new_lines)
+                        if len(edited_content) > 2000:
+                            edited_content = edited_content[:1997] + "..."
+                        await msg.edit(content=edited_content)
                         await asyncio.sleep(0.5) # Rate limit safety
 
                 # Save the histogram as JSON in the same directory as the script
