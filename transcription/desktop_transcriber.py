@@ -491,11 +491,17 @@ class DesktopTranscriberBot(discord.Client):
                     await interaction.followup.send("Could not identify any rhyming vowel sounds in the final syllable slot.")
                     return
 
-                # Assemble poem by truncating every matching line to exactly 5 syllables
+                # Assemble poem by discarding any lines less than 4 syllables, and truncating lines with more than 4 syllables to 4 syllables
                 poem_lines = []
                 for prefix, cleaned_content, vowels in collected_phrases:
                     if vowels[-1] == best_vowel:
-                        truncated, _ = truncate_line_beginning(cleaned_content, 5)
+                        line_syls = sum(count_syllables_word(w) for w in cleaned_content.split())
+                        if line_syls < 4:
+                            continue
+                        elif line_syls == 4:
+                            truncated = cleaned_content
+                        else:
+                            truncated, _ = truncate_line_beginning(cleaned_content, 4)
                         poem_lines.append(truncated)
 
                 if poem_lines:
