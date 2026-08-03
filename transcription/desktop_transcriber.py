@@ -205,6 +205,24 @@ def get_ipa_syllables(line):
 
     return " ".join(results)
 
+def extract_ipa_vowels_from_line(line):
+    ipa_str = get_ipa_syllables(line)
+    if not ipa_str:
+        return []
+    syls = ipa_str.split()
+    vowels = []
+    ipa_vowels_sorted = ["ər", "eɪ", "aʊ", "aɪ", "oʊ", "ɔɪ", "ə", "ɑ", "æ", "ɔ", "ɛ", "ɪ", "ʊ", "u", "i"]
+    for syl in syls:
+        clean_syl = re.sub(r"[ˈˌ/*]", "", syl)
+        found_vowel = None
+        for v in ipa_vowels_sorted:
+            if v in clean_syl:
+                found_vowel = v
+                break
+        if found_vowel:
+            vowels.append(found_vowel)
+    return vowels
+
 # Load CMUdict if available
 CMU_DICT = None
 if NLTK_AVAILABLE:
@@ -438,8 +456,16 @@ class DesktopTranscriberBot(discord.Client):
                 changed = False
 
                 for line in lines:
+                    if line.strip().startswith('/'):
+                        new_lines.append(line)
+                        continue
+
                     prefix, cleaned_content = self._get_cleaned_content(line)
                     if not cleaned_content:
+                        new_lines.append(line)
+                        continue
+
+                    if cleaned_content.startswith('/'):
                         new_lines.append(line)
                         continue
 
@@ -453,8 +479,13 @@ class DesktopTranscriberBot(discord.Client):
                         changed = True
                     new_lines.append(new_line)
 
-                    # Extract vowels for histogram
-                    vowels = get_phrase_vowels(cleaned_content)
+                    # Extract vowels for histogram using IPA if available
+                    vowels = []
+                    if ENG_TO_IPA_AVAILABLE:
+                        vowels = extract_ipa_vowels_from_line(cleaned_content)
+                    if not vowels:
+                        vowels = get_phrase_vowels(cleaned_content)
+
                     if vowels:
                         collected_phrases.append((prefix, cleaned_content, vowels))
                         reversed_vowels = list(reversed(vowels))
