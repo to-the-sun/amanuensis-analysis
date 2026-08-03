@@ -64,6 +64,147 @@ except ImportError as e:
     NLTK_AVAILABLE = False
     logger.warning(f"Linguistic libraries (nltk, syllables, SoundsLike, pronouncing) are not available. /analyze command will use basic fallbacks: {e}")
 
+try:
+    import eng_to_ipa
+    import eng_to_ipa.stress as stress_lib
+    from eng_to_ipa.transcribe import get_cmu
+    ENG_TO_IPA_AVAILABLE = True
+except ImportError as e:
+    ENG_TO_IPA_AVAILABLE = False
+    logger.warning(f"eng-to-ipa library is not available. IPA syllables feature will be disabled: {e}")
+
+IPA_SYMBOLS_MAP = {
+    "a": "ə", "ey": "eɪ", "aa": "ɑ", "ae": "æ", "ah": "ə", "ao": "ɔ",
+    "aw": "aʊ", "ay": "aɪ", "ch": "ʧ", "dh": "ð", "eh": "ɛ", "er": "ər",
+    "hh": "h", "ih": "ɪ", "jh": "ʤ", "ng": "ŋ", "ow": "oʊ", "oy": "ɔɪ",
+    "sh": "ʃ", "th": "θ", "uh": "ʊ", "uw": "u", "zh": "ʒ", "iy": "i", "y": "j"
+}
+
+VALID_DOUBLE_ONSETS = {
+    ("P", "R"), ("P", "L"), ("P", "Y"),
+    ("T", "R"), ("T", "W"), ("T", "Y"),
+    ("K", "R"), ("K", "L"), ("K", "W"), ("K", "Y"),
+    ("B", "R"), ("B", "L"), ("B", "Y"),
+    ("D", "R"), ("D", "W"), ("D", "Y"),
+    ("G", "R"), ("G", "L"), ("G", "W"),
+    # Fricatives
+    ("F", "R"), ("F", "L"), ("F", "Y"),
+    ("V", "R"), ("V", "L"), ("V", "Y"),
+    ("TH", "R"), ("TH", "W"), ("TH", "Y"),
+    ("SH", "R"), ("S", "L"), ("S", "R"), ("S", "W"), ("S", "Y"),
+    ("S", "P"), ("S", "T"), ("S", "K"), ("S", "M"), ("S", "N"), ("S", "F")
+}
+
+VALID_TRIPLE_ONSETS = {
+    ("S", "P", "L"), ("S", "P", "R"), ("S", "P", "Y"),
+    ("S", "T", "R"), ("S", "T", "Y"),
+    ("S", "K", "L"), ("S", "K", "R"), ("S", "K", "W"), ("S", "K", "Y")
+}
+
+IPA_VOWELS_SET = {"aa", "ae", "ah", "ao", "aw", "ay", "eh", "er", "ey", "ih", "iy", "ow", "oy", "uh", "uw"}
+
+def is_valid_onset(phones):
+    t = tuple(re.sub(r"[ˈˌ]", "", p).upper() for p in phones)
+    if len(t) == 1:
+        return t[0] != "NG"
+    elif len(t) == 2:
+        return t in VALID_DOUBLE_ONSETS
+    elif len(t) == 3:
+        return t in VALID_TRIPLE_ONSETS
+    return False
+
+def phonemes_to_ipa(phonemes_list):
+    ipa_form = ""
+    for piece in phonemes_list:
+        piece_clean = re.sub(r"\d", "", piece).lower()
+        marked = False
+        unmarked = piece_clean
+        if piece_clean and piece_clean[0] in ["ˈ", "ˌ"]:
+            marked = True
+            mark_char = piece_clean[0]
+            unmarked = piece_clean[1:]
+        if unmarked in IPA_SYMBOLS_MAP:
+            if marked:
+                ipa_form += mark_char + IPA_SYMBOLS_MAP[unmarked]
+            else:
+                ipa_form += IPA_SYMBOLS_MAP[unmarked]
+        else:
+            ipa_form += piece_clean
+
+    swap_list = [["ˈər", "əˈr"], ["ˈie", "iˈe"]]
+    for sym in swap_list:
+        if not ipa_form.startswith(sym[0]):
+            ipa_form = ipa_form.replace(sym[0], sym[1])
+    return ipa_form
+
+def get_ipa_syllables(line):
+    if not ENG_TO_IPA_AVAILABLE:
+        return ""
+    words = re.findall(r"[a-zA-Z0-9']+", line)
+    if not words:
+        return ""
+
+    results = []
+    for w in words:
+        w_lower = w.lower()
+        cmu_res = get_cmu([w_lower])
+        if not cmu_res or not cmu_res[0]:
+            results.append(f"/{w_lower}*/")
+            continue
+
+        cmu_str = cmu_res[0][0]
+        if cmu_str.startswith("__IGNORE__"):
+            word_ignore = cmu_str.replace("__IGNORE__", "")
+            results.append(f"/{word_ignore}*/")
+            continue
+
+        stressed_cmu = stress_lib.find_stress(cmu_str, type="all")
+        phones = stressed_cmu.split(" ")
+
+        vowel_indices = []
+        for idx, p in enumerate(phones):
+            clean_p = re.sub(r"[ˈˌ\d]", "", p).lower()
+            if clean_p in IPA_VOWELS_SET:
+                vowel_indices.append(idx)
+
+        if not vowel_indices:
+            ipa_val = phonemes_to_ipa(phones)
+            results.append(f"/{ipa_val}/")
+            continue
+
+        syllables_list = []
+        start = 0
+        for idx in range(len(vowel_indices) - 1):
+            v1 = vowel_indices[idx]
+            v2 = vowel_indices[idx + 1]
+
+            num_consonants = v2 - v1 - 1
+            if num_consonants == 0:
+                split_point = v2
+            elif num_consonants == 1:
+                split_point = v1 + 1
+            else:
+                consonant_sublist = phones[v1 + 1 : v2]
+                split_point = v2 - 1
+                for onset_len in [3, 2, 1]:
+                    if onset_len <= num_consonants:
+                        candidate = consonant_sublist[-onset_len:]
+                        if is_valid_onset(candidate):
+                            split_point = v2 - onset_len
+                            break
+
+            syllables_list.append(phones[start:split_point])
+            start = split_point
+
+        syllables_list.append(phones[start:])
+
+        for syl in syllables_list:
+            ipa_val = phonemes_to_ipa(syl)
+            if ipa_val:
+                results.append(f"/{ipa_val}/")
+
+    return " ".join(results)
+
 # Load CMUdict if available
 CMU_DICT = None
 if NLTK_AVAILABLE:
@@ -568,8 +709,15 @@ class DesktopTranscriberBot(discord.Client):
         channel = self.get_channel(self.text_channel_id)
         if channel:
             try:
+                processed_lines = []
+                for l in text.splitlines():
+                    processed_lines.append(l)
+                    ipa_line = get_ipa_syllables(l)
+                    if ipa_line:
+                        processed_lines.append(ipa_line)
+                final_text = "\n".join(processed_lines)
                 # Post in the expected format (without user tag since it is desktop-wide capture)
-                await channel.send(text)
+                await channel.send(final_text)
                 logger.info("Transcription posted to #world channel.")
             except Exception as e:
                 logger.error(f"Failed to send transcription message: {e}")

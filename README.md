@@ -122,7 +122,7 @@ sudo apt-get update && sudo apt-get install -y libsndfile1-dev libaubio-dev libj
 ### Python Environment
 Install the required Python modules:
 ```bash
-pip install librosa numpy scipy matplotlib soundcard soundfile discord.py[voice] discord-ext-voice-recv davey cryptography faster-whisper google-genai torch transformers mido plotly playwright openai requests tqdm nltk syllables SoundsLike pydub
+pip install librosa numpy scipy matplotlib soundcard soundfile discord.py[voice] discord-ext-voice-recv davey cryptography faster-whisper google-genai torch transformers mido plotly playwright openai requests tqdm nltk syllables SoundsLike pydub eng-to-ipa
 ```
 
 ### Linguistic Data
