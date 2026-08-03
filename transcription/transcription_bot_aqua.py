@@ -351,6 +351,24 @@ try:
 
         return " ".join(results)
 
+    def extract_ipa_vowels_from_line(line):
+        ipa_str = get_ipa_syllables(line)
+        if not ipa_str:
+            return []
+        syls = ipa_str.split()
+        vowels = []
+        ipa_vowels_sorted = ["ər", "eɪ", "aʊ", "aɪ", "oʊ", "ɔɪ", "ə", "ɑ", "æ", "ɔ", "ɛ", "ɪ", "ʊ", "u", "i"]
+        for syl in syls:
+            clean_syl = re.sub(r"[ˈˌ/*]", "", syl)
+            found_vowel = None
+            for v in ipa_vowels_sorted:
+                if v in clean_syl:
+                    found_vowel = v
+                    break
+            if found_vowel:
+                vowels.append(found_vowel)
+        return vowels
+
     def count_syllables_word(word):
         clean_word = word.lower().strip(".,!?:;()\"'")
         if not clean_word:
@@ -631,8 +649,16 @@ try:
                     changed = False
 
                     for line in lines:
+                        if line.strip().startswith('/'):
+                            new_lines.append(line)
+                            continue
+
                         prefix, cleaned_content = self._get_cleaned_content(line)
                         if not cleaned_content:
+                            new_lines.append(line)
+                            continue
+
+                        if cleaned_content.startswith('/'):
                             new_lines.append(line)
                             continue
 
@@ -646,8 +672,9 @@ try:
                             changed = True
                         new_lines.append(new_line)
 
-                        # Extract vowels for histogram
-                        vowels = get_phrase_vowels(cleaned_content)
+                        # Extract vowels for histogram using IPA
+                        vowels = extract_ipa_vowels_from_line(cleaned_content)
+
                         if vowels:
                             collected_phrases.append((prefix, cleaned_content, vowels))
                             reversed_vowels = list(reversed(vowels))
@@ -655,7 +682,10 @@ try:
                                 histogram[idx][v] += 1
 
                     if changed:
-                        await msg.edit(content="\n".join(new_lines))
+                        edited_content = "\n".join(new_lines)
+                        if len(edited_content) > 2000:
+                            edited_content = edited_content[:1997] + "..."
+                        await msg.edit(content=edited_content)
                         await asyncio.sleep(0.5) # Rate limit safety
 
                 # Save the histogram as JSON in the same directory as the script
