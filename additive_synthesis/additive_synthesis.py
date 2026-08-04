@@ -438,6 +438,7 @@ def run_additive_synthesis(args):
             cmd = [
                 "ffmpeg", "-y",
                 "-loop", "1",
+                "-t", str(args.duration),
                 "-i", img_path,
                 "-i", wav_path,
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
@@ -452,23 +453,30 @@ def run_additive_synthesis(args):
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             temp_mp4_files.append(step_mp4_path)
             
-        # Write list of files for concat
-        concat_list_path = os.path.join(args.output_dir, "concat_list.txt")
-        with open(concat_list_path, "w") as f_list:
-            for temp_file in temp_mp4_files:
-                f_list.write(f"file '{os.path.basename(temp_file)}'\n")
-                
+        # Concat using filter_complex instead of concat demuxer to avoid audio dropouts / sync issues
+        concat_inputs = []
+        filter_str = ""
+        for idx, temp_file in enumerate(temp_mp4_files):
+            concat_inputs.extend(["-i", temp_file])
+            filter_str += f"[{idx}:v][{idx}:a]"
+        filter_str += f" concat=n={num_steps}:v=1:a=1 [v][a]"
+
         final_mp4_path = os.path.join(args.output_dir, "additive_synthesis_video.mp4")
         concat_cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", "concat_list.txt",
-            "-c", "copy",
-            "additive_synthesis_video.mp4"
+            "ffmpeg", "-y"
+        ] + concat_inputs + [
+            "-filter_complex", filter_str,
+            "-map", "[v]",
+            "-map", "[a]",
+            "-c:v", "libx264",
+            "-tune", "stillimage",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            final_mp4_path
         ]
-        # Run inside the output directory to avoid relative path issues in the text list
-        res = subprocess.run(concat_cmd, cwd=args.output_dir, capture_output=True, text=True)
+
+        res = subprocess.run(concat_cmd, capture_output=True, text=True)
         if os.path.exists(final_mp4_path) and os.path.getsize(final_mp4_path) > 0:
             print(f"Successfully generated master video: {final_mp4_path}")
         else:
@@ -476,8 +484,7 @@ def run_additive_synthesis(args):
             print("FFmpeg stdout:", res.stdout)
             print("FFmpeg stderr:", res.stderr)
         
-        # Cleanup temporary MP4s and concat list
-        os.remove(concat_list_path)
+        # Cleanup temporary MP4s
         for temp_file in temp_mp4_files:
             os.remove(temp_file)
             
