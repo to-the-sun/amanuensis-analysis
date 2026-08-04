@@ -78,13 +78,21 @@ class AdditiveSynthesizer:
             amp_env = s["amp"] * np.exp(-s["decay"] * self.t)
         return amp_env * np.sin(2 * np.pi * s["freq"] * self.t + s["phase"])
 
-    def get_equation(self, step_idx, latex=False):
+    def get_equation(self, step_idx, latex=False, sigma=False, return_terms=False):
         """
         Generates the mathematical equation for the signal up to step_idx.
         Formats amplitudes, frequencies, decay rates, and phases cleanly.
+        If sigma=True, returns the compact Sigma notation representation.
+        If return_terms=True, returns the list of formatted terms.
         """
         if step_idx <= 0 or step_idx > len(self.sinusoids):
-            return "p(t) = 0"
+            return [] if return_terms else "p(t) = 0"
+
+        if sigma:
+            if latex:
+                return f"p(t) = \\sum_{{n=1}}^{{{step_idx}}} A_n(t) \\sin(2\\pi f_n t + \\phi_n)"
+            else:
+                return f"p(t) = Sum_{{n=1}}^{{{step_idx}}} [A_n(t) * sin(2*pi*f_n*t + phi_n)]"
 
         terms = []
         for i in range(step_idx):
@@ -169,7 +177,10 @@ class AdditiveSynthesizer:
             terms.append(term)
 
         if not terms:
-            return "p(t) = 0"
+            return [] if return_terms else "p(t) = 0"
+
+        if return_terms:
+            return terms
 
         # Join the terms nicely
         # For plain text, add spaces around operators for legibility
@@ -320,10 +331,16 @@ def run_additive_synthesis(args):
         accum_signal = synth.get_signal_at_step(step)
         current_comp = synth.get_component_signal(step - 1)
         
-        # Get mathematical equations
-        text_eq = synth.get_equation(step, latex=False)
-        latex_eq = synth.get_equation(step, latex=True)
-        new_comp_eq = synth.get_equation(step, latex=False).split(" = ")[-1].split(" ")[-1]
+        # Get mathematical equations (using Sigma notation for display)
+        text_eq = synth.get_equation(step, latex=False, sigma=True)
+        latex_eq = synth.get_equation(step, latex=True, sigma=True)
+
+        # Get individual component equation without sigma for plot legend
+        comp_terms = synth.get_equation(step, latex=False, sigma=False, return_terms=True)
+        last_term = comp_terms[-1] if comp_terms else "0"
+        if last_term.startswith("+"):
+            last_term = last_term[1:]
+        new_comp_eq = last_term
         
         print(f"New component added: {synth.sinusoids[step-1]}")
         print(f"Updated Math Equation:\n  {text_eq}")
