@@ -3,6 +3,7 @@
 Additive Synthesis Visualizer & Player
 Displays the step-by-step construction of a sound wave from sinusoids,
 showing the updated final equation and playing the sound at each step.
+Also compiles the steps into a synchronized MP4 video and animated GIF.
 """
 
 import os
@@ -371,6 +372,64 @@ def run_additive_synthesis(args):
         print(f"Successfully generated animated GIF: {gif_path}")
     except Exception as gif_err:
         print(f"Warning: Could not compile animated GIF: {gif_err}")
+
+    # 5. Generate final video using FFmpeg
+    print("\nCompiling individual steps into an MP4 video...")
+    import subprocess
+    try:
+        temp_mp4_files = []
+        for step in range(1, num_steps + 1):
+            img_path = os.path.join(args.output_dir, f"step_{step:02d}.png")
+            wav_path = os.path.join(args.output_dir, f"step_{step:02d}.wav")
+            step_mp4_path = os.path.join(args.output_dir, f"step_{step:02d}_temp.mp4")
+
+            # Combine image + audio into a temporary MP4 segment
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-i", img_path,
+                "-i", wav_path,
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                step_mp4_path
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            temp_mp4_files.append(step_mp4_path)
+
+        # Write list of files for concat
+        concat_list_path = os.path.join(args.output_dir, "concat_list.txt")
+        with open(concat_list_path, "w") as f_list:
+            for temp_file in temp_mp4_files:
+                f_list.write(f"file '{os.path.basename(temp_file)}'\n")
+
+        final_mp4_path = os.path.join(args.output_dir, "additive_synthesis_video.mp4")
+        concat_cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list_path,
+            "-c", "copy",
+            final_mp4_path
+        ]
+        # Run inside the output directory to avoid relative path issues in the text list
+        res = subprocess.run(concat_cmd, cwd=args.output_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(final_mp4_path) and os.path.getsize(final_mp4_path) > 0:
+            print(f"Successfully generated master video: {final_mp4_path}")
+        else:
+            print(f"Warning: ffmpeg exited with {res.returncode} and final video could not be created.")
+
+        # Cleanup temporary MP4s and concat list
+        os.remove(concat_list_path)
+        for temp_file in temp_mp4_files:
+            os.remove(temp_file)
+
+    except Exception as vid_err:
+        print(f"Warning: Could not compile MP4 video: {vid_err}")
 
     # Copy the final step audio to final_synthesis.wav
     final_wav_path = os.path.join(args.output_dir, "final_synthesis.wav")
