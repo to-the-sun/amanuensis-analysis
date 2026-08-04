@@ -34,20 +34,22 @@ class AdditiveSynthesizer:
     """
     Manages a collection of sinusoids and performs additive synthesis,
     generating waveforms and LaTeX/text mathematical equations at each step.
+    Supports time-varying amplitudes with exponential decay.
     """
     def __init__(self, sample_rate=44100, duration=1.5):
         self.sample_rate = sample_rate
         self.duration = duration
         # Time array for synthesis
         self.t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-        self.sinusoids = []  # List of dicts: {"freq": float, "amp": float, "phase": float}
+        self.sinusoids = []  # List of dicts: {"freq": float, "amp": float, "phase": float, "decay": float}
 
-    def add_sinusoid(self, freq, amp, phase=0.0):
+    def add_sinusoid(self, freq, amp, phase=0.0, decay=0.0):
         """Adds a sinusoid component to the synthesizer."""
         self.sinusoids.append({
             "freq": float(freq),
             "amp": float(amp),
-            "phase": float(phase)
+            "phase": float(phase),
+            "decay": float(decay)
         })
 
     def clear(self):
@@ -63,8 +65,7 @@ class AdditiveSynthesizer:
         
         signal = np.zeros_like(self.t)
         for i in range(step_idx):
-            s = self.sinusoids[i]
-            signal += s["amp"] * np.sin(2 * np.pi * s["freq"] * self.t + s["phase"])
+            signal += self.get_component_signal(i)
         return signal
 
     def get_component_signal(self, idx):
@@ -72,12 +73,15 @@ class AdditiveSynthesizer:
         if idx < 0 or idx >= len(self.sinusoids):
             return np.zeros_like(self.t)
         s = self.sinusoids[idx]
-        return s["amp"] * np.sin(2 * np.pi * s["freq"] * self.t + s["phase"])
+        amp_env = s["amp"]
+        if s["decay"] > 0.0:
+            amp_env = s["amp"] * np.exp(-s["decay"] * self.t)
+        return amp_env * np.sin(2 * np.pi * s["freq"] * self.t + s["phase"])
 
     def get_equation(self, step_idx, latex=False):
         """
         Generates the mathematical equation for the signal up to step_idx.
-        Formats amplitudes, frequencies, and phases cleanly.
+        Formats amplitudes, frequencies, decay rates, and phases cleanly.
         """
         if step_idx <= 0 or step_idx > len(self.sinusoids):
             return "p(t) = 0"
@@ -88,29 +92,44 @@ class AdditiveSynthesizer:
             amp = s["amp"]
             freq = s["freq"]
             phase = s["phase"]
+            decay = s["decay"]
 
             # Skip if amplitude is virtually zero
             if abs(amp) < 1e-9:
                 continue
 
-            # Format Amplitude
-            if abs(amp - 1.0) < 1e-4:
-                amp_str = "" if i == 0 else "+"
-            elif abs(amp + 1.0) < 1e-4:
-                amp_str = "-"
-            else:
-                # Add sign if it's not the first term
-                if i > 0:
-                    amp_str = f"{amp:+.3f}"
+            # Format Amplitude / decay
+            # We want to represent amplitude as A_i(t) = amp * e^(-decay * t)
+            if decay > 0.0:
+                if abs(amp - 1.0) < 1e-4:
+                    amp_term_text = f"e^(-{decay:.1f}*t)"
+                    amp_term_latex = f"e^{{-{decay:.1f} t}}"
+                    amp_str = "" if i == 0 else "+"
+                elif abs(amp + 1.0) < 1e-4:
+                    amp_term_text = f"e^(-{decay:.1f}*t)"
+                    amp_term_latex = f"e^{{-{decay:.1f} t}}"
+                    amp_str = "-"
                 else:
-                    amp_str = f"{amp:.3f}"
+                    amp_term_text = f"{abs(amp):.3f}*e^(-{decay:.1f}*t)"
+                    amp_term_latex = f"{abs(amp):.3f} e^{{-{decay:.1f} t}}"
+                    amp_str = "+" if amp >= 0 else "-"
+                    if i == 0 and amp >= 0:
+                        amp_str = ""
+            else:
+                amp_term_text = ""
+                amp_term_latex = ""
+                if abs(amp - 1.0) < 1e-4:
+                    amp_str = "" if i == 0 else "+"
+                elif abs(amp + 1.0) < 1e-4:
+                    amp_str = "-"
+                else:
+                    if i > 0:
+                        amp_str = f"{amp:+.3f}"
+                    else:
+                        amp_str = f"{amp:.3f}"
 
-            # If amplitude is not empty (and not just + or -), we need a * symbol for plain text
-            if amp_str == "":
-                amp_mult = ""
-            elif amp_str == "+":
-                amp_mult = "" if latex else ""
-            elif amp_str == "-":
+            # Determine multipliers
+            if amp_str in ["", "+", "-"]:
                 amp_mult = ""
             else:
                 amp_mult = "" if latex else "*"
@@ -134,10 +153,16 @@ class AdditiveSynthesizer:
 
             # Combine into term
             freq_str = f"{freq:.1f}" if freq % 1 != 0 else f"{int(freq)}"
-            if latex:
-                term = f"{amp_str}\\sin(2\\pi \\cdot {freq_str} t{phase_str})"
+            if decay > 0.0:
+                if latex:
+                    term = f"{amp_str}{amp_term_latex}\\sin(2\\pi \\cdot {freq_str} t{phase_str})"
+                else:
+                    term = f"{amp_str}{amp_term_text}*sin(2*pi*{freq_str}*t{phase_str})"
             else:
-                term = f"{amp_str}{amp_mult}sin(2*pi*{freq_str}*t{phase_str})"
+                if latex:
+                    term = f"{amp_str}\\sin(2\\pi \\cdot {freq_str} t{phase_str})"
+                else:
+                    term = f"{amp_str}{amp_mult}sin(2*pi*{freq_str}*t{phase_str})"
 
             # Clean up potential duplicate signs
             term = term.replace("+-", "-").replace("-+", "-").replace("++", "+")
@@ -176,7 +201,7 @@ class AdditiveSynthesizer:
 def get_demo_sinusoids(wave_type, fund_freq, steps):
     """
     Generates standard synthesizer sinusoids for demo wave types:
-    - square, sawtooth, triangle, or custom chord.
+    - square, sawtooth, triangle, chord, or juicy.
     """
     sinusoids = []
     if wave_type == "square":
@@ -184,7 +209,7 @@ def get_demo_sinusoids(wave_type, fund_freq, steps):
         for n in range(1, steps * 2, 2):
             freq = fund_freq * n
             amp = 4.0 / (np.pi * n)
-            sinusoids.append((freq, amp, 0.0))
+            sinusoids.append((freq, amp, 0.0, 0.0))
             if len(sinusoids) == steps:
                 break
     elif wave_type == "sawtooth":
@@ -193,13 +218,13 @@ def get_demo_sinusoids(wave_type, fund_freq, steps):
             freq = fund_freq * n
             # (-1)^(n+1) * 2 / (pi * n)
             amp = (2.0 / (np.pi * n)) * ((-1) ** (n + 1))
-            sinusoids.append((freq, amp, 0.0))
+            sinusoids.append((freq, amp, 0.0, 0.0))
     elif wave_type == "triangle":
         # Triangle wave: 8/pi^2 * (sin(wt)/1^2 - sin(3wt)/3^2 + sin(5wt)/5^2 - ...)
         for idx, n in enumerate(range(1, steps * 2, 2)):
             freq = fund_freq * n
             amp = (8.0 / (np.pi**2 * n**2)) * ((-1) ** idx)
-            sinusoids.append((freq, amp, 0.0))
+            sinusoids.append((freq, amp, 0.0, 0.0))
             if len(sinusoids) == steps:
                 break
     elif wave_type == "chord":
@@ -210,7 +235,32 @@ def get_demo_sinusoids(wave_type, fund_freq, steps):
         amplitudes = [1.0, 0.8, 0.7, 0.5]
         phases = [0.0, np.pi/4, np.pi/2, 0.0]
         for i in range(min(steps, len(intervals))):
-            sinusoids.append((fund_freq * intervals[i], amplitudes[i], phases[i]))
+            sinusoids.append((fund_freq * intervals[i], amplitudes[i], phases[i], 0.0))
+    elif wave_type == "juicy":
+        # A dynamic, rich chime/bell chord with a built-in "reverb tail" simulated purely via additive synthesis.
+        # This is achieved by combining prominent fundamental/harmonic tones (which decay faster)
+        # with dense, quiet, slowly-decaying detuned "reverberant/diffuse" sinusoids.
+        # Format: (freq, amp, phase, decay)
+        specs = [
+            # 1. Warm fundamental root tone (chime body) - decays at a medium rate
+            (fund_freq, 0.9, 0.0, 1.5),
+            # 2. Shimmering perfect fifth (E.g. E4/G4) - decays slightly faster
+            (fund_freq * 1.5, 0.6, np.pi/4, 2.0),
+            # 3. Bright octave overtone with fast bell decay
+            (fund_freq * 2.0, 0.4, np.pi/2, 3.5),
+            # 4. Melodic major third overtone (rich timbre)
+            (fund_freq * 1.25, 0.5, 0.0, 1.8),
+            # 5. High sparkle ninth harmonic with rapid transient decay
+            (fund_freq * 2.25, 0.3, np.pi/3, 4.5),
+            # 6. Deep sub-octave fundamental that sustains longer for warm body
+            (fund_freq * 0.5, 0.7, -np.pi/4, 0.8),
+            # 7. Dense detuned "reverb tail" element 1 - slightly flat of root, slow decay, low amplitude
+            (fund_freq * 0.99, 0.15, np.pi/6, 0.4),
+            # 8. Dense detuned "reverb tail" element 2 - slightly sharp of octave, slow decay, low amplitude
+            (fund_freq * 2.015, 0.12, -np.pi/3, 0.5),
+        ]
+        for i in range(min(steps, len(specs))):
+            sinusoids.append(specs[i])
     else:
         raise ValueError(f"Unknown wave type: {wave_type}")
     
@@ -240,12 +290,13 @@ def run_additive_synthesis(args):
         with open(args.custom, "r") as f:
             data = json.load(f)
             for s in data:
-                synth.add_sinusoid(s["freq"], s["amp"], s.get("phase", 0.0))
+                synth.add_sinusoid(s["freq"], s["amp"], s.get("phase", 0.0), s.get("decay", 0.0))
     else:
         print(f"Generating demo sinusoids for '{args.demo}' wave (fundamental: {args.freq} Hz, steps: {args.steps})")
         sinusoids = get_demo_sinusoids(args.demo, args.freq, args.steps)
-        for freq, amp, phase in sinusoids:
-            synth.add_sinusoid(freq, amp, phase)
+        for s in sinusoids:
+            decay = s[3] if len(s) > 3 else 0.0
+            synth.add_sinusoid(s[0], s[1], s[2], decay)
 
     num_steps = len(synth.sinusoids)
     if num_steps == 0:
@@ -447,8 +498,8 @@ def main():
     parser.add_argument(
         "--demo",
         type=str,
-        choices=["square", "sawtooth", "triangle", "chord"],
-        default="square",
+        choices=["square", "sawtooth", "triangle", "chord", "juicy"],
+        default="juicy",
         help="Type of demo wave to synthesize (default: %(default)s)."
     )
     parser.add_argument(

@@ -38,13 +38,15 @@ The script `analysis/additive_synthesis.py` lets you visualize and hear a sound 
 
 ### Usage
 
-To run the visualization with a built-in square wave demo:
+To run the visualization with the default advanced `"juicy"` demo:
 ```bash
-python3 analysis/additive_synthesis.py --demo square --steps 8 --freq 220
+python3 additive_synthesis/additive_synthesis.py --demo juicy --steps 8 --freq 220
 ```
 
 #### Command-line Options:
-- `--demo {square,sawtooth,triangle,chord}`: The type of wave shape or chord to build step-by-step (default: `square`).
+- `--demo {square,sawtooth,triangle,chord,juicy}`: The type of wave shape or chord to build step-by-step (default: `juicy`).
+- `--reverb-mix RATIO`: Dry/wet reverb mix ratio, between 0.0 and 1.0 (default: `0.35`).
+- `--reverb-room RATIO`: Room size feedback ratio for the reverb, between 0.0 and 1.0 (default: `0.75`).
 - `--freq HZ`: Fundamental frequency of the sound in Hz (default: `220.0`).
 - `--steps COUNT`: Number of sinusoid components/harmonics to synthesize (default: `8`).
 - `--duration SECONDS`: Duration of the generated sound in seconds (default: `1.5`).
