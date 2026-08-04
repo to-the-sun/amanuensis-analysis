@@ -412,16 +412,18 @@ def run_additive_synthesis(args):
             "ffmpeg", "-y",
             "-f", "concat",
             "-safe", "0",
-            "-i", concat_list_path,
+            "-i", "concat_list.txt",
             "-c", "copy",
-            final_mp4_path
+            "additive_synthesis_video.mp4"
         ]
         # Run inside the output directory to avoid relative path issues in the text list
-        res = subprocess.run(concat_cmd, cwd=args.output_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        res = subprocess.run(concat_cmd, cwd=args.output_dir, capture_output=True, text=True)
         if os.path.exists(final_mp4_path) and os.path.getsize(final_mp4_path) > 0:
             print(f"Successfully generated master video: {final_mp4_path}")
         else:
             print(f"Warning: ffmpeg exited with {res.returncode} and final video could not be created.")
+            print("FFmpeg stdout:", res.stdout)
+            print("FFmpeg stderr:", res.stderr)
 
         # Cleanup temporary MP4s and concat list
         os.remove(concat_list_path)
