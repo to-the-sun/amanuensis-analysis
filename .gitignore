@@ -11,6 +11,7 @@ sound_design/BasicVolumeVST/juce_build/
 !sound_design/BasicVolumeVST/bin/**
 transcription/credentials.json
 credentials.json
+analysis/generated_samples/
 __pycache__/
 *.py[cod]
 *$py.class
