@@ -613,7 +613,8 @@ class DesktopTranscriberBot(discord.Client):
                     await interaction.followup.send("Could not identify any repeating vowel sounds in the syllable slots.")
                     return
 
-                poem_lines = []
+                # 1. Collect unique pairs of (l1_text, l2_text) for best_distance
+                pairs = []
                 for rep in all_repetitions:
                     if rep['distance'] == best_distance:
                         line_idx = rep['line_index']
@@ -633,13 +634,66 @@ class DesktopTranscriberBot(discord.Client):
                         l1_text = reconstruct_line_from_syllables(l1_syls)
                         l2_text = reconstruct_line_from_syllables(l2_syls)
 
-                        poem_lines.append(l1_text)
-                        poem_lines.append(l2_text)
-                        poem_lines.append("") # separate couplets
+                        if (l1_text, l2_text) not in pairs:
+                            pairs.append((l1_text, l2_text))
 
-                # Filter out trailing empty strings
-                while poem_lines and poem_lines[-1] == "":
-                    poem_lines.pop()
+                # Helper to merge chains
+                def merge_chains(chains_list):
+                    changed = True
+                    while changed:
+                        changed = False
+                        for i in range(len(chains_list)):
+                            for j in range(len(chains_list)):
+                                if i == j:
+                                    continue
+                                if chains_list[i][-1].strip().lower() == chains_list[j][0].strip().lower():
+                                    new_chain = chains_list[i] + chains_list[j][1:]
+                                    chains_list.pop(max(i, j))
+                                    chains_list.pop(min(i, j))
+                                    chains_list.append(new_chain)
+                                    changed = True
+                                    break
+                            if changed:
+                                break
+                    return chains_list
+
+                # Initialize chains
+                initial_chains = [[p[0], p[1]] for p in pairs]
+                merged_chains = merge_chains(initial_chains)
+
+                # Sort chains by original appearance of their first element
+                original_order = {p[0].strip().lower(): idx for idx, p in enumerate(pairs)}
+                merged_chains.sort(key=lambda c: original_order.get(c[0].strip().lower(), 999999))
+
+                # Flatten chains into poem_lines without blank lines
+                poem_lines = []
+                for chain in merged_chains:
+                    for line in chain:
+                        poem_lines.append(line)
+
+                # Helper to get last word
+                def get_last_word(line_text):
+                    words = re.findall(r"[a-zA-Z0-9']+", line_text)
+                    if words:
+                        return words[-1].lower()
+                    return ""
+
+                # Filter consecutive lines with identical ending words
+                filtered_poem_lines = []
+                i = 0
+                while i < len(poem_lines):
+                    if i < len(poem_lines) - 1:
+                        w1 = get_last_word(poem_lines[i])
+                        w2 = get_last_word(poem_lines[i+1])
+                        if w1 and w2 and w1 == w2:
+                            # Omit the first of the two lines
+                            logger.info(f"Omit line due to identical last word '{w1}': {poem_lines[i]}")
+                            i += 1
+                            continue
+                    filtered_poem_lines.append(poem_lines[i])
+                    i += 1
+
+                poem_lines = filtered_poem_lines
 
                 if poem_lines:
                     response = "\n".join(poem_lines).strip()
