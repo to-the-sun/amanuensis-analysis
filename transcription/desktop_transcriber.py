@@ -563,7 +563,7 @@ class DesktopTranscriberBot(discord.Client):
                                 continue
                             for j in range(i - 1, -1, -1):
                                 if line_syls[j]['vowel'] == v:
-                                    if line_syls[i]['word_idx'] == line_syls[j]['word_idx']:
+                                    if line_syls[i]['word'].strip().lower() == line_syls[j]['word'].strip().lower():
                                         continue
                                     distance = i - j
 
