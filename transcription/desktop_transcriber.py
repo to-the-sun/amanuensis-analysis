@@ -272,7 +272,7 @@ def split_word_into_spelling_syllables(word, num_syllables):
 def get_line_syllables_and_vowels(line):
     words = re.findall(r"[a-zA-Z0-9']+", line)
     line_syls = []
-    for w in words:
+    for word_idx, w in enumerate(words):
         ipa_str = get_ipa_syllables(w)
         vowels = []
         if ipa_str:
@@ -302,7 +302,8 @@ def get_line_syllables_and_vowels(line):
             line_syls.append({
                 'syllable': spelling_syls[i],
                 'vowel': vowels[i],
-                'word': w
+                'word': w,
+                'word_idx': word_idx
             })
     return line_syls
 
@@ -321,6 +322,23 @@ def reconstruct_line_from_syllables(syllables_list):
         else:
             parts.append(syl_text)
     return "".join(parts).strip()
+
+def cuts_word_in_half(selected_syls, full_line_syls):
+    selected_counts = collections.Counter()
+    for s in selected_syls:
+        if 'word_idx' in s:
+            selected_counts[s['word_idx']] += 1
+
+    full_counts = collections.Counter()
+    for s in full_line_syls:
+        if 'word_idx' in s:
+            full_counts[s['word_idx']] += 1
+
+    for w_idx, count in selected_counts.items():
+        if count < full_counts[w_idx]:
+            return True
+
+    return False
 
 def count_syllables_word(word):
     if not NLTK_AVAILABLE:
@@ -546,6 +564,18 @@ class DesktopTranscriberBot(discord.Client):
                             for j in range(i - 1, -1, -1):
                                 if line_syls[j]['vowel'] == v:
                                     distance = i - j
+
+                                    # Line 2 (repeated line)
+                                    l2_syls = line_syls[j + 1 : i + 1]
+
+                                    # Line 1 (duplicate line)
+                                    available = line_syls[0 : i + 1]
+                                    l1_indices = [(j - k) % len(available) for k in range(distance - 1, -1, -1)]
+                                    l1_syls = [available[idx] for idx in l1_indices]
+
+                                    if cuts_word_in_half(l1_syls, line_syls) or cuts_word_in_half(l2_syls, line_syls):
+                                        continue
+
                                     histogram[distance] += 1
                                     all_repetitions.append({
                                         'line_index': line_idx,
@@ -577,7 +607,7 @@ class DesktopTranscriberBot(discord.Client):
 
                 best_distance = None
                 if histogram:
-                    best_distance, highest_count = histogram.most_common(1)[0]
+                    best_distance = max(histogram.keys(), key=lambda d: histogram[d] * d)
 
                 if not best_distance:
                     await interaction.followup.send("Could not identify any repeating vowel sounds in the syllable slots.")
