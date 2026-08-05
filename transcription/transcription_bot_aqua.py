@@ -371,6 +371,8 @@ try:
         vowels = []
         ipa_vowels_sorted = ["ər", "eɪ", "aʊ", "aɪ", "oʊ", "ɔɪ", "ə", "ɑ", "æ", "ɔ", "ɛ", "ɪ", "ʊ", "u", "i"]
         for syl in syls:
+            if "*" in syl:
+                continue
             clean_syl = re.sub(r"[ˈˌ/*]", "", syl)
             found_vowel = None
             for v in ipa_vowels_sorted:
@@ -401,7 +403,7 @@ try:
         for word_idx, w in enumerate(words):
             ipa_str = get_ipa_syllables(w)
             vowels = []
-            if ipa_str:
+            if ipa_str and "*" not in ipa_str:
                 w_syls = [s.strip() for s in ipa_str.strip("/").split("/") if s.strip()]
                 ipa_vowels_sorted = ["ər", "eɪ", "aʊ", "aɪ", "oʊ", "ɔɪ", "ə", "ɑ", "æ", "ɔ", "ɛ", "ɪ", "ʊ", "u", "i"]
                 for s in w_syls:
