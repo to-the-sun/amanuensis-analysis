@@ -781,6 +781,8 @@ try:
                                     continue
                                 for j in range(i - 1, -1, -1):
                                     if line_syls[j]['vowel'] == v:
+                                        if line_syls[i]['word_idx'] == line_syls[j]['word_idx']:
+                                            continue
                                         distance = i - j
 
                                         # Line 2 (repeated line)
@@ -788,7 +790,9 @@ try:
 
                                         # Line 1 (duplicate line)
                                         available = line_syls[0 : i + 1]
-                                        l1_indices = [(j - k) % len(available) for k in range(distance - 1, -1, -1)]
+                                        if len(available) < 2 * distance:
+                                            continue
+                                        l1_indices = [j - k for k in range(distance - 1, -1, -1)]
                                         l1_syls = [available[idx] for idx in l1_indices]
 
                                         if cuts_word_in_half(l1_syls, line_syls) or cuts_word_in_half(l2_syls, line_syls):
@@ -845,7 +849,9 @@ try:
 
                             # Line 1 (duplicate line)
                             available = line_syls[0 : end_idx + 1]
-                            l1_indices = [(start_idx - k) % len(available) for k in range(best_distance - 1, -1, -1)]
+                            if len(available) < 2 * best_distance:
+                                continue
+                            l1_indices = [start_idx - k for k in range(best_distance - 1, -1, -1)]
                             l1_syls = [available[idx] for idx in l1_indices]
 
                             # Reconstruct text
