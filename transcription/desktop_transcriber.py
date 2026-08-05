@@ -570,6 +570,8 @@ class DesktopTranscriberBot(discord.Client):
 
                                     # Line 1 (duplicate line)
                                     available = line_syls[0 : i + 1]
+                                    if len(available) < 4 * distance:
+                                        continue
                                     l1_indices = [(j - k) % (j + 1) for k in range(distance - 1, -1, -1)]
                                     l1_syls = [available[idx] for idx in l1_indices]
 
@@ -627,6 +629,8 @@ class DesktopTranscriberBot(discord.Client):
 
                         # Line 1 (duplicate line)
                         available = line_syls[0 : end_idx + 1]
+                        if len(available) < 4 * best_distance:
+                            continue
                         l1_indices = [(start_idx - k) % (start_idx + 1) for k in range(best_distance - 1, -1, -1)]
                         l1_syls = [available[idx] for idx in l1_indices]
 
