@@ -255,6 +255,73 @@ if NLTK_AVAILABLE:
             logger.warning(f"Failed to download NLTK taggers: {e}")
 
 # --- SYLLABLE AND RHYME UTILITIES ---
+def split_word_into_spelling_syllables(word, num_syllables):
+    if num_syllables <= 1:
+        return [word]
+    length = len(word)
+    if length <= num_syllables:
+        return [word[i] if i < length else "" for i in range(num_syllables)]
+    parts = [[] for _ in range(num_syllables)]
+    for i, char in enumerate(word):
+        part_idx = int(i * num_syllables / length)
+        if part_idx >= num_syllables:
+            part_idx = num_syllables - 1
+        parts[part_idx].append(char)
+    return ["".join(p) for p in parts]
+
+def get_line_syllables_and_vowels(line):
+    words = re.findall(r"[a-zA-Z0-9']+", line)
+    line_syls = []
+    for w in words:
+        ipa_str = get_ipa_syllables(w)
+        vowels = []
+        if ipa_str:
+            w_syls = [s.strip() for s in ipa_str.strip("/").split("/") if s.strip()]
+            ipa_vowels_sorted = ["ər", "eɪ", "aʊ", "aɪ", "oʊ", "ɔɪ", "ə", "ɑ", "æ", "ɔ", "ɛ", "ɪ", "ʊ", "u", "i"]
+            for s in w_syls:
+                clean_syl = re.sub(r"[ˈˌ/*]", "", s)
+                found_vowel = None
+                for v in ipa_vowels_sorted:
+                    if v in clean_syl:
+                        found_vowel = v
+                        break
+                if found_vowel:
+                    vowels.append(found_vowel)
+
+        num_syls = len(vowels) if vowels else count_syllables_word(w)
+        if num_syls == 0:
+            num_syls = 1
+
+        spelling_syls = split_word_into_spelling_syllables(w, num_syls)
+        if len(vowels) < num_syls:
+            vowels.extend([None] * (num_syls - len(vowels)))
+        elif len(vowels) > num_syls:
+            vowels = vowels[:num_syls]
+
+        for i in range(num_syls):
+            line_syls.append({
+                'syllable': spelling_syls[i],
+                'vowel': vowels[i],
+                'word': w
+            })
+    return line_syls
+
+def reconstruct_line_from_syllables(syllables_list):
+    if not syllables_list:
+        return ""
+    parts = []
+    for idx, item in enumerate(syllables_list):
+        syl_text = item['syllable']
+        if idx > 0:
+            prev_item = syllables_list[idx - 1]
+            if prev_item['word'] != item['word']:
+                parts.append(' ' + syl_text)
+            else:
+                parts.append(syl_text)
+        else:
+            parts.append(syl_text)
+    return "".join(parts).strip()
+
 def count_syllables_word(word):
     if not NLTK_AVAILABLE:
         # Fallback syllable estimation using vowels
@@ -426,8 +493,9 @@ class DesktopTranscriberBot(discord.Client):
             logger.info(f"Analyze command (syllables + poem) received in {interaction.channel.name} from {interaction.user}")
             await interaction.followup.send("Starting syllable analysis and poem generation...")
 
-            collected_phrases = [] # list of (prefix, cleaned_content, vowels)
-            histogram = collections.defaultdict(collections.Counter)
+            collected_lines_syls = []
+            all_repetitions = []
+            histogram = collections.Counter()
 
             # Fetch all bot messages first to process them chronologically
             bot_messages = []
@@ -455,9 +523,9 @@ class DesktopTranscriberBot(discord.Client):
                         new_lines.append(line)
                         continue
 
-                    # Count syllables
-                    words = cleaned_content.split()
-                    total_syls = sum(count_syllables_word(w) for w in words)
+                    # Extract aligned syllables and vowels
+                    line_syls = get_line_syllables_and_vowels(cleaned_content)
+                    total_syls = len(line_syls)
 
                     new_line = f"{prefix}{cleaned_content} ({total_syls})"
 
@@ -465,14 +533,27 @@ class DesktopTranscriberBot(discord.Client):
                         changed = True
                     new_lines.append(new_line)
 
-                    # Extract vowels for histogram using IPA
-                    vowels = extract_ipa_vowels_from_line(cleaned_content)
+                    if line_syls:
+                        line_idx = len(collected_lines_syls)
+                        collected_lines_syls.append(line_syls)
 
-                    if vowels:
-                        collected_phrases.append((prefix, cleaned_content, vowels))
-                        reversed_vowels = list(reversed(vowels))
-                        for idx, v in enumerate(reversed_vowels):
-                            histogram[idx][v] += 1
+                        # Run backward duplicate vowel sound search for each syllable in this line
+                        L = len(line_syls)
+                        for i in range(L - 1, -1, -1):
+                            v = line_syls[i]['vowel']
+                            if not v:
+                                continue
+                            for j in range(i - 1, -1, -1):
+                                if line_syls[j]['vowel'] == v:
+                                    distance = i - j
+                                    histogram[distance] += 1
+                                    all_repetitions.append({
+                                        'line_index': line_idx,
+                                        'start_idx': j,
+                                        'end_idx': i,
+                                        'distance': distance,
+                                        'vowel': v
+                                    })
 
                 if changed:
                     edited_content = "\n".join(new_lines)
@@ -482,7 +563,7 @@ class DesktopTranscriberBot(discord.Client):
                     await asyncio.sleep(0.5) # Rate limit safety
 
             # Save the histogram as JSON in the same directory as the script
-            serializable_histogram = {str(k): dict(v) for k, v in histogram.items()}
+            serializable_histogram = {str(k): v for k, v in histogram.items()}
             vowel_histogram_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vowel_histogram.json")
             try:
                 with open(vowel_histogram_path, "w") as f:
@@ -491,41 +572,53 @@ class DesktopTranscriberBot(discord.Client):
             except Exception as e:
                 logger.error(f"Failed to save vowel histogram: {e}")
 
-            if collected_phrases:
+            if collected_lines_syls:
                 await interaction.followup.send("Generating poem from rhyming lines using backward syllable histogram analysis...")
 
-                best_vowel = None
-                if 0 in histogram and histogram[0]:
-                    best_vowel, highest_count = histogram[0].most_common(1)[0]
+                best_distance = None
+                if histogram:
+                    best_distance, highest_count = histogram.most_common(1)[0]
 
-                if not best_vowel:
-                    await interaction.followup.send("Could not identify any rhyming vowel sounds in the final syllable slot.")
+                if not best_distance:
+                    await interaction.followup.send("Could not identify any repeating vowel sounds in the syllable slots.")
                     return
 
-                # Assemble poem by discarding any lines less than 4 syllables, and truncating lines with more than 4 syllables to 4 syllables
                 poem_lines = []
-                for prefix, cleaned_content, vowels in collected_phrases:
-                    if vowels[-1] == best_vowel:
-                        line_syls = sum(count_syllables_word(w) for w in cleaned_content.split())
-                        if line_syls < 4:
-                            continue
-                        elif line_syls == 4:
-                            truncated = cleaned_content
-                        else:
-                            truncated, _ = truncate_line_beginning(cleaned_content, 4)
-                        if truncated is not None:
-                            poem_lines.append(truncated)
+                for rep in all_repetitions:
+                    if rep['distance'] == best_distance:
+                        line_idx = rep['line_index']
+                        start_idx = rep['start_idx']
+                        end_idx = rep['end_idx']
+                        line_syls = collected_lines_syls[line_idx]
+
+                        # Line 2 (repeated line)
+                        l2_syls = line_syls[start_idx + 1 : end_idx + 1]
+
+                        # Line 1 (duplicate line)
+                        available = line_syls[0 : end_idx + 1]
+                        l1_indices = [(start_idx - k) % len(available) for k in range(best_distance - 1, -1, -1)]
+                        l1_syls = [available[idx] for idx in l1_indices]
+
+                        # Reconstruct text
+                        l1_text = reconstruct_line_from_syllables(l1_syls)
+                        l2_text = reconstruct_line_from_syllables(l2_syls)
+
+                        poem_lines.append(l1_text)
+                        poem_lines.append(l2_text)
+                        poem_lines.append("") # separate couplets
+
+                # Filter out trailing empty strings
+                while poem_lines and poem_lines[-1] == "":
+                    poem_lines.pop()
 
                 if poem_lines:
                     response = "\n".join(poem_lines).strip()
-                    # Discord message limit is 2000 chars.
-                    # We truncate if it's too long, taking roughly 1800 chars to be safe with the prefix.
                     if len(response) > 1800:
                         response = response[:1800] + "\n\n... (truncated due to length)"
 
-                    await interaction.channel.send(f"**Poem Generated from Analysis (Best Final Vowel: {best_vowel}):**\n\n{response}")
+                    await interaction.channel.send(f"**Poem Generated from Analysis (Best Distance: {best_distance}):**\n\n{response}")
                 else:
-                    await interaction.followup.send(f"Could not find enough rhyming lines with final vowel '{best_vowel}'.")
+                    await interaction.followup.send(f"Could not find enough repeating lines with distance {best_distance}.")
 
             await interaction.followup.send("Syllable analysis and poem generation complete.")
 
