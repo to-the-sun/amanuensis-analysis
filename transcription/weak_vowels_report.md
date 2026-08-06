@@ -151,8 +151,29 @@ We can maintain an external `ipa_overrides.json` file. This lets you manually cu
 
 ---
 
-## 5. Summary and Next Steps
+## 5. Implemented Solution: Word-Specific Custom Dictionary (Solution 4)
 
-1. **For "and":** Use **Solution 1** (citation-form override).
-2. **For "diet" and "finest":** Use **Solution 2** (spelling-aware suffix restoration).
-3. **For manual control over other edge cases:** Use **Solution 4** (custom JSON overrides).
+We have officially implemented **Solution 4** to handle weak vowels and other custom pronunciations. This offers 100% fine-grained control and extreme precision without introducing unintended phonetic modifications to words where schwas are actually appropriate (such as "the", "of", "about", etc.).
+
+### How It Works:
+1. **Startup Loading**: When the transcription bots (`transcription_bot_aqua.py` and `desktop_transcriber.py`) launch, they load a dictionary of overrides from `transcription/ipa_overrides.json` located in the same directory.
+2. **Override Check**: During the word-to-IPA conversion phase inside `get_ipa_syllables()`, each word is first normalized to lowercase and checked against `IPA_OVERRIDES`.
+3. **Direct Return**: If a match is found in the custom dictionary, the pre-defined syllabified IPA string is returned directly, completely bypassing the CMU dictionary lookup and any subsequent automated syllabification rules.
+
+### Our Custom Overrides (`transcription/ipa_overrides.json`):
+```json
+{
+    "and": "/ænd/",
+    "diet": "/daɪ/ɪt/",
+    "finest": "/faɪ/nɪst/"
+}
+```
+
+### Adding New Overrides:
+To add more custom words, simply append them to the `transcription/ipa_overrides.json` file following the format below:
+```json
+{
+    "your_word_here": "/custom/ipa/syllables/"
+}
+```
+All keys must be strictly lowercase.
