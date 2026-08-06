@@ -27,6 +27,12 @@ try:
     from typing import Optional
     from concurrent.futures import ThreadPoolExecutor
 
+    # --- LOGGING ---
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    logging.getLogger('discord').setLevel(logging.WARNING)
+    logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
+
     import nltk
     from nltk.corpus import cmudict
     import syllables
@@ -42,6 +48,21 @@ try:
     except ImportError:
         ENG_TO_IPA_AVAILABLE = False
 
+    # --- IPA OVERRIDES ---
+    try:
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        _script_dir = os.getcwd()
+
+    IPA_OVERRIDES_PATH = os.path.join(_script_dir, "ipa_overrides.json")
+    try:
+        with open(IPA_OVERRIDES_PATH, "r", encoding="utf-8") as f:
+            IPA_OVERRIDES = json.load(f)
+        logger.info(f"Loaded {len(IPA_OVERRIDES)} custom IPA overrides.")
+    except Exception as e:
+        logger.warning(f"Failed to load IPA overrides from {IPA_OVERRIDES_PATH}: {e}")
+        IPA_OVERRIDES = {}
+
     import discord
     from discord import app_commands
     from discord.ext import voice_recv
@@ -49,12 +70,6 @@ try:
     from discord.gateway import DiscordVoiceWebSocket
     import davey
     from davey import MediaType
-
-    # --- LOGGING ---
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-    logger = logging.getLogger(__name__)
-    logging.getLogger('discord').setLevel(logging.WARNING)
-    logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
 
     _executor = ThreadPoolExecutor(max_workers=1)
 
@@ -293,6 +308,10 @@ try:
         results = []
         for w in words:
             w_lower = w.lower()
+            if w_lower in IPA_OVERRIDES:
+                results.append(IPA_OVERRIDES[w_lower])
+                continue
+
             cmu_res = get_cmu([w_lower])
             if not cmu_res or not cmu_res[0]:
                 results.append(f"/{w_lower}*/")
