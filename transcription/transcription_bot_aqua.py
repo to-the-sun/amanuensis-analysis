@@ -27,6 +27,12 @@ try:
     from typing import Optional
     from concurrent.futures import ThreadPoolExecutor
 
+    # --- LOGGING ---
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    logging.getLogger('discord').setLevel(logging.WARNING)
+    logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
+
     import nltk
     from nltk.corpus import cmudict
     import syllables
@@ -64,12 +70,6 @@ try:
     from discord.gateway import DiscordVoiceWebSocket
     import davey
     from davey import MediaType
-
-    # --- LOGGING ---
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-    logger = logging.getLogger(__name__)
-    logging.getLogger('discord').setLevel(logging.WARNING)
-    logging.getLogger('discord.ext.voice_recv').setLevel(logging.INFO)
 
     _executor = ThreadPoolExecutor(max_workers=1)
 
