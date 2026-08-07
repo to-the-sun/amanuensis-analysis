@@ -272,6 +272,107 @@ def get_demo_sinusoids(wave_type, fund_freq, steps):
         ]
         for i in range(min(steps, len(specs))):
             sinusoids.append(specs[i])
+    elif wave_type == "cosmic":
+        # The ultimate, complex cosmic spatial texture with 16 steps of detuned chorus pairs,
+        # golden ratio and irrational inharmonic partials, harmonic overtones, and fast-decaying high-frequency sparkles.
+        specs = [
+            # 1. Sub-bass foundation (deep grounding)
+            (fund_freq * 0.5, 0.9, 0.0, 0.8),
+            # 2. Sub-bass detuned partner (fat chorus feel)
+            (fund_freq * 0.504, 0.7, np.pi/4, 0.9),
+            # 3. Principal fundamental frequency (warm, direct)
+            (fund_freq, 0.8, -np.pi/6, 1.2),
+            # 4. Detuned fundamental partner (thick beating)
+            (fund_freq * 0.996, 0.6, np.pi/3, 1.3),
+            # 5. Melodic minor third for cosmic mystery/darkness
+            (fund_freq * 1.2, 0.5, -np.pi/4, 1.6),
+            # 6. Perfect fifth harmonic for clean structural consonance
+            (fund_freq * 1.5, 0.6, np.pi/2, 1.8),
+            # 7. Detuned fifth partner for shimmering chorus
+            (fund_freq * 1.505, 0.4, -np.pi/3, 2.0),
+            # 8. Golden Ratio inharmonic chime component (1.618)
+            (fund_freq * 1.618033, 0.45, np.pi/8, 2.2),
+            # 9. Golden Ratio detuned shimmer partner
+            (fund_freq * 1.611, 0.3, -np.pi/5, 2.4),
+            # 10. Warm Harmonic seventh (1.75) for complex jazz/cosmic spacing
+            (fund_freq * 1.75, 0.35, np.pi/10, 2.6),
+            # 11. Clear octave overtone for high-end definition
+            (fund_freq * 2.0, 0.4, -np.pi/2, 3.0),
+            # 12. Detuned octave shimmering tail
+            (fund_freq * 2.012, 0.25, np.pi/12, 3.2),
+            # 13. Pi-based high-frequency transcendental sparkle
+            (fund_freq * np.pi, 0.2, -np.pi/8, 4.5),
+            # 14. High sparkle fifth-overtone transient
+            (fund_freq * 3.0, 0.15, np.pi/6, 5.0),
+            # 15. Ultra-high golden ratio sparkle (extreme chime transient)
+            (fund_freq * 2.618033, 0.1, -np.pi/4, 6.0),
+            # 16. Evolving ambient room tail (low level, very slow decay)
+            (fund_freq * 1.008, 0.1, np.pi/2, 0.3)
+        ]
+        for i in range(min(steps, len(specs))):
+            sinusoids.append(specs[i])
+    elif wave_type == "generative":
+        # Algorithmic endless generator that dynamically structures sounds based on acoustic rules:
+        # 1. Harmonic scale intervals
+        # 2. Chorus detuning pairs
+        # 3. High-frequency rapid-decay coupling
+        # 4. Inharmonic irrational partial additions
+        # Uses a deterministic seed derived from fund_freq and steps to be reproducible but endlessly varied
+        seed = int(abs(fund_freq * 100 + steps)) % 1000000
+        rng = np.random.RandomState(seed)
+
+        # Define rich intervallic multipliers (consisting of harmonic and spatial ratios)
+        intervals = [
+            1.0, 1.2, 1.25, 1.333, 1.5, 1.6, 1.667, 1.75, 1.875, 2.0, 2.25, 2.5, 3.0, 4.0
+        ]
+        # Inharmonic/transcendental modifiers to sprinkle in
+        irrationals = [1.414213, 1.618033, 2.718281, 3.141592, 4.669201]
+
+        # Step 1: Sub-bass base (always nice for body)
+        sinusoids.append((fund_freq * 0.5, 0.9, rng.uniform(-np.pi, np.pi), 0.7))
+
+        # Step 2: Main fundamental
+        sinusoids.append((fund_freq, 0.8, 0.0, 1.2))
+
+        # Step 3: Populate remaining steps with a mixture of intervals, chorus pairs, and sparkle components
+        step_idx = 2
+        while step_idx < steps:
+            # Decide whether to add a harmonic overtone, detuned partner, or high sparkle
+            roll = rng.rand()
+            if roll < 0.5:
+                # Add a structured consonant interval harmonic
+                mult = rng.choice(intervals)
+                freq = fund_freq * mult
+                # Higher frequencies decay faster! Decay coupled with frequency
+                decay = 1.0 + 1.2 * np.sqrt(mult)
+                amp = max(0.1, 0.7 / np.sqrt(mult))
+                phase = rng.uniform(-np.pi, np.pi)
+                sinusoids.append((freq, amp, phase, decay))
+                step_idx += 1
+
+                # 50% chance to follow with a detuned unison/chorus partner if we have room
+                if rng.rand() < 0.6 and step_idx < steps:
+                    detune_factor = rng.uniform(1.002, 1.01) if rng.rand() < 0.5 else rng.uniform(0.99, 0.998)
+                    sinusoids.append((freq * detune_factor, amp * 0.7, phase + np.pi/4, decay * 1.1))
+                    step_idx += 1
+            elif roll < 0.8:
+                # Add an inharmonic transcendental sparkle
+                mult = rng.choice(irrationals)
+                freq = fund_freq * mult
+                decay = 3.0 + 1.5 * mult  # High decay rate for inharmonics to avoid grating ring-out
+                amp = max(0.05, 0.4 / mult)
+                phase = rng.uniform(-np.pi, np.pi)
+                sinusoids.append((freq, amp, phase, decay))
+                step_idx += 1
+            else:
+                # Add a very low amplitude, long-decaying spatial element
+                mult = rng.uniform(0.8, 2.5)
+                freq = fund_freq * mult
+                decay = rng.uniform(0.2, 0.6)  # Very slow decay
+                amp = rng.uniform(0.05, 0.15)
+                phase = rng.uniform(-np.pi, np.pi)
+                sinusoids.append((freq, amp, phase, decay))
+                step_idx += 1
     else:
         raise ValueError(f"Unknown wave type: {wave_type}")
     
@@ -522,7 +623,7 @@ def main():
     parser.add_argument(
         "--demo",
         type=str,
-        choices=["square", "sawtooth", "triangle", "chord", "juicy"],
+        choices=["square", "sawtooth", "triangle", "chord", "juicy", "cosmic", "generative"],
         default="juicy",
         help="Type of demo wave to synthesize (default: %(default)s)."
     )
