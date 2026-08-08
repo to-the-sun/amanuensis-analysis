@@ -401,7 +401,20 @@ def run_additive_synthesis(args):
         print(f"Loading custom sinusoids from JSON: {args.custom}")
         with open(args.custom, "r") as f:
             data = json.load(f)
-            for s in data:
+            if isinstance(data, dict):
+                if "duration" in data:
+                    args.duration = float(data["duration"])
+                    synth.duration = args.duration
+                    synth.t = np.linspace(0, args.duration, int(synth.sample_rate * args.duration), endpoint=False)
+                if "sample_rate" in data:
+                    args.sample_rate = int(data["sample_rate"])
+                    synth.sample_rate = args.sample_rate
+                    synth.t = np.linspace(0, synth.duration, int(synth.sample_rate * synth.duration), endpoint=False)
+                sinusoids_list = data.get("sinusoids", [])
+            else:
+                sinusoids_list = data
+
+            for s in sinusoids_list:
                 synth.add_sinusoid(s["freq"], s["amp"], s.get("phase", 0.0), s.get("decay", 0.0))
     else:
         print(f"Generating demo sinusoids for '{args.demo}' wave (fundamental: {args.freq} Hz, steps: {args.steps})")
@@ -616,67 +629,129 @@ def run_additive_synthesis(args):
     print("Process Complete!")
 
 
+class CustomConfig:
+    """Config class that emulates argparse output namespace."""
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Visualize and play the step-by-step construction of an arbitrary sound via additive synthesis."
-    )
-    parser.add_argument(
-        "--demo",
-        type=str,
-        choices=["square", "sawtooth", "triangle", "chord", "juicy", "cosmic", "generative"],
-        default="juicy",
-        help="Type of demo wave to synthesize (default: %(default)s)."
-    )
-    parser.add_argument(
-        "--freq",
-        type=float,
-        default=220.0,
-        help="Fundamental frequency in Hz (default: %(default)s)."
-    )
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=8,
-        help="Number of sinusoid components/harmonics to synthesize (default: %(default)s)."
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        default=1.5,
-        help="Duration of the generated sound in seconds (default: %(default)s)."
-    )
-    parser.add_argument(
-        "--sample-rate",
-        type=int,
-        default=44100,
-        help="Sample rate in Hz (default: %(default)s)."
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="analysis/additive_synthesis_output",
-        help="Directory to save image frames, audio, and animated GIF (default: %(default)s)."
-    )
-    parser.add_argument(
-        "--custom",
-        type=str,
-        default=None,
-        help="Path to a JSON file containing custom sinusoids: [{'freq': f, 'amp': a, 'phase': p}, ...]."
-    )
-    parser.add_argument(
-        "--no-audio",
-        action="store_true",
-        help="Disable audible playback at each step."
-    )
-    parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Display the interactive Matplotlib window for each step."
-    )
-    
-    args = parser.parse_args()
-    run_additive_synthesis(args)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Check if run in its default state (no arguments, e.g. double-clicked)
+    if len(sys.argv) == 1:
+        print("=== Running in Default State (Generative Additive Synthesis) ===")
+        args = CustomConfig(
+            demo="generative",
+            freq=220.0,
+            steps=12,
+            duration=1.5,
+            sample_rate=44100,
+            output_dir=os.path.join(script_dir, "generative"),
+            custom=None,
+            no_audio=False,
+            interactive=False
+        )
+        run_additive_synthesis(args)
+
+    # Check if run by dragging a JSON file onto the script (first arg is JSON path)
+    elif len(sys.argv) == 2 and sys.argv[1].lower().endswith(".json"):
+        json_path = sys.argv[1]
+        print(f"=== Running Custom Additive Synthesis from JSON: {json_path} ===")
+        if not os.path.exists(json_path):
+            print(f"Error: JSON file not found: {json_path}")
+            sys.exit(1)
+
+        json_name = os.path.splitext(os.path.basename(json_path))[0]
+        output_dir = os.path.join(script_dir, json_name)
+
+        args = CustomConfig(
+            demo=None,
+            freq=220.0,
+            steps=8,
+            duration=1.5,
+            sample_rate=44100,
+            output_dir=output_dir,
+            custom=json_path,
+            no_audio=False,
+            interactive=False
+        )
+        run_additive_synthesis(args)
+
+    # Otherwise, fall back to standard argparse CLI processing
+    else:
+        parser = argparse.ArgumentParser(
+            description="Visualize and play the step-by-step construction of an arbitrary sound via additive synthesis."
+        )
+        parser.add_argument(
+            "--demo",
+            type=str,
+            choices=["square", "sawtooth", "triangle", "chord", "juicy", "cosmic", "generative"],
+            default="juicy",
+            help="Type of demo wave to synthesize (default: %(default)s)."
+        )
+        parser.add_argument(
+            "--freq",
+            type=float,
+            default=220.0,
+            help="Fundamental frequency in Hz (default: %(default)s)."
+        )
+        parser.add_argument(
+            "--steps",
+            type=int,
+            default=8,
+            help="Number of sinusoid components/harmonics to synthesize (default: %(default)s)."
+        )
+        parser.add_argument(
+            "--duration",
+            type=float,
+            default=1.5,
+            help="Duration of the generated sound in seconds (default: %(default)s)."
+        )
+        parser.add_argument(
+            "--sample-rate",
+            type=int,
+            default=44100,
+            help="Sample rate in Hz (default: %(default)s)."
+        )
+        parser.add_argument(
+            "--output-dir",
+            type=str,
+            default="analysis/additive_synthesis_output",
+            help="Directory to save image frames, audio, and animated GIF (default: %(default)s)."
+        )
+        parser.add_argument(
+            "--custom",
+            type=str,
+            default=None,
+            help="Path to a JSON file containing custom sinusoids: [{'freq': f, 'amp': a, 'phase': p}, ...]."
+        )
+        parser.add_argument(
+            "--no-audio",
+            action="store_true",
+            help="Disable audible playback at each step."
+        )
+        parser.add_argument(
+            "--interactive",
+            action="store_true",
+            help="Display the interactive Matplotlib window for each step."
+        )
+
+        args = parser.parse_args()
+        run_additive_synthesis(args)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print("\n" + "="*60)
+        print("CRITICAL ERROR")
+        print("="*60)
+        traceback.print_exc()
+        print("="*60)
+    finally:
+        try:
+            input("\nPress Enter to exit...")
+        except EOFError:
+            pass

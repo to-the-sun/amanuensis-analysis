@@ -15,3 +15,9 @@ analysis/generated_samples/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Ignore generated additive synthesis folders
+additive_synthesis/generative/
+additive_synthesis/square/
+additive_synthesis/bell/
+additive_synthesis/complex/
