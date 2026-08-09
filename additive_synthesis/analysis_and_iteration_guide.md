@@ -1,6 +1,6 @@
 # Additive Synthesis: Acoustic Analysis & Iteration Guide
 
-When designing additive synthesizer presets, adding sinusoids without discipline leads to **muddiness, phase cancellation, and sensory roughness**.
+When designing additive synthesizer presets, adding sinusoids without discipline leads to **muddiness, phase cancellation, and sensory roughness**. Use this test suite only when working with additive synthesis, not anything else. 
 
 Since we can't always audibly monitor the sound in head-less / sandbox environments, we must "hear" the sound through quantitative analysis metrics. This guide outlines how to run our diagnostic test suite, understand its metrics, and iteratively perfect any sound preset.
 
