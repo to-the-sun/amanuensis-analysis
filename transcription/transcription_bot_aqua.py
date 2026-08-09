@@ -574,9 +574,17 @@ try:
             super().__init__()
             self.bot = bot
             self.text_id = text_id
-            self.user_buffers = collections.defaultdict(bytearray)
-            self.last_audio_time = collections.defaultdict(float)
             self.lock = threading.Lock()
+
+            # VAD State variables per user
+            self.is_active = collections.defaultdict(bool)
+            self.active_buffers = collections.defaultdict(bytearray)
+            self.pre_roll_buffers = collections.defaultdict(lambda: collections.deque(maxlen=15)) # 15 chunks of 20ms = 300ms lookahead
+            self.silence_durations = collections.defaultdict(float)
+            self.utterance_durations = collections.defaultdict(float)
+            self.last_audio_times = collections.defaultdict(float)
+            self.completed_utterances = collections.defaultdict(list)
+
             self.processing_task = self.bot.loop.create_task(self._process_buffers())
 
         def cleanup(self):
@@ -603,53 +611,126 @@ try:
             return '\n'.join(lines)
 
         def write(self, user, data):
-            if data.pcm:
-                with self.lock:
-                    self.user_buffers[user].extend(data.pcm)
-                    self.last_audio_time[user] = time.time()
+            if not data.pcm:
+                return
+
+            with self.lock:
+                self.last_audio_times[user] = time.time()
+
+                # Compute RMS of the incoming chunk
+                chunk_np = np.frombuffer(data.pcm, dtype=np.int16)
+                if len(chunk_np) == 0:
+                    return
+                rms = np.sqrt(np.mean(chunk_np.astype(np.float64)**2))
+
+                # data.pcm contains stereo 16-bit PCM (48kHz, 2 channels, 2 bytes per sample -> 4 bytes per frame)
+                chunk_len_bytes = len(data.pcm)
+                chunk_duration = chunk_len_bytes / (48000 * 4)
+
+                is_active = self.is_active[user]
+                pre_roll = self.pre_roll_buffers[user]
+
+                if not is_active:
+                    # Idle state: update pre-roll buffer
+                    pre_roll.append(data.pcm)
+                    if rms > 50.0:
+                        logger.info(f"VAD: Voice started for {user} (RMS: {rms:.1f})")
+                        self.is_active[user] = True
+                        # Assemble the initial buffer using pre-roll data
+                        self.active_buffers[user] = bytearray()
+                        for c in pre_roll:
+                            self.active_buffers[user].extend(c)
+                        pre_roll.clear()
+                        self.silence_durations[user] = 0.0
+                        self.utterance_durations[user] = chunk_duration
+                else:
+                    # Active state: accumulate audio
+                    self.active_buffers[user].extend(data.pcm)
+                    self.utterance_durations[user] += chunk_duration
+
+                    if rms < 50.0:
+                        self.silence_durations[user] += chunk_duration
+                    else:
+                        self.silence_durations[user] = 0.0
+
+                    # Silence timeout (greater than 2.0 seconds) or max duration limits (45 seconds)
+                    if self.silence_durations[user] >= 2.0 or self.utterance_durations[user] >= 45.0:
+                        reason = "silence" if self.silence_durations[user] >= 2.0 else "max duration"
+                        logger.info(f"VAD: Voice ended for {user} due to {reason} (duration: {self.utterance_durations[user]:.2f}s)")
+
+                        audio_data = bytes(self.active_buffers[user])
+                        self.completed_utterances[user].append(audio_data)
+
+                        # Reset state for this user
+                        self.is_active[user] = False
+                        self.active_buffers[user] = bytearray()
+                        self.silence_durations[user] = 0.0
+                        self.utterance_durations[user] = 0.0
 
         async def _process_buffers(self):
             while True:
                 try:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
                     users_to_process = []
                     now = time.time()
+
                     with self.lock:
-                        for user, buffer in list(self.user_buffers.items()):
-                            if not buffer: continue
-                            duration = len(buffer)/(48000*4)
-                            time_since = now - self.last_audio_time[user]
-                            if duration > 1.5 and (time_since > 0.8 or duration > 15.0):
-                                users_to_process.append((user, bytes(buffer)))
+                        # Force endpointing for active users if we haven't received audio packets in over 2.0 seconds
+                        for user in list(self.is_active.keys()):
+                            if self.is_active[user]:
+                                time_since = now - self.last_audio_times[user]
+                                if time_since >= 2.0:
+                                    logger.info(f"VAD: Voice ended for {user} due to packet timeout (duration: {self.utterance_durations[user]:.2f}s)")
+                                    audio_data = bytes(self.active_buffers[user])
+                                    self.completed_utterances[user].append(audio_data)
+
+                                    self.is_active[user] = False
+                                    self.active_buffers[user] = bytearray()
+                                    self.silence_durations[user] = 0.0
+                                    self.utterance_durations[user] = 0.0
+
+                        # Collect completed utterances to process
+                        for user in list(self.completed_utterances.keys()):
+                            while self.completed_utterances[user]:
+                                audio_bytes = self.completed_utterances[user].pop(0)
+                                users_to_process.append((user, audio_bytes))
 
                     for user, audio_bytes in users_to_process:
                         audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
-                        rms = np.sqrt(np.mean(audio_np.astype(np.float64)**2))
-                        if rms > 50:
-                            audio_float32 = audio_np.reshape(-1, 2).astype(np.float32) / 32768.0
-                            mono_16k = audio_float32.mean(axis=1)[::3]
-                            text = await self.bot.loop.run_in_executor(_executor, self._transcribe, mono_16k)
-                            if text:
-                                clean_text = self._poetic_parse(text)
-                                logger.info(f"AQUA RESULT [{user}]:\n{text}")
-                                channel = self.bot.get_channel(self.text_id)
-                                if channel:
-                                    processed_lines = []
-                                    for l in clean_text.splitlines():
-                                        processed_lines.append(l)
-                                        ipa_line = get_ipa_syllables(l)
-                                        if ipa_line:
-                                            processed_lines.append(ipa_line)
-                                    final_msg = "\n".join(processed_lines)
-                                    await channel.send(f"**{user}**: {final_msg}")
+                        if len(audio_np) == 0:
+                            continue
 
-                        with self.lock:
-                            self.user_buffers[user] = self.user_buffers[user][len(audio_bytes):]
+                        # Handle potential odd frame length boundary issues
+                        if len(audio_np) % 2 != 0:
+                            audio_np = audio_np[:(len(audio_np) // 2) * 2]
+
+                        audio_float32 = audio_np.reshape(-1, 2).astype(np.float32) / 32768.0
+                        mono_16k = audio_float32.mean(axis=1)[::3]
+                        text = await self.bot.loop.run_in_executor(_executor, self._transcribe, mono_16k)
+                        if text:
+                            clean_text = self._poetic_parse(text)
+                            logger.info(f"AQUA RESULT [{user}]:\n{text}")
+                            channel = self.bot.get_channel(self.text_id)
+                            if channel:
+                                processed_lines = []
+                                for l in clean_text.splitlines():
+                                    processed_lines.append(l)
+                                    ipa_line = get_ipa_syllables(l)
+                                    if ipa_line:
+                                        processed_lines.append(ipa_line)
+                                final_msg = "\n".join(processed_lines)
+                                await channel.send(f"**{user}**: {final_msg}")
                 except Exception as e:
                     logger.error(f"Error in processing loop: {e}")
 
         def _transcribe(self, audio_16k):
             try:
+                # Pad with zeros to ensure the recording is at least 15 seconds long
+                min_samples = 15 * 16000
+                if len(audio_16k) < min_samples:
+                    padding_needed = min_samples - len(audio_16k)
+                    audio_16k = np.concatenate([audio_16k, np.zeros(padding_needed, dtype=np.float32)])
+
                 # Convert float32 mono_16k back to int16 PCM
                 audio_int16 = (audio_16k * 32767).astype(np.int16)
 

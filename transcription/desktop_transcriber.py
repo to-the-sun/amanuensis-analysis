@@ -764,13 +764,13 @@ class DesktopTranscriberBot(discord.Client):
         chunk_frames = int(sample_rate * chunk_duration) # 4800 frames
 
         # VAD Parameters
-        pre_roll_duration = 0.5 # 500ms
-        pre_roll_max_len = int(pre_roll_duration / chunk_duration) # 5 chunks
+        pre_roll_duration = 0.3 # 300ms look ahead
+        pre_roll_max_len = int(pre_roll_duration / chunk_duration) # 3 chunks
         pre_roll_buffer = collections.deque(maxlen=pre_roll_max_len)
 
         rms_threshold = 0.0015 # equivalent to int16 RMS of 50
-        silence_timeout = 0.8 # 800ms
-        max_utterance_duration = 15.0 # 15 seconds
+        silence_timeout = 2.0 # 2 seconds silence timeout
+        max_utterance_duration = 45.0 # 45 seconds maximum duration
 
         # State variables
         is_active = False
@@ -902,6 +902,12 @@ class DesktopTranscriberBot(discord.Client):
 
     def _transcribe(self, audio_16k):
         try:
+            # Pad with zeros to ensure the recording is at least 15 seconds long
+            min_samples = 15 * 16000
+            if len(audio_16k) < min_samples:
+                padding_needed = min_samples - len(audio_16k)
+                audio_16k = np.concatenate([audio_16k, np.zeros(padding_needed, dtype=np.float32)])
+
             # Convert float32 mono_16k back to int16 PCM
             audio_int16 = (audio_16k * 32767).astype(np.int16)
 
