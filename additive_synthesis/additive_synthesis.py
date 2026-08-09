@@ -273,41 +273,41 @@ def get_demo_sinusoids(wave_type, fund_freq, steps):
         for i in range(min(steps, len(specs))):
             sinusoids.append(specs[i])
     elif wave_type == "cosmic":
-        # The ultimate, complex cosmic spatial texture with 16 steps of detuned chorus pairs,
-        # golden ratio and irrational inharmonic partials, harmonic overtones, and fast-decaying high-frequency sparkles.
+        # The ultimate, complex cosmic spatial texture optimized to eliminate low-frequency beating,
+        # satisfy lower interval limits, maintain strict frequency-decay coupling, and minimize sensory roughness.
         specs = [
-            # 1. Sub-bass foundation (deep grounding)
-            (fund_freq * 0.5, 0.9, 0.0, 0.8),
-            # 2. Sub-bass detuned partner (fat chorus feel)
-            (fund_freq * 0.504, 0.7, np.pi/4, 0.9),
-            # 3. Principal fundamental frequency (warm, direct)
-            (fund_freq, 0.8, -np.pi/6, 1.2),
-            # 4. Detuned fundamental partner (thick beating)
-            (fund_freq * 0.996, 0.6, np.pi/3, 1.3),
-            # 5. Melodic minor third for cosmic mystery/darkness
-            (fund_freq * 1.2, 0.5, -np.pi/4, 1.6),
-            # 6. Perfect fifth harmonic for clean structural consonance
-            (fund_freq * 1.5, 0.6, np.pi/2, 1.8),
-            # 7. Detuned fifth partner for shimmering chorus
-            (fund_freq * 1.505, 0.4, -np.pi/3, 2.0),
-            # 8. Golden Ratio inharmonic chime component (1.618)
-            (fund_freq * 1.618033, 0.45, np.pi/8, 2.2),
-            # 9. Golden Ratio detuned shimmer partner
-            (fund_freq * 1.611, 0.3, -np.pi/5, 2.4),
-            # 10. Warm Harmonic seventh (1.75) for complex jazz/cosmic spacing
-            (fund_freq * 1.75, 0.35, np.pi/10, 2.6),
-            # 11. Clear octave overtone for high-end definition
-            (fund_freq * 2.0, 0.4, -np.pi/2, 3.0),
-            # 12. Detuned octave shimmering tail
-            (fund_freq * 2.012, 0.25, np.pi/12, 3.2),
-            # 13. Pi-based high-frequency transcendental sparkle
-            (fund_freq * np.pi, 0.2, -np.pi/8, 4.5),
-            # 14. High sparkle fifth-overtone transient
-            (fund_freq * 3.0, 0.15, np.pi/6, 5.0),
-            # 15. Ultra-high golden ratio sparkle (extreme chime transient)
-            (fund_freq * 2.618033, 0.1, -np.pi/4, 6.0),
-            # 16. Evolving ambient room tail (low level, very slow decay)
-            (fund_freq * 1.008, 0.1, np.pi/2, 0.3)
+            # 1. Warm sub-bass foundation
+            (fund_freq * 0.25, 0.9, 0.0, 0.8),
+            # 2. Strong mid-bass fundamental
+            (fund_freq * 0.5, 0.8, -0.5235987755982988, 1.2),
+            # 3. Clean perfect fifth overtone
+            (fund_freq * 0.75, 0.6, np.pi/2, 1.8),
+            # 4. Upper octave overtone
+            (fund_freq, 0.5, -np.pi/2, 2.2),
+            # 5. Perfect fourth harmonic (1.2x)
+            (fund_freq * 1.2, 0.45, 0.39269908169872414, 2.5),
+            # 6. Detuned perfect fourth partner (chorus effect)
+            (fund_freq * 1.2096, 0.3, -0.6283185307179586, 2.7),
+            # 7. Major third overtone (1.5x)
+            (fund_freq * 1.5, 0.4, 0.5235987755982988, 3.0),
+            # 8. Detuned major third partner (chorus effect)
+            (fund_freq * 1.512, 0.25, 0.2617993877991494, 3.2),
+            # 9. Golden Ratio inharmonic chime (1.618x)
+            (fund_freq * 1.618045, 0.35, 0.3141592653589793, 3.5),
+            # 10. Detuned Golden Ratio shimmer
+            (fund_freq * 1.631, 0.2, -0.39269908169872414, 3.8),
+            # 11. Harmonic seventh overtones (1.75x)
+            (fund_freq * 1.75, 0.3, -0.7853981633974483, 4.2),
+            # 12. Double octave overtone (2.0x)
+            (fund_freq * 2.0, 0.25, 0.2617993877991494, 4.5),
+            # 13. Detuned double octave shimmer
+            (fund_freq * 2.016, 0.15, -1.0471975511965976, 4.8),
+            # 14. Perfect fifth in upper register (2.5x)
+            (fund_freq * 2.5, 0.2, 0.7853981633974483, 5.2),
+            # 15. Triple octave overtone (3.0x)
+            (fund_freq * 3.0, 0.15, 1.0471975511965976, 6.0),
+            # 16. High-frequency sparkle (1.309x)
+            (fund_freq * 1.309, 0.1, np.pi/2, 6.5)
         ]
         for i in range(min(steps, len(specs))):
             sinusoids.append(specs[i])
