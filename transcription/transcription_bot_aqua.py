@@ -585,6 +585,7 @@ try:
             self.last_audio_times = collections.defaultdict(float)
             self.completed_utterances = collections.defaultdict(list)
             self.to_be_sent_buffers = collections.defaultdict(bytearray)
+            self.accumulated_start_times = collections.defaultdict(lambda: None)
 
             self.processing_task = self.bot.loop.create_task(self._process_buffers())
 
@@ -663,6 +664,9 @@ try:
 
                         # Accumulate in the to-be-sent buffer
                         self.to_be_sent_buffers[user].extend(audio_data)
+                        if self.accumulated_start_times[user] is None:
+                            self.accumulated_start_times[user] = time.time()
+
                         accum_len_bytes = len(self.to_be_sent_buffers[user])
                         accum_duration = accum_len_bytes / (48000 * 4)
 
@@ -670,6 +674,7 @@ try:
                             logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 15s). Sending to transcription...")
                             self.completed_utterances[user].append(bytes(self.to_be_sent_buffers[user]))
                             self.to_be_sent_buffers[user] = bytearray()
+                            self.accumulated_start_times[user] = None
                         else:
                             logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
 
@@ -687,6 +692,15 @@ try:
                     now = time.time()
 
                     with self.lock:
+                        # Check for 45-second flush timeout for each user
+                        for user, buf in list(self.to_be_sent_buffers.items()):
+                            if len(buf) > 0 and self.accumulated_start_times[user] is not None:
+                                if now - self.accumulated_start_times[user] > 45.0:
+                                    logger.info(f"VAD: Flush timeout reached (45 seconds) for {user}. Sending accumulated speech anyway...")
+                                    self.completed_utterances[user].append(bytes(buf))
+                                    self.to_be_sent_buffers[user] = bytearray()
+                                    self.accumulated_start_times[user] = None
+
                         # Force endpointing for active users if we haven't received audio packets in over 2.0 seconds
                         for user in list(self.is_active.keys()):
                             if self.is_active[user]:
@@ -697,6 +711,9 @@ try:
 
                                     # Accumulate in the to-be-sent buffer
                                     self.to_be_sent_buffers[user].extend(audio_data)
+                                    if self.accumulated_start_times[user] is None:
+                                        self.accumulated_start_times[user] = time.time()
+
                                     accum_len_bytes = len(self.to_be_sent_buffers[user])
                                     accum_duration = accum_len_bytes / (48000 * 4)
 
@@ -704,6 +721,7 @@ try:
                                         logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 15s). Sending to transcription...")
                                         self.completed_utterances[user].append(bytes(self.to_be_sent_buffers[user]))
                                         self.to_be_sent_buffers[user] = bytearray()
+                                        self.accumulated_start_times[user] = None
                                     else:
                                         logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
 

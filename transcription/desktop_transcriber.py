@@ -465,6 +465,7 @@ class DesktopTranscriberBot(discord.Client):
         self.recording_thread = None
         self.recording_active = False
         self.accumulated_utterances_list = []
+        self.accumulated_start_time = None
 
     async def setup_hook(self):
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -812,6 +813,15 @@ class DesktopTranscriberBot(discord.Client):
             with mic.recorder(samplerate=sample_rate) as recorder:
                 logger.info("Loopback recorder stream opened. Listening continuously...")
                 while self.recording_active:
+                    # Check if we need to flush accumulated audio after 45 seconds of waiting
+                    if self.accumulated_utterances_list and self.accumulated_start_time is not None:
+                        if time.time() - self.accumulated_start_time > 45.0:
+                            logger.info("Flush timeout reached (45 seconds). Sending accumulated speech anyway...")
+                            combined_audio = np.concatenate(self.accumulated_utterances_list)
+                            self.accumulated_utterances_list = []
+                            self.accumulated_start_time = None
+                            self.transcribe_and_post_threadsafe(combined_audio)
+
                     # Record 100ms of audio
                     chunk = recorder.record(numframes=chunk_frames)
 
@@ -853,6 +863,9 @@ class DesktopTranscriberBot(discord.Client):
 
                             # Accumulate until we have at least 15.0 seconds of speech
                             self.accumulated_utterances_list.append(utterance_audio)
+                            if self.accumulated_start_time is None:
+                                self.accumulated_start_time = time.time()
+
                             total_accum_len = sum(len(arr) for arr in self.accumulated_utterances_list)
                             total_accum_duration = total_accum_len / sample_rate
 
@@ -860,6 +873,7 @@ class DesktopTranscriberBot(discord.Client):
                                 logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (>= 15s). Sending to transcription...")
                                 combined_audio = np.concatenate(self.accumulated_utterances_list)
                                 self.accumulated_utterances_list = []
+                                self.accumulated_start_time = None
                                 self.transcribe_and_post_threadsafe(combined_audio)
                             else:
                                 logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
