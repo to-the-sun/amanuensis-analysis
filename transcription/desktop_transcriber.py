@@ -967,9 +967,23 @@ class DesktopTranscriberBot(discord.Client):
                     ipa_line = get_ipa_syllables(l)
                     if ipa_line:
                         processed_lines.append(ipa_line)
-                final_text = "\n".join(processed_lines)
-                # Post in the expected format (without user tag since it is desktop-wide capture)
-                await channel.send(final_text)
+
+                # Send in chunks of 1950 characters
+                current_chunk = []
+                current_len = 0
+                for line in processed_lines:
+                    line_len = len(line) + 1  # include newline char
+                    if current_len + line_len > 1950:
+                        if current_chunk:
+                            await channel.send("\n".join(current_chunk))
+                        current_chunk = [line]
+                        current_len = line_len
+                    else:
+                        current_chunk.append(line)
+                        current_len += line_len
+
+                if current_chunk:
+                    await channel.send("\n".join(current_chunk))
                 logger.info("Transcription posted to #world channel.")
             except Exception as e:
                 logger.error(f"Failed to send transcription message: {e}")

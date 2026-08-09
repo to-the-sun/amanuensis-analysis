@@ -759,8 +759,28 @@ try:
                                     ipa_line = get_ipa_syllables(l)
                                     if ipa_line:
                                         processed_lines.append(ipa_line)
-                                final_msg = "\n".join(processed_lines)
-                                await channel.send(f"**{user}**: {final_msg}")
+
+                                # Send in chunks of 1950 characters
+                                current_chunk = []
+                                current_len = 0
+                                user_prefix = f"**{user}**: "
+                                prefix_len = len(user_prefix)
+
+                                for line in processed_lines:
+                                    line_len = len(line) + 1  # include newline char
+                                    if current_len + line_len + prefix_len > 1950:
+                                        if current_chunk:
+                                            chunk_text = "\n".join(current_chunk)
+                                            await channel.send(f"{user_prefix}{chunk_text}")
+                                        current_chunk = [line]
+                                        current_len = line_len
+                                    else:
+                                        current_chunk.append(line)
+                                        current_len += line_len
+
+                                if current_chunk:
+                                    chunk_text = "\n".join(current_chunk)
+                                    await channel.send(f"{user_prefix}{chunk_text}")
                 except Exception as e:
                     logger.error(f"Error in processing loop: {e}")
 
