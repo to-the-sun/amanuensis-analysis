@@ -655,9 +655,9 @@ try:
                     else:
                         self.silence_durations[user] = 0.0
 
-                    # Silence timeout (greater than 2.0 seconds) or max duration limits (45 seconds)
-                    if self.silence_durations[user] >= 2.0 or self.utterance_durations[user] >= 45.0:
-                        reason = "silence" if self.silence_durations[user] >= 2.0 else "max duration"
+                    # Silence timeout (greater than 1.0 seconds) or max duration limits (45 seconds)
+                    if self.silence_durations[user] >= 1.0 or self.utterance_durations[user] >= 45.0:
+                        reason = "silence" if self.silence_durations[user] >= 1.0 else "max duration"
                         logger.info(f"VAD: Voice ended for {user} due to {reason} (duration: {self.utterance_durations[user]:.2f}s)")
 
                         audio_data = bytes(self.active_buffers[user])
@@ -670,13 +670,13 @@ try:
                         accum_len_bytes = len(self.to_be_sent_buffers[user])
                         accum_duration = accum_len_bytes / (48000 * 4)
 
-                        if accum_duration >= 15.0:
-                            logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 15s). Sending to transcription...")
+                        if accum_duration >= 10.0:
+                            logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 10s). Sending to transcription...")
                             self.completed_utterances[user].append(bytes(self.to_be_sent_buffers[user]))
                             self.to_be_sent_buffers[user] = bytearray()
                             self.accumulated_start_times[user] = None
                         else:
-                            logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
+                            logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 10s). Waiting for more speech to fill the time...")
 
                         # Reset state for this user
                         self.is_active[user] = False
@@ -701,11 +701,11 @@ try:
                                     self.to_be_sent_buffers[user] = bytearray()
                                     self.accumulated_start_times[user] = None
 
-                        # Force endpointing for active users if we haven't received audio packets in over 2.0 seconds
+                        # Force endpointing for active users if we haven't received audio packets in over 1.0 seconds
                         for user in list(self.is_active.keys()):
                             if self.is_active[user]:
                                 time_since = now - self.last_audio_times[user]
-                                if time_since >= 2.0:
+                                if time_since >= 1.0:
                                     logger.info(f"VAD: Voice ended for {user} due to packet timeout (duration: {self.utterance_durations[user]:.2f}s)")
                                     audio_data = bytes(self.active_buffers[user])
 
@@ -717,13 +717,13 @@ try:
                                     accum_len_bytes = len(self.to_be_sent_buffers[user])
                                     accum_duration = accum_len_bytes / (48000 * 4)
 
-                                    if accum_duration >= 15.0:
-                                        logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 15s). Sending to transcription...")
+                                    if accum_duration >= 10.0:
+                                        logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 10s). Sending to transcription...")
                                         self.completed_utterances[user].append(bytes(self.to_be_sent_buffers[user]))
                                         self.to_be_sent_buffers[user] = bytearray()
                                         self.accumulated_start_times[user] = None
                                     else:
-                                        logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
+                                        logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 10s). Waiting for more speech to fill the time...")
 
                                     self.is_active[user] = False
                                     self.active_buffers[user] = bytearray()
