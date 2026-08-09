@@ -584,6 +584,7 @@ try:
             self.utterance_durations = collections.defaultdict(float)
             self.last_audio_times = collections.defaultdict(float)
             self.completed_utterances = collections.defaultdict(list)
+            self.to_be_sent_buffers = collections.defaultdict(bytearray)
 
             self.processing_task = self.bot.loop.create_task(self._process_buffers())
 
@@ -659,7 +660,18 @@ try:
                         logger.info(f"VAD: Voice ended for {user} due to {reason} (duration: {self.utterance_durations[user]:.2f}s)")
 
                         audio_data = bytes(self.active_buffers[user])
-                        self.completed_utterances[user].append(audio_data)
+
+                        # Accumulate in the to-be-sent buffer
+                        self.to_be_sent_buffers[user].extend(audio_data)
+                        accum_len_bytes = len(self.to_be_sent_buffers[user])
+                        accum_duration = accum_len_bytes / (48000 * 4)
+
+                        if accum_duration >= 15.0:
+                            logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 15s). Sending to transcription...")
+                            self.completed_utterances[user].append(bytes(self.to_be_sent_buffers[user]))
+                            self.to_be_sent_buffers[user] = bytearray()
+                        else:
+                            logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
 
                         # Reset state for this user
                         self.is_active[user] = False
@@ -682,7 +694,18 @@ try:
                                 if time_since >= 2.0:
                                     logger.info(f"VAD: Voice ended for {user} due to packet timeout (duration: {self.utterance_durations[user]:.2f}s)")
                                     audio_data = bytes(self.active_buffers[user])
-                                    self.completed_utterances[user].append(audio_data)
+
+                                    # Accumulate in the to-be-sent buffer
+                                    self.to_be_sent_buffers[user].extend(audio_data)
+                                    accum_len_bytes = len(self.to_be_sent_buffers[user])
+                                    accum_duration = accum_len_bytes / (48000 * 4)
+
+                                    if accum_duration >= 15.0:
+                                        logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (>= 15s). Sending to transcription...")
+                                        self.completed_utterances[user].append(bytes(self.to_be_sent_buffers[user]))
+                                        self.to_be_sent_buffers[user] = bytearray()
+                                    else:
+                                        logger.info(f"VAD: Accumulated speech duration for {user} is {accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
 
                                     self.is_active[user] = False
                                     self.active_buffers[user] = bytearray()
@@ -725,12 +748,6 @@ try:
 
         def _transcribe(self, audio_16k):
             try:
-                # Pad with zeros to ensure the recording is at least 15 seconds long
-                min_samples = 15 * 16000
-                if len(audio_16k) < min_samples:
-                    padding_needed = min_samples - len(audio_16k)
-                    audio_16k = np.concatenate([audio_16k, np.zeros(padding_needed, dtype=np.float32)])
-
                 # Convert float32 mono_16k back to int16 PCM
                 audio_int16 = (audio_16k * 32767).astype(np.int16)
 

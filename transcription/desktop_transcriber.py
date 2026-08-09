@@ -464,6 +464,7 @@ class DesktopTranscriberBot(discord.Client):
         self.config = {}
         self.recording_thread = None
         self.recording_active = False
+        self.accumulated_utterances_list = []
 
     async def setup_hook(self):
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -850,8 +851,18 @@ class DesktopTranscriberBot(discord.Client):
                             # Join all chunks in active_buffer
                             utterance_audio = np.concatenate(active_buffer)
 
-                            # Transcribe in a separate executor thread to avoid blocking the audio thread
-                            self.transcribe_and_post_threadsafe(utterance_audio)
+                            # Accumulate until we have at least 15.0 seconds of speech
+                            self.accumulated_utterances_list.append(utterance_audio)
+                            total_accum_len = sum(len(arr) for arr in self.accumulated_utterances_list)
+                            total_accum_duration = total_accum_len / sample_rate
+
+                            if total_accum_duration >= 15.0:
+                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (>= 15s). Sending to transcription...")
+                                combined_audio = np.concatenate(self.accumulated_utterances_list)
+                                self.accumulated_utterances_list = []
+                                self.transcribe_and_post_threadsafe(combined_audio)
+                            else:
+                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
 
                             # Reset state
                             is_active = False
@@ -902,12 +913,6 @@ class DesktopTranscriberBot(discord.Client):
 
     def _transcribe(self, audio_16k):
         try:
-            # Pad with zeros to ensure the recording is at least 15 seconds long
-            min_samples = 15 * 16000
-            if len(audio_16k) < min_samples:
-                padding_needed = min_samples - len(audio_16k)
-                audio_16k = np.concatenate([audio_16k, np.zeros(padding_needed, dtype=np.float32)])
-
             # Convert float32 mono_16k back to int16 PCM
             audio_int16 = (audio_16k * 32767).astype(np.int16)
 
