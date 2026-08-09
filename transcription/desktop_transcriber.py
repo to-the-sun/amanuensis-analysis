@@ -771,7 +771,7 @@ class DesktopTranscriberBot(discord.Client):
         pre_roll_buffer = collections.deque(maxlen=pre_roll_max_len)
 
         rms_threshold = 0.0015 # equivalent to int16 RMS of 50
-        silence_timeout = 2.0 # 2 seconds silence timeout
+        silence_timeout = 1.0 # 1 second silence timeout
         max_utterance_duration = 45.0 # 45 seconds maximum duration
 
         # State variables
@@ -861,7 +861,7 @@ class DesktopTranscriberBot(discord.Client):
                             # Join all chunks in active_buffer
                             utterance_audio = np.concatenate(active_buffer)
 
-                            # Accumulate until we have at least 15.0 seconds of speech
+                            # Accumulate until we have at least 10.0 seconds of speech
                             self.accumulated_utterances_list.append(utterance_audio)
                             if self.accumulated_start_time is None:
                                 self.accumulated_start_time = time.time()
@@ -869,14 +869,14 @@ class DesktopTranscriberBot(discord.Client):
                             total_accum_len = sum(len(arr) for arr in self.accumulated_utterances_list)
                             total_accum_duration = total_accum_len / sample_rate
 
-                            if total_accum_duration >= 15.0:
-                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (>= 15s). Sending to transcription...")
+                            if total_accum_duration >= 10.0:
+                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (>= 10s). Sending to transcription...")
                                 combined_audio = np.concatenate(self.accumulated_utterances_list)
                                 self.accumulated_utterances_list = []
                                 self.accumulated_start_time = None
                                 self.transcribe_and_post_threadsafe(combined_audio)
                             else:
-                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (< 15s). Waiting for more speech to fill the time...")
+                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (< 10s). Waiting for more speech to fill the time...")
 
                             # Reset state
                             is_active = False
