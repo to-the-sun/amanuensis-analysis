@@ -11,6 +11,8 @@ import time
 import threading
 import numpy as np
 import requests
+import subprocess
+from send2trash import send2trash
 from concurrent.futures import ThreadPoolExecutor
 
 import discord
@@ -466,6 +468,11 @@ class DesktopTranscriberBot(discord.Client):
         self.recording_active = False
         self.accumulated_utterances_list = []
         self.accumulated_start_time = None
+        self.last_world_message_time = time.time()
+
+    async def on_message(self, message):
+        if message.channel and isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
+            self.last_world_message_time = time.time()
 
     async def setup_hook(self):
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -813,10 +820,10 @@ class DesktopTranscriberBot(discord.Client):
             with mic.recorder(samplerate=sample_rate) as recorder:
                 logger.info("Loopback recorder stream opened. Listening continuously...")
                 while self.recording_active:
-                    # Check if we need to flush accumulated audio after 45 seconds of waiting
-                    if self.accumulated_utterances_list and self.accumulated_start_time is not None:
-                        if time.time() - self.accumulated_start_time > 45.0:
-                            logger.info("Flush timeout reached (45 seconds). Sending accumulated speech anyway...")
+                    # Check if we need to flush accumulated audio after 49 seconds of no new messages in the world text channel
+                    if self.accumulated_utterances_list:
+                        if time.time() - self.last_world_message_time > 49.0:
+                            logger.info("Flush timeout reached (49 seconds of no new messages). Sending accumulated speech anyway...")
                             combined_audio = np.concatenate(self.accumulated_utterances_list)
                             self.accumulated_utterances_list = []
                             self.accumulated_start_time = None
@@ -940,6 +947,26 @@ class DesktopTranscriberBot(discord.Client):
                 wav_file.writeframes(audio_int16.tobytes())
 
             buffer.seek(0)
+            wav_bytes = buffer.getvalue()
+
+            # Save MP3 copy in data folder
+            try:
+                data_dir = os.path.join(SCRIPT_DIR, "data")
+                os.makedirs(data_dir, exist_ok=True)
+                mp3_filename = f"audio_{int(time.time() * 1000)}.mp3"
+                mp3_filepath = os.path.join(data_dir, mp3_filename)
+
+                cmd = ["ffmpeg", "-y", "-i", "pipe:0", "-acodec", "libmp3lame", mp3_filepath]
+                process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdout, stderr = process.communicate(input=wav_bytes)
+                if process.returncode != 0:
+                    logger.error(f"ffmpeg conversion failed: {stderr.decode('utf-8')}")
+                else:
+                    logger.info(f"Saved MP3 copy of segment to {mp3_filepath}")
+            except Exception as mp3_err:
+                logger.error(f"Failed to save MP3 copy: {mp3_err}")
+
+            buffer.seek(0)
 
             url = "https://api.aquavoice.com/api/v1/audio/transcriptions"
             headers = {"Authorization": f"Bearer {self.config['aqua_key']}"}
@@ -995,6 +1022,24 @@ class DesktopTranscriberBot(discord.Client):
         await super().close()
 
 if __name__ == "__main__":
+    # Clear old MP3 files in the data directory on startup
+    data_dir = os.path.join(SCRIPT_DIR, "data")
+    if os.path.exists(data_dir):
+        logger.info(f"Cleaning up old MP3 files in {data_dir}...")
+        for filename in os.listdir(data_dir):
+            if filename.lower().endswith(".mp3"):
+                filepath = os.path.join(data_dir, filename)
+                try:
+                    send2trash(filepath)
+                    logger.info(f"Sent old MP3 to recycle bin: {filepath}")
+                except Exception as trash_err:
+                    logger.warning(f"Failed to send {filepath} to recycle bin ({trash_err}). Permanently deleting to start fresh...")
+                    try:
+                        os.remove(filepath)
+                        logger.info(f"Permanently deleted: {filepath}")
+                    except Exception as rm_err:
+                        logger.error(f"Failed to delete {filepath}: {rm_err}")
+
     config = load_credentials()
     bot = DesktopTranscriberBot()
     bot.config = config

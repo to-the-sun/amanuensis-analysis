@@ -24,6 +24,8 @@ try:
     import asyncio
     import numpy as np
     import requests
+    import subprocess
+    from send2trash import send2trash
     from typing import Optional
     from concurrent.futures import ThreadPoolExecutor
 
@@ -692,11 +694,14 @@ try:
                     now = time.time()
 
                     with self.lock:
-                        # Check for 45-second flush timeout for each user
+                        # Check for 49-second flush timeout for each user based on last world message time
                         for user, buf in list(self.to_be_sent_buffers.items()):
-                            if len(buf) > 0 and self.accumulated_start_times[user] is not None:
-                                if now - self.accumulated_start_times[user] > 45.0:
-                                    logger.info(f"VAD: Flush timeout reached (45 seconds) for {user}. Sending accumulated speech anyway...")
+                            if len(buf) > 0:
+                                last_msg_time = getattr(self.bot, 'last_world_message_time', None)
+                                if last_msg_time is None:
+                                    last_msg_time = now
+                                if now - last_msg_time > 49.0:
+                                    logger.info(f"VAD: Flush timeout reached (49 seconds of no new messages) for {user}. Sending accumulated speech anyway...")
                                     self.completed_utterances[user].append(bytes(buf))
                                     self.to_be_sent_buffers[user] = bytearray()
                                     self.accumulated_start_times[user] = None
@@ -799,6 +804,26 @@ try:
                     wav_file.writeframes(audio_int16.tobytes())
 
                 buffer.seek(0)
+                wav_bytes = buffer.getvalue()
+
+                # Save MP3 copy in data folder
+                try:
+                    data_dir = os.path.join(_script_dir, "data")
+                    os.makedirs(data_dir, exist_ok=True)
+                    mp3_filename = f"audio_{int(time.time() * 1000)}.mp3"
+                    mp3_filepath = os.path.join(data_dir, mp3_filename)
+
+                    cmd = ["ffmpeg", "-y", "-i", "pipe:0", "-acodec", "libmp3lame", mp3_filepath]
+                    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, stderr = process.communicate(input=wav_bytes)
+                    if process.returncode != 0:
+                        logger.error(f"ffmpeg conversion failed: {stderr.decode('utf-8')}")
+                    else:
+                        logger.info(f"Saved MP3 copy of segment to {mp3_filepath}")
+                except Exception as mp3_err:
+                    logger.error(f"Failed to save MP3 copy: {mp3_err}")
+
+                buffer.seek(0)
 
                 url = "https://api.aquavoice.com/api/v1/audio/transcriptions"
                 headers = {"Authorization": f"Bearer {AQUA_KEY}"}
@@ -836,6 +861,7 @@ try:
         def __init__(self):
             super().__init__(intents=discord.Intents.all())
             self.tree = app_commands.CommandTree(self)
+            self.last_world_message_time = time.time()
 
         async def setup_hook(self):
             @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -1149,11 +1175,29 @@ try:
                 await self.connect_to_world(guild)
 
         async def on_message(self, message):
-            # We no longer handle commands here as they are migrated to Slash Commands
-            pass
+            if message.channel and isinstance(message.channel, discord.TextChannel) and message.channel.name == "world":
+                self.last_world_message_time = time.time()
 
     # --- MAIN ---
     if __name__ == '__main__':
+        # Clear old MP3 files in the data directory on startup
+        data_dir = os.path.join(_script_dir, "data")
+        if os.path.exists(data_dir):
+            logger.info(f"Cleaning up old MP3 files in {data_dir}...")
+            for filename in os.listdir(data_dir):
+                if filename.lower().endswith(".mp3"):
+                    filepath = os.path.join(data_dir, filename)
+                    try:
+                        send2trash(filepath)
+                        logger.info(f"Sent old MP3 to recycle bin: {filepath}")
+                    except Exception as trash_err:
+                        logger.warning(f"Failed to send {filepath} to recycle bin ({trash_err}). Permanently deleting to start fresh...")
+                        try:
+                            os.remove(filepath)
+                            logger.info(f"Permanently deleted: {filepath}")
+                        except Exception as rm_err:
+                            logger.error(f"Failed to delete {filepath}: {rm_err}")
+
         with open('credentials.json', 'r') as f:
             config = json.load(f)
         TOKEN = config['token']
