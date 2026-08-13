@@ -753,14 +753,83 @@ class DesktopTranscriberBot(discord.Client):
         if not self.text_channel_id:
             logger.warning("Could not find any text channel named 'world' in connected guilds.")
 
-        # Start desktop audio capture thread
+        # Start capture background threads
         self.recording_active = True
-        self.recording_thread = threading.Thread(target=self.run_desktop_audio_capture, daemon=True)
-        self.recording_thread.start()
-        logger.info("Desktop audio capture background thread started.")
+
+        desktop_mic = None
+        hardware_mic = None
+
+        if SOUNDCARD_AVAILABLE:
+            # Resolve desktop audio loopback
+            try:
+                default_speaker = sc.default_speaker()
+                if default_speaker:
+                    logger.info(f"Using default speaker: {default_speaker.name}")
+                    desktop_mic = sc.get_microphone(id=str(default_speaker.name), include_loopback=True)
+                    if desktop_mic:
+                        logger.info(f"Loopback microphone successfully resolved: {desktop_mic.name}")
+            except Exception as e:
+                logger.error(f"Failed to resolve default speaker/loopback microphone: {e}")
+
+            # Resolve default hardware microphone input
+            try:
+                hardware_mic = sc.default_microphone()
+                if hardware_mic:
+                    logger.info(f"Default microphone successfully resolved: {hardware_mic.name}")
+            except Exception as e:
+                logger.error(f"Failed to resolve default microphone: {e}")
+
+        if desktop_mic is None and hardware_mic is None:
+            # Start Mock Mode thread (run_desktop_audio_capture handles mock capture when both are None)
+            self.recording_thread = threading.Thread(target=self.run_desktop_audio_capture, daemon=True)
+            self.recording_thread.start()
+            logger.info("Mock capture background thread started.")
+        else:
+            # Start real capture threads
+            if desktop_mic is not None:
+                self.desktop_recording_thread = threading.Thread(
+                    target=self.run_audio_capture_device,
+                    args=(desktop_mic, "Desktop Audio"),
+                    daemon=True
+                )
+                self.desktop_recording_thread.start()
+                logger.info("Desktop audio capture background thread started.")
+            else:
+                logger.warning("Desktop audio loopback microphone not available. Real capture thread for Desktop Audio not started.")
+
+            if hardware_mic is not None:
+                self.mic_recording_thread = threading.Thread(
+                    target=self.run_audio_capture_device,
+                    args=(hardware_mic, "Default Microphone"),
+                    daemon=True
+                )
+                self.mic_recording_thread.start()
+                logger.info("Default microphone capture background thread started.")
+            else:
+                logger.warning("Default microphone device not available. Real capture thread for Default Microphone not started.")
 
     def run_desktop_audio_capture(self):
-        # We define loop parameters
+        # This acts as the Mock Capture Loop when SOUNDCARD is unavailable.
+        logger.info("Starting in Mock Mode. Simulating periodic transcription activity for Desktop Audio and Default Microphone.")
+        mock_counter = 1
+        while self.recording_active:
+            time.sleep(25) # Mock speech every 25 seconds
+            if self.text_channel_id:
+                mock_text_desktop = f"This is mock transcription {mock_counter} of desktop audio."
+                mock_text_mic = f"This is mock transcription {mock_counter} of default microphone."
+                mock_counter += 1
+                logger.info(f"MOCK TRANSCRIPTION EVENT (Desktop): {mock_text_desktop}")
+                logger.info(f"MOCK TRANSCRIPTION EVENT (Mic): {mock_text_mic}")
+                asyncio.run_coroutine_threadsafe(
+                    self.post_transcription_to_channel(mock_text_desktop, speaker="Desktop Audio"),
+                    self.loop
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self.post_transcription_to_channel(mock_text_mic, speaker="Default Microphone"),
+                    self.loop
+                )
+
+    def run_audio_capture_device(self, mic, speaker_name):
         sample_rate = 48000
         chunk_duration = 0.1 # 100ms
         chunk_frames = int(sample_rate * chunk_duration) # 4800 frames
@@ -779,48 +848,21 @@ class DesktopTranscriberBot(discord.Client):
         active_buffer = []
         silence_duration = 0.0
 
-        logger.info("Setting up loopback microphone...")
-        mic = None
+        accumulated_utterances_list = []
+        accumulated_start_time = None
 
-        if SOUNDCARD_AVAILABLE:
-            try:
-                default_speaker = sc.default_speaker()
-                logger.info(f"Using default speaker: {default_speaker.name}")
-                mic = sc.get_microphone(id=str(default_speaker.name), include_loopback=True)
-                logger.info(f"Loopback microphone successfully resolved: {mic.name}")
-            except Exception as e:
-                logger.error(f"Failed to resolve default speaker/loopback microphone: {e}. Falling back to mock mode.")
-                mic = None
-
-        if mic is None:
-            # Mock mode loop
-            logger.info("Starting in Mock Mode. Simulating periodic transcription activity.")
-            mock_counter = 1
-            while self.recording_active:
-                time.sleep(25) # Mock speech every 25 seconds
-                if self.text_channel_id:
-                    mock_text = f"This is mock transcription {mock_counter} of desktop audio."
-                    mock_counter += 1
-                    logger.info(f"MOCK TRANSCRIPTION EVENT: {mock_text}")
-                    asyncio.run_coroutine_threadsafe(
-                        self.post_transcription_to_channel(mock_text),
-                        self.loop
-                    )
-            return
-
-        # Continuous live recording loop
         try:
             with mic.recorder(samplerate=sample_rate) as recorder:
-                logger.info("Loopback recorder stream opened. Listening continuously...")
+                logger.info(f"Recorder stream opened for {speaker_name} ({mic.name}). Listening continuously...")
                 while self.recording_active:
                     # Check if we need to flush accumulated audio after 45 seconds of waiting
-                    if self.accumulated_utterances_list and self.accumulated_start_time is not None:
-                        if time.time() - self.accumulated_start_time > 45.0:
-                            logger.info("Flush timeout reached (45 seconds). Sending accumulated speech anyway...")
-                            combined_audio = np.concatenate(self.accumulated_utterances_list)
-                            self.accumulated_utterances_list = []
-                            self.accumulated_start_time = None
-                            self.transcribe_and_post_threadsafe(combined_audio)
+                    if accumulated_utterances_list and accumulated_start_time is not None:
+                        if time.time() - accumulated_start_time > 45.0:
+                            logger.info(f"[{speaker_name}] Flush timeout reached (45 seconds). Sending accumulated speech anyway...")
+                            combined_audio = np.concatenate(accumulated_utterances_list)
+                            accumulated_utterances_list = []
+                            accumulated_start_time = None
+                            self.transcribe_and_post_threadsafe(combined_audio, speaker_name)
 
                     # Record 100ms of audio
                     chunk = recorder.record(numframes=chunk_frames)
@@ -837,7 +879,7 @@ class DesktopTranscriberBot(discord.Client):
                         # Idle state: update pre-roll buffer
                         pre_roll_buffer.append(chunk_mono)
                         if rms > rms_threshold:
-                            logger.info(f"Voice activity detected! (RMS: {rms:.5f}) Triggering active utterance.")
+                            logger.info(f"[{speaker_name}] Voice activity detected! (RMS: {rms:.5f}) Triggering active utterance.")
                             is_active = True
                             # Assemble the initial buffer using pre-roll data
                             active_buffer = list(pre_roll_buffer)
@@ -856,27 +898,27 @@ class DesktopTranscriberBot(discord.Client):
                         # Check endpoint triggers
                         if silence_duration >= silence_timeout or current_duration >= max_utterance_duration:
                             reason = "silence timeout" if silence_duration >= silence_timeout else "max duration limit"
-                            logger.info(f"Utterance finished ({reason}, total duration: {current_duration:.2f}s). Processing...")
+                            logger.info(f"[{speaker_name}] Utterance finished ({reason}, total duration: {current_duration:.2f}s). Processing...")
 
                             # Join all chunks in active_buffer
                             utterance_audio = np.concatenate(active_buffer)
 
                             # Accumulate until we have at least 10.0 seconds of speech
-                            self.accumulated_utterances_list.append(utterance_audio)
-                            if self.accumulated_start_time is None:
-                                self.accumulated_start_time = time.time()
+                            accumulated_utterances_list.append(utterance_audio)
+                            if accumulated_start_time is None:
+                                accumulated_start_time = time.time()
 
-                            total_accum_len = sum(len(arr) for arr in self.accumulated_utterances_list)
+                            total_accum_len = sum(len(arr) for arr in accumulated_utterances_list)
                             total_accum_duration = total_accum_len / sample_rate
 
                             if total_accum_duration >= 10.0:
-                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (>= 10s). Sending to transcription...")
-                                combined_audio = np.concatenate(self.accumulated_utterances_list)
-                                self.accumulated_utterances_list = []
-                                self.accumulated_start_time = None
-                                self.transcribe_and_post_threadsafe(combined_audio)
+                                logger.info(f"[{speaker_name}] Accumulated speech duration is {total_accum_duration:.2f}s (>= 10s). Sending to transcription...")
+                                combined_audio = np.concatenate(accumulated_utterances_list)
+                                accumulated_utterances_list = []
+                                accumulated_start_time = None
+                                self.transcribe_and_post_threadsafe(combined_audio, speaker_name)
                             else:
-                                logger.info(f"Accumulated speech duration is {total_accum_duration:.2f}s (< 10s). Waiting for more speech to fill the time...")
+                                logger.info(f"[{speaker_name}] Accumulated speech duration is {total_accum_duration:.2f}s (< 10s). Waiting for more speech to fill the time...")
 
                             # Reset state
                             is_active = False
@@ -884,14 +926,13 @@ class DesktopTranscriberBot(discord.Client):
                             silence_duration = 0.0
 
         except Exception as e:
-            logger.error(f"Error in run_desktop_audio_capture: {e}")
-            self.recording_active = False
+            logger.error(f"Error in run_audio_capture_device for {speaker_name}: {e}")
 
-    def transcribe_and_post_threadsafe(self, audio_data):
+    def transcribe_and_post_threadsafe(self, audio_data, speaker_name):
         # We submit the task to our ThreadPoolExecutor
-        _executor.submit(self._run_transcribe_task, audio_data)
+        _executor.submit(self._run_transcribe_task, audio_data, speaker_name)
 
-    def _run_transcribe_task(self, audio_data):
+    def _run_transcribe_task(self, audio_data, speaker_name):
         try:
             # 1. Downsample from 48kHz to 16kHz via [::3]
             mono_16k = audio_data[::3]
@@ -900,14 +941,14 @@ class DesktopTranscriberBot(discord.Client):
             text = self._transcribe(mono_16k)
             if text:
                 clean_text = self._poetic_parse(text)
-                logger.info(f"AVALON TRANSCRIPTION SUCCESS: {clean_text}")
+                logger.info(f"AVALON TRANSCRIPTION SUCCESS [{speaker_name}]: {clean_text}")
                 # Post to discord text channel
                 asyncio.run_coroutine_threadsafe(
-                    self.post_transcription_to_channel(clean_text),
+                    self.post_transcription_to_channel(clean_text, speaker=speaker_name),
                     self.loop
                 )
         except Exception as e:
-            logger.error(f"Error in _run_transcribe_task: {e}")
+            logger.error(f"Error in _run_transcribe_task for {speaker_name}: {e}")
 
     def _poetic_parse(self, text):
         # Remove any periods that come directly after a capital letter.
@@ -953,7 +994,7 @@ class DesktopTranscriberBot(discord.Client):
             logger.error(f"Aqua transcription error: {e}")
             return ""
 
-    async def post_transcription_to_channel(self, text):
+    async def post_transcription_to_channel(self, text, speaker=None):
         if not self.text_channel_id:
             logger.warning("No '#world' text channel target. Cannot post transcription.")
             return
@@ -971,11 +1012,14 @@ class DesktopTranscriberBot(discord.Client):
                 # Send in chunks of 1950 characters
                 current_chunk = []
                 current_len = 0
+                speaker_prefix = f"**{speaker}**: " if speaker else ""
+                prefix_len = len(speaker_prefix)
                 for line in processed_lines:
                     line_len = len(line) + 1  # include newline char
-                    if current_len + line_len > 1950:
+                    if current_len + line_len + prefix_len > 1950:
                         if current_chunk:
-                            await channel.send("\n".join(current_chunk))
+                            chunk_text = "\n".join(current_chunk)
+                            await channel.send(f"{speaker_prefix}{chunk_text}")
                         current_chunk = [line]
                         current_len = line_len
                     else:
@@ -983,8 +1027,9 @@ class DesktopTranscriberBot(discord.Client):
                         current_len += line_len
 
                 if current_chunk:
-                    await channel.send("\n".join(current_chunk))
-                logger.info("Transcription posted to #world channel.")
+                    chunk_text = "\n".join(current_chunk)
+                    await channel.send(f"{speaker_prefix}{chunk_text}")
+                logger.info(f"Transcription posted to #world channel for {speaker}.")
             except Exception as e:
                 logger.error(f"Failed to send transcription message: {e}")
         else:
