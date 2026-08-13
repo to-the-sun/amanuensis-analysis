@@ -466,6 +466,7 @@ class DesktopTranscriberBot(discord.Client):
         self.recording_active = False
         self.accumulated_utterances_list = []
         self.accumulated_start_time = None
+        self.last_world_message_time = time.time()
 
     async def setup_hook(self):
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
@@ -739,6 +740,10 @@ class DesktopTranscriberBot(discord.Client):
             logger.exception(f"Error during analyze (syllables/poem) in {interaction.channel.name}: {e}")
             await interaction.followup.send(f"Error during analyze: {e}")
 
+    async def on_message(self, message):
+        if message.channel and hasattr(message.channel, "name") and message.channel.name == "world":
+            self.last_world_message_time = time.time()
+
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
 
@@ -813,10 +818,10 @@ class DesktopTranscriberBot(discord.Client):
             with mic.recorder(samplerate=sample_rate) as recorder:
                 logger.info("Loopback recorder stream opened. Listening continuously...")
                 while self.recording_active:
-                    # Check if we need to flush accumulated audio after 45 seconds of waiting
+                    # Check if we need to flush accumulated audio after 49 seconds of no new messages in the world channel
                     if self.accumulated_utterances_list and self.accumulated_start_time is not None:
-                        if time.time() - self.accumulated_start_time > 45.0:
-                            logger.info("Flush timeout reached (45 seconds). Sending accumulated speech anyway...")
+                        if time.time() - self.last_world_message_time > 49.0:
+                            logger.info("Flush timeout reached (49 seconds of no world messages). Sending accumulated speech anyway...")
                             combined_audio = np.concatenate(self.accumulated_utterances_list)
                             self.accumulated_utterances_list = []
                             self.accumulated_start_time = None
@@ -930,6 +935,24 @@ class DesktopTranscriberBot(discord.Client):
             # Convert float32 mono_16k back to int16 PCM
             audio_int16 = (audio_16k * 32767).astype(np.int16)
 
+            # Save MP3 copy in data/ folder
+            try:
+                from pydub import AudioSegment
+                data_dir = os.path.join(SCRIPT_DIR, "data")
+                os.makedirs(data_dir, exist_ok=True)
+                mp3_filename = f"audio_{int(time.time() * 1000)}.mp3"
+                mp3_path = os.path.join(data_dir, mp3_filename)
+                segment = AudioSegment(
+                    data=audio_int16.tobytes(),
+                    sample_width=2,
+                    frame_rate=16000,
+                    channels=1
+                )
+                segment.export(mp3_path, format="mp3")
+                logger.info(f"Saved MP3 copy of transcription audio to {mp3_path}")
+            except Exception as ex:
+                logger.error(f"Failed to save MP3 copy: {ex}")
+
             # Write to in-memory WAV file
             buffer = io.BytesIO()
             buffer.name = "audio.wav"
@@ -995,6 +1018,26 @@ class DesktopTranscriberBot(discord.Client):
         await super().close()
 
 if __name__ == "__main__":
+    # Cleanup old MP3 files in data/ directory using send2trash (with os.remove fallback)
+    try:
+        import send2trash
+        data_dir = os.path.join(SCRIPT_DIR, "data")
+        os.makedirs(data_dir, exist_ok=True)
+        for f in os.listdir(data_dir):
+            if f.endswith(".mp3"):
+                fp = os.path.join(data_dir, f)
+                try:
+                    send2trash.send2trash(fp)
+                    logger.info(f"Moved old MP3 to trash: {fp}")
+                except Exception:
+                    try:
+                        os.remove(fp)
+                        logger.info(f"Permanently deleted old MP3 (fallback): {fp}")
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.warning(f"Error cleaning up old MP3s: {e}")
+
     config = load_credentials()
     bot = DesktopTranscriberBot()
     bot.config = config
