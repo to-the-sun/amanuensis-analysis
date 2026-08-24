@@ -300,12 +300,16 @@ def get_line_syllables_and_vowels(line):
             })
     return line_syls
 
-def reconstruct_line_from_syllables(syllables_list):
+def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
     if not syllables_list:
         return ""
+    if bold_indices is None:
+        bold_indices = set()
     parts = []
     for idx, item in enumerate(syllables_list):
         syl_text = item['syllable']
+        if idx in bold_indices:
+            syl_text = f"**{syl_text}**"
         if idx > 0:
             prev_item = syllables_list[idx - 1]
             if prev_item['word'] != item['word']:
@@ -761,7 +765,7 @@ class BaseTranscriptionBot(discord.Client):
                     await interaction.followup.send("Could not identify any repeating vowel sounds in the syllable slots.")
                     return
 
-                pairs = []
+                syl_pairs = []
                 for rep in all_repetitions:
                     if rep['distance'] == best_distance:
                         line_idx = rep['line_index']
@@ -777,13 +781,13 @@ class BaseTranscriptionBot(discord.Client):
                         l1_indices = [start_idx - k for k in range(best_distance - 1, -1, -1)]
                         l1_syls = [available[idx] for idx in l1_indices]
 
-                        l1_text = reconstruct_line_from_syllables(l1_syls)
-                        l2_text = reconstruct_line_from_syllables(l2_syls)
+                        l1_plain = reconstruct_line_from_syllables(l1_syls).lower()
+                        l2_plain = reconstruct_line_from_syllables(l2_syls).lower()
 
-                        if (l1_text, l2_text) not in pairs:
-                            pairs.append((l1_text, l2_text))
+                        if not any(reconstruct_line_from_syllables(p[0]).lower() == l1_plain and reconstruct_line_from_syllables(p[1]).lower() == l2_plain for p in syl_pairs):
+                            syl_pairs.append((l1_syls, l2_syls))
 
-                def merge_chains(chains_list):
+                def merge_syl_chains(chains_list):
                     changed = True
                     while changed:
                         changed = False
@@ -791,7 +795,9 @@ class BaseTranscriptionBot(discord.Client):
                             for j in range(len(chains_list)):
                                 if i == j:
                                     continue
-                                if chains_list[i][-1].strip().lower() == chains_list[j][0].strip().lower():
+                                end_text = reconstruct_line_from_syllables(chains_list[i][-1]).strip().lower()
+                                start_text = reconstruct_line_from_syllables(chains_list[j][0]).strip().lower()
+                                if end_text == start_text:
                                     new_chain = chains_list[i] + chains_list[j][1:]
                                     chains_list.pop(max(i, j))
                                     chains_list.pop(min(i, j))
@@ -802,35 +808,60 @@ class BaseTranscriptionBot(discord.Client):
                                 break
                     return chains_list
 
-                initial_chains = [[p[0], p[1]] for p in pairs]
-                merged_chains = merge_chains(initial_chains)
+                initial_syl_chains = [[p[0], p[1]] for p in syl_pairs]
+                merged_syl_chains = merge_syl_chains(initial_syl_chains)
 
-                original_order = {p[0].strip().lower(): idx for idx, p in enumerate(pairs)}
-                merged_chains.sort(key=lambda c: original_order.get(c[0].strip().lower(), 999999))
+                original_order = {reconstruct_line_from_syllables(p[0]).strip().lower(): idx for idx, p in enumerate(syl_pairs)}
+                merged_syl_chains.sort(key=lambda c: original_order.get(reconstruct_line_from_syllables(c[0]).strip().lower(), 999999))
 
                 filtered_chains = []
-                for i, c1 in enumerate(merged_chains):
+                for i, c1 in enumerate(merged_syl_chains):
+                    c1_plain = [reconstruct_line_from_syllables(l) for l in c1]
                     contained = False
-                    for j, c2 in enumerate(merged_chains):
+                    for j, c2 in enumerate(merged_syl_chains):
                         if i == j:
                             continue
-                        text1 = re.sub(r'\s+', ' ', ' '.join(c1)).strip().lower()
-                        text2 = re.sub(r'\s+', ' ', ' '.join(c2)).strip().lower()
+                        c2_plain = [reconstruct_line_from_syllables(l) for l in c2]
+                        text1 = re.sub(r'\s+', ' ', ' '.join(c1_plain)).strip().lower()
+                        text2 = re.sub(r'\s+', ' ', ' '.join(c2_plain)).strip().lower()
                         if text1 == text2:
                             if j < i:
                                 contained = True
                                 break
-                        elif is_chain_contained(c1, c2):
+                        elif is_chain_contained(c1_plain, c2_plain):
                             contained = True
                             break
                     if not contained:
                         filtered_chains.append(c1)
-                merged_chains = filtered_chains
 
                 poem_lines = []
-                for chain in merged_chains:
-                    for line in chain:
-                        poem_lines.append(line)
+                seen_line_keys = set()
+
+                for chain in filtered_chains:
+                    for line_idx, l_syls in enumerate(chain):
+                        bold_indices = set()
+                        for k in range(len(l_syls)):
+                            v1 = l_syls[k]['vowel']
+                            if not v1:
+                                continue
+                            w1 = l_syls[k]['word'].strip().lower()
+                            for other_idx, other_syls in enumerate(chain):
+                                if other_idx == line_idx:
+                                    continue
+                                if k < len(other_syls):
+                                    v2 = other_syls[k]['vowel']
+                                    w2 = other_syls[k]['word'].strip().lower()
+                                    if v2 == v1 and w1 != w2:
+                                        bold_indices.add(k)
+                                        break
+
+                        formatted_line = reconstruct_line_from_syllables(l_syls, bold_indices=bold_indices)
+                        plain_key = re.sub(r'\*\*', '', formatted_line)
+                        plain_key = re.sub(r'\s+', ' ', plain_key).strip().lower()
+
+                        if plain_key and plain_key not in seen_line_keys:
+                            seen_line_keys.add(plain_key)
+                            poem_lines.append(formatted_line)
 
                 def get_last_word(line_text):
                     words = re.findall(r"[a-zA-Z0-9']+", line_text)
