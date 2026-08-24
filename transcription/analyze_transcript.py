@@ -304,9 +304,9 @@ def to_unicode_bold(text):
     bold_chars = []
     for char in text:
         if 'a' <= char <= 'z':
-            bold_chars.append(chr(0x1D5EE + ord(char) - ord('a')))
+            bold_chars.append(chr(0x1D586 + ord(char) - ord('a')))
         elif 'A' <= char <= 'Z':
-            bold_chars.append(chr(0x1D5D4 + ord(char) - ord('A')))
+            bold_chars.append(chr(0x1D56C + ord(char) - ord('A')))
         elif '0' <= char <= '9':
             bold_chars.append(chr(0x1D7EC + ord(char) - ord('0')))
         else:
@@ -317,12 +317,16 @@ def strip_unicode_bold(text):
     plain_chars = []
     for char in text:
         cp = ord(char)
-        if 0x1D5EE <= cp <= 0x1D607:
+        if 0x1D586 <= cp <= 0x1D59F:
+            plain_chars.append(chr(ord('a') + cp - 0x1D586))
+        elif 0x1D56C <= cp <= 0x1D585:
+            plain_chars.append(chr(ord('A') + cp - 0x1D56C))
+        elif 0x1D7EC <= cp <= 0x1D7F5:
+            plain_chars.append(chr(ord('0') + cp - 0x1D7EC))
+        elif 0x1D5EE <= cp <= 0x1D607:
             plain_chars.append(chr(ord('a') + cp - 0x1D5EE))
         elif 0x1D5D4 <= cp <= 0x1D5ED:
             plain_chars.append(chr(ord('A') + cp - 0x1D5D4))
-        elif 0x1D7EC <= cp <= 0x1D7F5:
-            plain_chars.append(chr(ord('0') + cp - 0x1D7EC))
         else:
             plain_chars.append(char)
     return ''.join(plain_chars)
