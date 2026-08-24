@@ -300,43 +300,52 @@ def get_line_syllables_and_vowels(line):
             })
     return line_syls
 
+def to_unicode_bold(text):
+    bold_chars = []
+    for char in text:
+        if 'a' <= char <= 'z':
+            bold_chars.append(chr(0x1D5EE + ord(char) - ord('a')))
+        elif 'A' <= char <= 'Z':
+            bold_chars.append(chr(0x1D5D4 + ord(char) - ord('A')))
+        elif '0' <= char <= '9':
+            bold_chars.append(chr(0x1D7EC + ord(char) - ord('0')))
+        else:
+            bold_chars.append(char)
+    return ''.join(bold_chars)
+
+def strip_unicode_bold(text):
+    plain_chars = []
+    for char in text:
+        cp = ord(char)
+        if 0x1D5EE <= cp <= 0x1D607:
+            plain_chars.append(chr(ord('a') + cp - 0x1D5EE))
+        elif 0x1D5D4 <= cp <= 0x1D5ED:
+            plain_chars.append(chr(ord('A') + cp - 0x1D5D4))
+        elif 0x1D7EC <= cp <= 0x1D7F5:
+            plain_chars.append(chr(ord('0') + cp - 0x1D7EC))
+        else:
+            plain_chars.append(char)
+    return ''.join(plain_chars)
+
 def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
     if not syllables_list:
         return ""
     if bold_indices is None:
         bold_indices = set()
-
-    words_info = []
-    current_word_idx = None
-    current_syls = []
-    is_bold = False
-
+    parts = []
     for idx, item in enumerate(syllables_list):
-        w_idx = item.get('word_idx', item['word'])
-        if current_word_idx is None or w_idx != current_word_idx:
-            if current_word_idx is not None:
-                words_info.append((''.join(current_syls), is_bold))
-            current_word_idx = w_idx
-            current_syls = [item['syllable']]
-            is_bold = (idx in bold_indices)
+        syl_text = item['syllable']
+        if idx in bold_indices:
+            syl_text = to_unicode_bold(syl_text)
+        if idx > 0:
+            prev_item = syllables_list[idx - 1]
+            if prev_item['word'] != item['word']:
+                parts.append(' ' + syl_text)
+            else:
+                parts.append(syl_text)
         else:
-            current_syls.append(item['syllable'])
-            if idx in bold_indices:
-                is_bold = True
-
-    if current_word_idx is not None:
-        words_info.append((''.join(current_syls), is_bold))
-
-    formatted_words = []
-    for word_text, bold in words_info:
-        if bold:
-            formatted_words.append(f"**{word_text}**")
-        else:
-            formatted_words.append(word_text)
-
-    result = " ".join(formatted_words)
-    result = re.sub(r'\*\*\s+\*\*', ' ', result)
-    return result
+            parts.append(syl_text)
+    return "".join(parts).strip()
 
 def is_chain_contained(c_target, c_other):
     target_full = re.sub(r'\s+', ' ', ' '.join(c_target)).strip().lower()
@@ -874,7 +883,7 @@ class BaseTranscriptionBot(discord.Client):
                                         break
 
                         formatted_line = reconstruct_line_from_syllables(l_syls, bold_indices=bold_indices)
-                        plain_key = re.sub(r'\*\*', '', formatted_line)
+                        plain_key = strip_unicode_bold(formatted_line)
                         plain_key = re.sub(r'\s+', ' ', plain_key).strip().lower()
 
                         if plain_key and plain_key not in seen_line_keys:
