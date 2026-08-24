@@ -316,6 +316,43 @@ def reconstruct_line_from_syllables(syllables_list):
             parts.append(syl_text)
     return "".join(parts).strip()
 
+def is_chain_contained(c_target, c_other):
+    target_full = re.sub(r'\s+', ' ', ' '.join(c_target)).strip().lower()
+    other_full = re.sub(r'\s+', ' ', ' '.join(c_other)).strip().lower()
+
+    if target_full in other_full and len(other_full) > len(target_full):
+        return True
+
+    if len(c_target) == len(c_other):
+        all_lines_contained = True
+        strictly_smaller = False
+        for l_t, l_o in zip(c_target, c_other):
+            lt_norm = re.sub(r'\s+', ' ', l_t).strip().lower()
+            lo_norm = re.sub(r'\s+', ' ', l_o).strip().lower()
+            if lt_norm not in lo_norm:
+                all_lines_contained = False
+                break
+            if len(lt_norm) < len(lo_norm):
+                strictly_smaller = True
+        if all_lines_contained and strictly_smaller:
+            return True
+
+    if len(c_target) < len(c_other):
+        n_t = len(c_target)
+        n_o = len(c_other)
+        for start in range(n_o - n_t + 1):
+            match = True
+            for k in range(n_t):
+                lt_norm = re.sub(r'\s+', ' ', c_target[k]).strip().lower()
+                lo_norm = re.sub(r'\s+', ' ', c_other[start + k]).strip().lower()
+                if lt_norm not in lo_norm:
+                    match = False
+                    break
+            if match:
+                return True
+
+    return False
+
 def cuts_word_in_half(selected_syls, full_line_syls):
     selected_counts = collections.Counter()
     for s in selected_syls:
@@ -770,6 +807,25 @@ class BaseTranscriptionBot(discord.Client):
 
                 original_order = {p[0].strip().lower(): idx for idx, p in enumerate(pairs)}
                 merged_chains.sort(key=lambda c: original_order.get(c[0].strip().lower(), 999999))
+
+                filtered_chains = []
+                for i, c1 in enumerate(merged_chains):
+                    contained = False
+                    for j, c2 in enumerate(merged_chains):
+                        if i == j:
+                            continue
+                        text1 = re.sub(r'\s+', ' ', ' '.join(c1)).strip().lower()
+                        text2 = re.sub(r'\s+', ' ', ' '.join(c2)).strip().lower()
+                        if text1 == text2:
+                            if j < i:
+                                contained = True
+                                break
+                        elif is_chain_contained(c1, c2):
+                            contained = True
+                            break
+                    if not contained:
+                        filtered_chains.append(c1)
+                merged_chains = filtered_chains
 
                 poem_lines = []
                 for chain in merged_chains:
