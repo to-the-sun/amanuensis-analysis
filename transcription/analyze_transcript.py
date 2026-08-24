@@ -305,20 +305,38 @@ def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
         return ""
     if bold_indices is None:
         bold_indices = set()
-    parts = []
+
+    words_info = []
+    current_word_idx = None
+    current_syls = []
+    is_bold = False
+
     for idx, item in enumerate(syllables_list):
-        syl_text = item['syllable']
-        if idx in bold_indices:
-            syl_text = f"**{syl_text}**"
-        if idx > 0:
-            prev_item = syllables_list[idx - 1]
-            if prev_item['word'] != item['word']:
-                parts.append(' ' + syl_text)
-            else:
-                parts.append(syl_text)
+        w_idx = item.get('word_idx', item['word'])
+        if current_word_idx is None or w_idx != current_word_idx:
+            if current_word_idx is not None:
+                words_info.append((''.join(current_syls), is_bold))
+            current_word_idx = w_idx
+            current_syls = [item['syllable']]
+            is_bold = (idx in bold_indices)
         else:
-            parts.append(syl_text)
-    return "".join(parts).strip()
+            current_syls.append(item['syllable'])
+            if idx in bold_indices:
+                is_bold = True
+
+    if current_word_idx is not None:
+        words_info.append((''.join(current_syls), is_bold))
+
+    formatted_words = []
+    for word_text, bold in words_info:
+        if bold:
+            formatted_words.append(f"**{word_text}**")
+        else:
+            formatted_words.append(word_text)
+
+    result = " ".join(formatted_words)
+    result = re.sub(r'\*\*\s+\*\*', ' ', result)
+    return result
 
 def is_chain_contained(c_target, c_other):
     target_full = re.sub(r'\s+', ' ', ' '.join(c_target)).strip().lower()
