@@ -300,15 +300,22 @@ def get_line_syllables_and_vowels(line):
             })
     return line_syls
 
+DOUBLE_STRUCK_UPPER_MAP = {
+    'A': '𝔸', 'B': '𝔹', 'C': 'ℂ', 'D': '𝔻', 'E': '𝔼', 'F': '𝔽', 'G': '𝔾', 'H': 'ℍ', 'I': '𝕀',
+    'J': '𝕁', 'K': '𝕂', 'L': '𝕃', 'M': '𝕄', 'N': 'ℕ', 'O': '𝕆', 'P': 'ℙ', 'Q': 'ℚ', 'R': 'ℝ',
+    'S': '𝕊', 'T': '𝕋', 'U': '𝕌', 'V': '𝕍', 'W': '𝕎', 'X': '𝕏', 'Y': '𝕐', 'Z': 'ℤ'
+}
+DOUBLE_STRUCK_UPPER_REVERSE = {v: k for k, v in DOUBLE_STRUCK_UPPER_MAP.items()}
+
 def to_unicode_bold(text):
     bold_chars = []
     for char in text:
         if 'a' <= char <= 'z':
-            bold_chars.append(chr(0x1D586 + ord(char) - ord('a')))
-        elif 'A' <= char <= 'Z':
-            bold_chars.append(chr(0x1D56C + ord(char) - ord('A')))
+            bold_chars.append(chr(0x1D552 + ord(char) - ord('a')))
+        elif char in DOUBLE_STRUCK_UPPER_MAP:
+            bold_chars.append(DOUBLE_STRUCK_UPPER_MAP[char])
         elif '0' <= char <= '9':
-            bold_chars.append(chr(0x1D7EC + ord(char) - ord('0')))
+            bold_chars.append(chr(0x1D7D8 + ord(char) - ord('0')))
         else:
             bold_chars.append(char)
     return ''.join(bold_chars)
@@ -317,12 +324,16 @@ def strip_unicode_bold(text):
     plain_chars = []
     for char in text:
         cp = ord(char)
-        if 0x1D586 <= cp <= 0x1D59F:
+        if 0x1D552 <= cp <= 0x1D56B:
+            plain_chars.append(chr(ord('a') + cp - 0x1D552))
+        elif char in DOUBLE_STRUCK_UPPER_REVERSE:
+            plain_chars.append(DOUBLE_STRUCK_UPPER_REVERSE[char])
+        elif 0x1D7D8 <= cp <= 0x1D7E1:
+            plain_chars.append(chr(ord('0') + cp - 0x1D7D8))
+        elif 0x1D586 <= cp <= 0x1D59F:
             plain_chars.append(chr(ord('a') + cp - 0x1D586))
         elif 0x1D56C <= cp <= 0x1D585:
             plain_chars.append(chr(ord('A') + cp - 0x1D56C))
-        elif 0x1D7EC <= cp <= 0x1D7F5:
-            plain_chars.append(chr(ord('0') + cp - 0x1D7EC))
         elif 0x1D5EE <= cp <= 0x1D607:
             plain_chars.append(chr(ord('a') + cp - 0x1D5EE))
         elif 0x1D5D4 <= cp <= 0x1D5ED:
