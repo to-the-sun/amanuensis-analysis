@@ -648,6 +648,13 @@ class BaseTranscriptionBot(discord.Client):
 
             self.save_histogram()
 
+    async def _on_startup_analysis(self):
+        try:
+            await self.wait_until_ready()
+            await self.initialize_world_channel_analysis()
+        except Exception as e:
+            logger.error(f"Error in startup world channel analysis task: {e}")
+
     async def setup_hook(self):
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
         async def purge(interaction: discord.Interaction):
@@ -659,6 +666,7 @@ class BaseTranscriptionBot(discord.Client):
 
         await self.tree.sync()
         logger.info("Base transcription bot slash commands synced.")
+        self.loop.create_task(self._on_startup_analysis())
 
     def find_world_channel(self):
         for guild in self.guilds:
