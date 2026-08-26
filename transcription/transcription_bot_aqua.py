@@ -376,6 +376,7 @@ try:
             logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
             for guild in self.guilds:
                 await self.connect_to_world(guild)
+            await self.initialize_world_channel_analysis()
 
     if __name__ == '__main__':
         script_dir = os.path.dirname(os.path.abspath(__file__))

@@ -39,6 +39,7 @@ class DesktopTranscriberBot(analyze_transcript.BaseTranscriptionBot):
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         self.find_world_channel()
+        await self.initialize_world_channel_analysis()
 
         self.recording_active = True
         self.recording_thread = threading.Thread(target=self.run_desktop_audio_capture, daemon=True)
