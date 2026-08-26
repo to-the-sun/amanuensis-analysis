@@ -296,9 +296,33 @@ def get_line_syllables_and_vowels(line):
                 'syllable': spelling_syls[i],
                 'vowel': vowels[i],
                 'word': w,
-                'word_idx': word_idx
+                'word_idx': word_idx,
+                'syl_idx': len(line_syls)
             })
     return line_syls
+
+def get_chain_rhyme_pairs(chain):
+    pairs = set()
+    num_lines = len(chain)
+    if num_lines < 2:
+        return pairs
+    for a in range(num_lines):
+        for b in range(a + 1, num_lines):
+            l_a = chain[a]
+            l_b = chain[b]
+            for k in range(min(len(l_a), len(l_b))):
+                s_a = l_a[k]
+                s_b = l_b[k]
+                v_a = s_a.get('vowel')
+                v_b = s_b.get('vowel')
+                w_a = s_a.get('word', '').strip().lower()
+                w_b = s_b.get('word', '').strip().lower()
+                if v_a and v_a == v_b and w_a != w_b:
+                    id_a = id(s_a)
+                    id_b = id(s_b)
+                    pair_key = tuple(sorted([id_a, id_b]))
+                    pairs.add(pair_key)
+    return pairs
 
 def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
     if not syllables_list:
@@ -322,42 +346,6 @@ def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
             parts.append(syl_text)
     return "".join(parts).strip()
 
-def is_chain_contained(c_target, c_other):
-    target_full = re.sub(r'\s+', ' ', ' '.join(c_target)).strip().lower()
-    other_full = re.sub(r'\s+', ' ', ' '.join(c_other)).strip().lower()
-
-    if target_full in other_full and len(other_full) > len(target_full):
-        return True
-
-    if len(c_target) == len(c_other):
-        all_lines_contained = True
-        strictly_smaller = False
-        for l_t, l_o in zip(c_target, c_other):
-            lt_norm = re.sub(r'\s+', ' ', l_t).strip().lower()
-            lo_norm = re.sub(r'\s+', ' ', l_o).strip().lower()
-            if lt_norm not in lo_norm:
-                all_lines_contained = False
-                break
-            if len(lt_norm) < len(lo_norm):
-                strictly_smaller = True
-        if all_lines_contained and strictly_smaller:
-            return True
-
-    if len(c_target) < len(c_other):
-        n_t = len(c_target)
-        n_o = len(c_other)
-        for start in range(n_o - n_t + 1):
-            match = True
-            for k in range(n_t):
-                lt_norm = re.sub(r'\s+', ' ', c_target[k]).strip().lower()
-                lo_norm = re.sub(r'\s+', ' ', c_other[start + k]).strip().lower()
-                if lt_norm not in lo_norm:
-                    match = False
-                    break
-            if match:
-                return True
-
-    return False
 
 def cuts_word_in_half(selected_syls, full_line_syls):
     selected_counts = collections.Counter()
@@ -819,18 +807,20 @@ class BaseTranscriptionBot(discord.Client):
                 filtered_chains = []
                 for i, c1 in enumerate(merged_syl_chains):
                     c1_plain = [reconstruct_line_from_syllables(l) for l in c1]
+                    rp1 = get_chain_rhyme_pairs(c1)
                     contained = False
                     for j, c2 in enumerate(merged_syl_chains):
                         if i == j:
                             continue
                         c2_plain = [reconstruct_line_from_syllables(l) for l in c2]
+                        rp2 = get_chain_rhyme_pairs(c2)
                         text1 = re.sub(r'\s+', ' ', ' '.join(c1_plain)).strip().lower()
                         text2 = re.sub(r'\s+', ' ', ' '.join(c2_plain)).strip().lower()
                         if text1 == text2:
                             if j < i:
                                 contained = True
                                 break
-                        elif is_chain_contained(c1_plain, c2_plain):
+                        elif rp1.issubset(rp2) and len(rp2) > len(rp1):
                             contained = True
                             break
                     if not contained:

@@ -177,3 +177,15 @@ To add more custom words, simply append them to the `transcription/ipa_overrides
 }
 ```
 All keys must be strictly lowercase.
+
+---
+
+## 6. Syllable Rhyme Pair Subset Filtering in Poem Generation
+
+During poem generation, long utterances containing multiple rhyming pairs (e.g. `"A bar that plays at zero and one of the four tracks should have two minutes worth of bars that"`) may generate multiple candidate syllable chains for the same distance $N$.
+
+To prevent generating redundant partial couplets (where each individual rhyming pair is printed as its own separate couplet), the poem generation engine in `analyze_transcript.py` performs **rhyme pair containment filtering**:
+- Each syllable dictionary is assigned a unique `syl_idx`.
+- A helper function `get_chain_rhyme_pairs(chain)` computes the set of all unique rhyming syllable pairs `(syl_idx_1, syl_idx_2)` present within a candidate chain.
+- If chain $C_1$'s set of rhyming pairs is a strict subset of chain $C_2$'s set of rhyming pairs (`rp1.issubset(rp2) and len(rp2) > len(rp1)`), $C_1$ is filtered out.
+- As a result, only the comprehensive couplet incorporating all rhyming pairs is preserved in the final poem output.
