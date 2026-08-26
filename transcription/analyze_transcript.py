@@ -318,8 +318,8 @@ def get_chain_rhyme_pairs(chain):
                 w_a = s_a.get('word', '').strip().lower()
                 w_b = s_b.get('word', '').strip().lower()
                 if v_a and v_a == v_b and w_a != w_b:
-                    id_a = s_a.get('syl_idx', id(s_a))
-                    id_b = s_b.get('syl_idx', id(s_b))
+                    id_a = id(s_a)
+                    id_b = id(s_b)
                     pair_key = tuple(sorted([id_a, id_b]))
                     pairs.add(pair_key)
     return pairs
@@ -346,42 +346,6 @@ def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
             parts.append(syl_text)
     return "".join(parts).strip()
 
-def is_chain_contained(c_target, c_other):
-    target_full = re.sub(r'\s+', ' ', ' '.join(c_target)).strip().lower()
-    other_full = re.sub(r'\s+', ' ', ' '.join(c_other)).strip().lower()
-
-    if target_full in other_full and len(other_full) > len(target_full):
-        return True
-
-    if len(c_target) == len(c_other):
-        all_lines_contained = True
-        strictly_smaller = False
-        for l_t, l_o in zip(c_target, c_other):
-            lt_norm = re.sub(r'\s+', ' ', l_t).strip().lower()
-            lo_norm = re.sub(r'\s+', ' ', l_o).strip().lower()
-            if lt_norm not in lo_norm:
-                all_lines_contained = False
-                break
-            if len(lt_norm) < len(lo_norm):
-                strictly_smaller = True
-        if all_lines_contained and strictly_smaller:
-            return True
-
-    if len(c_target) < len(c_other):
-        n_t = len(c_target)
-        n_o = len(c_other)
-        for start in range(n_o - n_t + 1):
-            match = True
-            for k in range(n_t):
-                lt_norm = re.sub(r'\s+', ' ', c_target[k]).strip().lower()
-                lo_norm = re.sub(r'\s+', ' ', c_other[start + k]).strip().lower()
-                if lt_norm not in lo_norm:
-                    match = False
-                    break
-            if match:
-                return True
-
-    return False
 
 def cuts_word_in_half(selected_syls, full_line_syls):
     selected_counts = collections.Counter()
@@ -857,9 +821,6 @@ class BaseTranscriptionBot(discord.Client):
                                 contained = True
                                 break
                         elif rp1.issubset(rp2) and len(rp2) > len(rp1):
-                            contained = True
-                            break
-                        elif is_chain_contained(c1_plain, c2_plain):
                             contained = True
                             break
                     if not contained:
