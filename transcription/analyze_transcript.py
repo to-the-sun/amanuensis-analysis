@@ -593,6 +593,68 @@ class BaseTranscriptionBot(discord.Client):
         self.text_channel_id = None
         self._executor = ThreadPoolExecutor(max_workers=1)
 
+        self.collected_lines_syls = []
+        self.all_repetitions = []
+        self.histogram = collections.Counter()
+        self.analysis_lock = threading.Lock()
+
+    def save_histogram(self):
+        serializable_histogram = {str(k): v for k, v in self.histogram.items()}
+        vowel_histogram_path = os.path.join(_script_dir, "vowel_histogram.json")
+        try:
+            with open(vowel_histogram_path, "w") as f:
+                json.dump(serializable_histogram, f, indent=4)
+            logger.info(f"Vowel histogram saved to {vowel_histogram_path}")
+        except Exception as e:
+            logger.error(f"Failed to save vowel histogram: {e}")
+
+    def analyze_line_syls(self, line_syls):
+        if not line_syls:
+            return
+        with self.analysis_lock:
+            line_idx = len(self.collected_lines_syls)
+            self.collected_lines_syls.append(line_syls)
+
+            L = len(line_syls)
+            for i in range(L - 1, -1, -1):
+                v = line_syls[i]['vowel']
+                if not v:
+                    continue
+                for j in range(i - 1, -1, -1):
+                    if line_syls[j]['vowel'] == v:
+                        if line_syls[i]['word'].strip().lower() == line_syls[j]['word'].strip().lower():
+                            continue
+                        distance = i - j
+
+                        l2_syls = line_syls[j + 1 : i + 1]
+
+                        available = line_syls[0 : i + 1]
+                        if len(available) < 2 * distance:
+                            continue
+                        l1_indices = [j - k for k in range(distance - 1, -1, -1)]
+                        l1_syls = [available[idx] for idx in l1_indices]
+
+                        if cuts_word_in_half(l1_syls, line_syls) or cuts_word_in_half(l2_syls, line_syls):
+                            continue
+
+                        self.histogram[distance] += 1
+                        self.all_repetitions.append({
+                            'line_index': line_idx,
+                            'start_idx': j,
+                            'end_idx': i,
+                            'distance': distance,
+                            'vowel': v
+                        })
+
+            self.save_histogram()
+
+    async def _on_startup_analysis(self):
+        try:
+            await self.wait_until_ready()
+            await self.initialize_world_channel_analysis()
+        except Exception as e:
+            logger.error(f"Error in startup world channel analysis task: {e}")
+
     async def setup_hook(self):
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
         async def purge(interaction: discord.Interaction):
@@ -604,6 +666,7 @@ class BaseTranscriptionBot(discord.Client):
 
         await self.tree.sync()
         logger.info("Base transcription bot slash commands synced.")
+        self.loop.create_task(self._on_startup_analysis())
 
     def find_world_channel(self):
         for guild in self.guilds:
@@ -614,6 +677,55 @@ class BaseTranscriptionBot(discord.Client):
                 return world_channel
         logger.warning("Could not find any text channel named 'world' in connected guilds.")
         return None
+
+    async def initialize_world_channel_analysis(self):
+        channel = self.find_world_channel()
+        if not channel:
+            logger.warning("Cannot initialize world channel analysis: '#world' channel not found.")
+            return
+
+        logger.info("Initializing world channel analysis from history...")
+        messages = []
+        async for msg in channel.history(limit=None, oldest_first=True):
+            messages.append(msg)
+
+        for msg in messages:
+            lines = msg.content.splitlines()
+            new_lines = []
+            changed = False
+
+            for line in lines:
+                if line.strip().startswith('/'):
+                    new_lines.append(line)
+                    continue
+
+                prefix, cleaned_content = _get_cleaned_content(line)
+                if not cleaned_content or cleaned_content.startswith('/'):
+                    new_lines.append(line)
+                    continue
+
+                line_syls = get_line_syllables_and_vowels(cleaned_content)
+                total_syls = len(line_syls)
+                new_line = f"{prefix}{cleaned_content} ({total_syls})"
+
+                if new_line != line:
+                    changed = True
+                new_lines.append(new_line)
+
+                if line_syls:
+                    self.analyze_line_syls(line_syls)
+
+            if changed and msg.author == self.user:
+                edited_content = "\n".join(new_lines)
+                if len(edited_content) > 2000:
+                    edited_content = edited_content[:1997] + "..."
+                try:
+                    await msg.edit(content=edited_content)
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Failed to edit message during startup analysis initialization: {e}")
+
+        logger.info(f"World channel analysis initialized. Analyzed {len(self.collected_lines_syls)} total lines.")
 
     async def on_message(self, message):
         if message.channel and hasattr(message.channel, "name") and message.channel.name == "world":
@@ -636,6 +748,13 @@ class BaseTranscriptionBot(discord.Client):
                 if num_deleted < 100:
                     break
                 await asyncio.sleep(1.5)
+
+            with self.analysis_lock:
+                self.collected_lines_syls = []
+                self.all_repetitions = []
+                self.histogram = collections.Counter()
+                self.save_histogram()
+
             logger.info(f"Successfully completed purge of {interaction.channel.name}. Total deleted: {total_deleted}")
             await interaction.followup.send(f"Successfully purged {total_deleted} messages.")
         except discord.Forbidden:
@@ -652,97 +771,15 @@ class BaseTranscriptionBot(discord.Client):
 
         await interaction.response.defer()
         try:
-            logger.info(f"Analyze command (syllables + poem) received in {interaction.channel.name} from {interaction.user}")
-            await interaction.followup.send("Starting syllable analysis and poem generation...")
+            logger.info(f"Analyze command (poem generation) received in {interaction.channel.name} from {interaction.user}")
+            await interaction.followup.send("Starting poem generation from accumulated syllable analysis...")
 
-            collected_lines_syls = []
-            all_repetitions = []
-            histogram = collections.Counter()
+            with self.analysis_lock:
+                collected_lines_syls = list(self.collected_lines_syls)
+                all_repetitions = list(self.all_repetitions)
+                histogram = collections.Counter(self.histogram)
 
-            bot_messages = []
-            async for msg in interaction.channel.history(limit=None):
-                if msg.author == self.user:
-                    bot_messages.append(msg)
-            bot_messages.reverse()
-
-            for msg in bot_messages:
-                lines = msg.content.splitlines()
-                new_lines = []
-                changed = False
-
-                for line in lines:
-                    if line.strip().startswith('/'):
-                        new_lines.append(line)
-                        continue
-
-                    prefix, cleaned_content = _get_cleaned_content(line)
-                    if not cleaned_content:
-                        new_lines.append(line)
-                        continue
-
-                    if cleaned_content.startswith('/'):
-                        new_lines.append(line)
-                        continue
-
-                    line_syls = get_line_syllables_and_vowels(cleaned_content)
-                    total_syls = len(line_syls)
-
-                    new_line = f"{prefix}{cleaned_content} ({total_syls})"
-
-                    if new_line != line:
-                        changed = True
-                    new_lines.append(new_line)
-
-                    if line_syls:
-                        line_idx = len(collected_lines_syls)
-                        collected_lines_syls.append(line_syls)
-
-                        L = len(line_syls)
-                        for i in range(L - 1, -1, -1):
-                            v = line_syls[i]['vowel']
-                            if not v:
-                                continue
-                            for j in range(i - 1, -1, -1):
-                                if line_syls[j]['vowel'] == v:
-                                    if line_syls[i]['word'].strip().lower() == line_syls[j]['word'].strip().lower():
-                                        continue
-                                    distance = i - j
-
-                                    l2_syls = line_syls[j + 1 : i + 1]
-
-                                    available = line_syls[0 : i + 1]
-                                    if len(available) < 2 * distance:
-                                        continue
-                                    l1_indices = [j - k for k in range(distance - 1, -1, -1)]
-                                    l1_syls = [available[idx] for idx in l1_indices]
-
-                                    if cuts_word_in_half(l1_syls, line_syls) or cuts_word_in_half(l2_syls, line_syls):
-                                        continue
-
-                                    histogram[distance] += 1
-                                    all_repetitions.append({
-                                        'line_index': line_idx,
-                                        'start_idx': j,
-                                        'end_idx': i,
-                                        'distance': distance,
-                                        'vowel': v
-                                    })
-
-                if changed:
-                    edited_content = "\n".join(new_lines)
-                    if len(edited_content) > 2000:
-                        edited_content = edited_content[:1997] + "..."
-                    await msg.edit(content=edited_content)
-                    await asyncio.sleep(0.5)
-
-            serializable_histogram = {str(k): v for k, v in histogram.items()}
-            vowel_histogram_path = os.path.join(_script_dir, "vowel_histogram.json")
-            try:
-                with open(vowel_histogram_path, "w") as f:
-                    json.dump(serializable_histogram, f, indent=4)
-                logger.info(f"Vowel histogram saved to {vowel_histogram_path}")
-            except Exception as e:
-                logger.error(f"Failed to save vowel histogram: {e}")
+            self.save_histogram()
 
             if collected_lines_syls:
                 await interaction.followup.send("Generating poem from rhyming lines using backward syllable histogram analysis...")
@@ -903,8 +940,18 @@ class BaseTranscriptionBot(discord.Client):
             try:
                 processed_lines = []
                 for l in text.splitlines():
-                    processed_lines.append(l)
-                    ipa_line = get_ipa_syllables(l)
+                    clean_line = l.strip()
+                    if not clean_line:
+                        continue
+                    line_syls = get_line_syllables_and_vowels(clean_line)
+                    total_syls = len(line_syls)
+                    tagged_line = f"{clean_line} ({total_syls})"
+                    processed_lines.append(tagged_line)
+
+                    if line_syls:
+                        self.analyze_line_syls(line_syls)
+
+                    ipa_line = get_ipa_syllables(clean_line)
                     if ipa_line:
                         processed_lines.append(ipa_line)
 
