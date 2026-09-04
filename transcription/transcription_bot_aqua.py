@@ -182,7 +182,7 @@ try:
             self.to_be_sent_buffers = collections.defaultdict(bytearray)
             self.accumulated_start_times = collections.defaultdict(lambda: None)
 
-            self.processing_task = self.bot.loop.create_task(self._process_buffers())
+            self.processing_task = asyncio.create_task(self._process_buffers())
 
         def cleanup(self):
             self.processing_task.cancel()
@@ -319,7 +319,7 @@ try:
     class AquaBot(analyze_transcript.BaseTranscriptionBot):
         async def setup_hook(self):
             await super().setup_hook()
-            self.loop.create_task(self.health_check_loop())
+            asyncio.create_task(self.health_check_loop())
             logger.info("AquaBot health check loop started.")
 
         async def connect_to_world(self, guild):

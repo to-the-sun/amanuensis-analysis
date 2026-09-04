@@ -483,6 +483,17 @@ def _get_cleaned_content(line):
     cleaned_content = re.sub(r'\s*\(\d+\)$', '', content).strip()
     return prefix, cleaned_content
 
+def clean_speaker_name(speaker):
+    if not speaker:
+        return ""
+    if hasattr(speaker, "display_name") and speaker.display_name:
+        name_str = str(speaker.display_name)
+    elif hasattr(speaker, "name") and speaker.name:
+        name_str = str(speaker.name)
+    else:
+        name_str = str(speaker)
+    return re.sub(r'#\d+$', '', name_str).strip()
+
 def poetic_parse(text):
     text = re.sub(r'(?<=[A-Z])\.', '', text)
     parts = re.split(r'([.!?])', text)
@@ -592,6 +603,7 @@ class BaseTranscriptionBot(discord.Client):
         self.last_world_message_time = time.time()
         self.text_channel_id = None
         self._executor = ThreadPoolExecutor(max_workers=1)
+        self.dev_mode = True
 
         self.collected_lines_syls = []
         self.all_repetitions = []
@@ -648,14 +660,32 @@ class BaseTranscriptionBot(discord.Client):
 
             self.save_histogram()
 
+    async def sync_guild_commands(self):
+        try:
+            synced_global = await self.tree.sync()
+            logger.info(f"Synced {len(synced_global)} global slash command(s).")
+        except Exception as e:
+            logger.error(f"Failed to sync global slash commands: {e}")
+
+        for guild in self.guilds:
+            try:
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                logger.info(f"Synced {len(synced)} slash command(s) to guild '{guild.name}' ({guild.id})")
+            except Exception as e:
+                logger.error(f"Failed to sync slash commands to guild '{guild.name}': {e}")
+
     async def _on_startup_analysis(self):
         try:
             await self.wait_until_ready()
+            await self.sync_guild_commands()
             await self.initialize_world_channel_analysis()
         except Exception as e:
             logger.error(f"Error in startup world channel analysis task: {e}")
 
     async def setup_hook(self):
+        self.loop = asyncio.get_running_loop()
+
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
         async def purge(interaction: discord.Interaction):
             await self.purge_logic(interaction)
@@ -664,9 +694,22 @@ class BaseTranscriptionBot(discord.Client):
         async def analyze(interaction: discord.Interaction):
             await self.analyze_logic(interaction)
 
-        await self.tree.sync()
-        logger.info("Base transcription bot slash commands synced.")
-        self.loop.create_task(self._on_startup_analysis())
+        @self.tree.command(name="debug", description="Toggle verbose debug mode for channel posts")
+        async def debug(interaction: discord.Interaction):
+            await self.debug_logic(interaction)
+
+        try:
+            await self.tree.sync()
+            logger.info("Base transcription bot slash commands synced globally.")
+        except Exception as e:
+            logger.warning(f"Global slash command sync in setup_hook deferred to ready task: {e}")
+        asyncio.create_task(self._on_startup_analysis())
+
+    async def debug_logic(self, interaction: discord.Interaction):
+        self.dev_mode = not self.dev_mode
+        status = "ON" if self.dev_mode else "OFF"
+        logger.info(f"Debug mode toggled to {status} by {interaction.user}")
+        await interaction.response.send_message(f"Verbose debug mode is now **{status}**.", ephemeral=True)
 
     def find_world_channel(self):
         for guild in self.guilds:
@@ -928,6 +971,7 @@ class BaseTranscriptionBot(discord.Client):
             await interaction.followup.send(f"Error during analyze: {e}")
 
     async def post_transcription_to_channel(self, text, speaker=None):
+        clean_speaker = clean_speaker_name(speaker)
         if not self.text_channel_id:
             channel = self.find_world_channel()
             if not channel:
@@ -944,18 +988,22 @@ class BaseTranscriptionBot(discord.Client):
                     if not clean_line:
                         continue
                     line_syls = get_line_syllables_and_vowels(clean_line)
-                    total_syls = len(line_syls)
-                    tagged_line = f"{clean_line} ({total_syls})"
-                    processed_lines.append(tagged_line)
 
                     if line_syls:
                         self.analyze_line_syls(line_syls)
 
-                    ipa_line = get_ipa_syllables(clean_line)
-                    if ipa_line:
-                        processed_lines.append(ipa_line)
+                    if self.dev_mode:
+                        total_syls = len(line_syls)
+                        tagged_line = f"{clean_line} ({total_syls})"
+                        processed_lines.append(tagged_line)
 
-                speaker_prefix = f"**{speaker}**: " if speaker else ""
+                        ipa_line = get_ipa_syllables(clean_line)
+                        if ipa_line:
+                            processed_lines.append(ipa_line)
+                    else:
+                        processed_lines.append(clean_line)
+
+                speaker_prefix = f"**{clean_speaker}**: " if clean_speaker else ""
                 prefix_len = len(speaker_prefix)
 
                 current_chunk = []
@@ -976,7 +1024,7 @@ class BaseTranscriptionBot(discord.Client):
                 if current_chunk:
                     chunk_text = "\n".join(current_chunk)
                     await channel.send(f"{speaker_prefix}{chunk_text}")
-                logger.info(f"Transcription posted to #world channel (speaker={speaker}).")
+                logger.info(f"Transcription posted to #world channel (speaker={clean_speaker}, dev_mode={self.dev_mode}).")
             except Exception as e:
                 logger.error(f"Failed to send transcription message: {e}")
         else:
@@ -987,7 +1035,8 @@ class BaseTranscriptionBot(discord.Client):
             raw_text = transcribe_audio(audio_data, self.aqua_key, script_dir=_script_dir)
             if raw_text:
                 clean_text = poetic_parse(raw_text)
-                logger.info(f"TRANSCRIPTION SUCCESS [{speaker}]: {clean_text}")
+                clean_speaker = clean_speaker_name(speaker)
+                logger.info(f"TRANSCRIPTION SUCCESS [{clean_speaker}]: {clean_text}")
                 asyncio.run_coroutine_threadsafe(
                     self.post_transcription_to_channel(clean_text, speaker=speaker),
                     self.loop
@@ -1003,5 +1052,6 @@ class BaseTranscriptionBot(discord.Client):
         raw_text = await loop.run_in_executor(self._executor, transcribe_audio, audio_data, self.aqua_key, _script_dir)
         if raw_text:
             clean_text = poetic_parse(raw_text)
-            logger.info(f"TRANSCRIPTION SUCCESS [{speaker}]: {clean_text}")
+            clean_speaker = clean_speaker_name(speaker)
+            logger.info(f"TRANSCRIPTION SUCCESS [{clean_speaker}]: {clean_text}")
             await self.post_transcription_to_channel(clean_text, speaker=speaker)

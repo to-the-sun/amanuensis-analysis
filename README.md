@@ -107,6 +107,7 @@ python3 transcription/transcription_bot_aqua.py
         *   Detects rhymes using the `SoundsLike` library (vowel-class homophones).
         *   Generates a poem by grouping lines by rhyme sound, selecting the syllable count with the highest weighted score (syllables * frequency).
     *   `/purge`: Clears the transcription channel history.
+    *   `/debug`: Toggles verbose debug mode on and off for channel posts. When ON, posts include line syllable counts and IPA transcriptions; when OFF, posts include only spoken lines.
 *   **Stability:** Includes a health-check loop that monitors decryption failures and automatically reconnects the voice client if the stream stalls.
 
 ---
