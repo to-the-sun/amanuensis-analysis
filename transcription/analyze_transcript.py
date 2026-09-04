@@ -660,9 +660,25 @@ class BaseTranscriptionBot(discord.Client):
 
             self.save_histogram()
 
+    async def sync_guild_commands(self):
+        try:
+            synced_global = await self.tree.sync()
+            logger.info(f"Synced {len(synced_global)} global slash command(s).")
+        except Exception as e:
+            logger.error(f"Failed to sync global slash commands: {e}")
+
+        for guild in self.guilds:
+            try:
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                logger.info(f"Synced {len(synced)} slash command(s) to guild '{guild.name}' ({guild.id})")
+            except Exception as e:
+                logger.error(f"Failed to sync slash commands to guild '{guild.name}': {e}")
+
     async def _on_startup_analysis(self):
         try:
             await self.wait_until_ready()
+            await self.sync_guild_commands()
             await self.initialize_world_channel_analysis()
         except Exception as e:
             logger.error(f"Error in startup world channel analysis task: {e}")
@@ -680,9 +696,12 @@ class BaseTranscriptionBot(discord.Client):
         async def debug(interaction: discord.Interaction):
             await self.debug_logic(interaction)
 
-        await self.tree.sync()
-        logger.info("Base transcription bot slash commands synced.")
-        self.loop.create_task(self._on_startup_analysis())
+        try:
+            await self.tree.sync()
+            logger.info("Base transcription bot slash commands synced globally.")
+        except Exception as e:
+            logger.warning(f"Global slash command sync in setup_hook deferred to ready task: {e}")
+        asyncio.create_task(self._on_startup_analysis())
 
     async def debug_logic(self, interaction: discord.Interaction):
         self.dev_mode = not self.dev_mode
