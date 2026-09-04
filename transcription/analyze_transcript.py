@@ -684,6 +684,8 @@ class BaseTranscriptionBot(discord.Client):
             logger.error(f"Error in startup world channel analysis task: {e}")
 
     async def setup_hook(self):
+        self.loop = asyncio.get_running_loop()
+
         @self.tree.command(name="purge", description="Purge all messages in the world channel")
         async def purge(interaction: discord.Interaction):
             await self.purge_logic(interaction)
