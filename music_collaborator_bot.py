@@ -5,6 +5,8 @@ import asyncio
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+import traceback
+import sys
 import aiohttp
 import discord
 from bs4 import BeautifulSoup
@@ -311,10 +313,22 @@ def main():
     token = config.get('token')
     if not token:
         logger.error("No Discord bot token supplied in credentials.json. Please add 'token' to credentials.json.")
+        print("\n[ERROR] No Discord bot token found in credentials.json.")
+        print("Please ensure credentials.json exists and contains a valid 'token' field.")
         return
 
     client = MusicCollaboratorClient(config=config)
     client.run(token)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.exception("An unhandled exception occurred:")
+        traceback.print_exc()
+    finally:
+        print("\nProgram finished or encountered an error.")
+        try:
+            input("Press Enter to exit...")
+        except (EOFError, KeyboardInterrupt):
+            pass
