@@ -446,6 +446,12 @@ def get_phrase_vowels(phrase):
                     vowels.append(vowel_sound)
     return vowels
 
+def clean_speaker_name(speaker):
+    if speaker is None:
+        return None
+    name_str = str(speaker)
+    return re.sub(r'#\d+$', '', name_str)
+
 def truncate_line_beginning(line_text, target_syls):
     words = line_text.split()
     if not words:
@@ -469,7 +475,8 @@ def _get_cleaned_content(line):
     content = line
     bold_match = re.match(r'^(\*\*([^*]+)\*\*\s*:\s*)(.*)', line)
     if bold_match:
-        prefix = bold_match.group(1)
+        speaker_name = clean_speaker_name(bold_match.group(2))
+        prefix = f"**{speaker_name}**: "
         content = bold_match.group(3)
     else:
         if not line.startswith("http://") and not line.startswith("https://"):
@@ -477,7 +484,8 @@ def _get_cleaned_content(line):
             if plain_match:
                 name_part = plain_match.group(1)
                 if len(name_part) < 40 and len(name_part.split()) <= 5:
-                    prefix = name_part + ": "
+                    speaker_name = clean_speaker_name(name_part)
+                    prefix = speaker_name + ": "
                     content = plain_match.group(2)
 
     cleaned_content = re.sub(r'\s*\(\d+\)$', '', content).strip()
@@ -593,6 +601,7 @@ class BaseTranscriptionBot(discord.Client):
         self.text_channel_id = None
         self._executor = ThreadPoolExecutor(max_workers=1)
 
+        self.debug_mode = False
         self.collected_lines_syls = []
         self.all_repetitions = []
         self.histogram = collections.Counter()
@@ -664,6 +673,10 @@ class BaseTranscriptionBot(discord.Client):
         async def analyze(interaction: discord.Interaction):
             await self.analyze_logic(interaction)
 
+        @self.tree.command(name="debug", description="Toggle verbose debug mode for syllable counts and IPA transcriptions")
+        async def debug(interaction: discord.Interaction):
+            await self.debug_logic(interaction)
+
         await self.tree.sync()
         logger.info("Base transcription bot slash commands synced.")
         self.loop.create_task(self._on_startup_analysis())
@@ -706,7 +719,10 @@ class BaseTranscriptionBot(discord.Client):
 
                 line_syls = get_line_syllables_and_vowels(cleaned_content)
                 total_syls = len(line_syls)
-                new_line = f"{prefix}{cleaned_content} ({total_syls})"
+                if self.debug_mode:
+                    new_line = f"{prefix}{cleaned_content} ({total_syls})"
+                else:
+                    new_line = f"{prefix}{cleaned_content}"
 
                 if new_line != line:
                     changed = True
@@ -730,6 +746,12 @@ class BaseTranscriptionBot(discord.Client):
     async def on_message(self, message):
         if message.channel and hasattr(message.channel, "name") and message.channel.name == "world":
             self.last_world_message_time = time.time()
+
+    async def debug_logic(self, interaction: discord.Interaction):
+        self.debug_mode = not self.debug_mode
+        status = "enabled" if self.debug_mode else "disabled"
+        logger.info(f"Debug mode toggled to {self.debug_mode} by {interaction.user}")
+        await interaction.response.send_message(f"Debug mode is now **{status}**.", ephemeral=True)
 
     async def purge_logic(self, interaction: discord.Interaction):
         if not (isinstance(interaction.channel, discord.TextChannel) and interaction.channel.name == "world"):
@@ -928,6 +950,7 @@ class BaseTranscriptionBot(discord.Client):
             await interaction.followup.send(f"Error during analyze: {e}")
 
     async def post_transcription_to_channel(self, text, speaker=None):
+        speaker = clean_speaker_name(speaker)
         if not self.text_channel_id:
             channel = self.find_world_channel()
             if not channel:
@@ -945,15 +968,19 @@ class BaseTranscriptionBot(discord.Client):
                         continue
                     line_syls = get_line_syllables_and_vowels(clean_line)
                     total_syls = len(line_syls)
-                    tagged_line = f"{clean_line} ({total_syls})"
+                    if self.debug_mode:
+                        tagged_line = f"{clean_line} ({total_syls})"
+                    else:
+                        tagged_line = clean_line
                     processed_lines.append(tagged_line)
 
                     if line_syls:
                         self.analyze_line_syls(line_syls)
 
-                    ipa_line = get_ipa_syllables(clean_line)
-                    if ipa_line:
-                        processed_lines.append(ipa_line)
+                    if self.debug_mode:
+                        ipa_line = get_ipa_syllables(clean_line)
+                        if ipa_line:
+                            processed_lines.append(ipa_line)
 
                 speaker_prefix = f"**{speaker}**: " if speaker else ""
                 prefix_len = len(speaker_prefix)
@@ -984,6 +1011,7 @@ class BaseTranscriptionBot(discord.Client):
 
     def process_and_post_audio_sync(self, audio_data, speaker=None):
         try:
+            speaker = clean_speaker_name(speaker)
             raw_text = transcribe_audio(audio_data, self.aqua_key, script_dir=_script_dir)
             if raw_text:
                 clean_text = poetic_parse(raw_text)
@@ -1000,6 +1028,7 @@ class BaseTranscriptionBot(discord.Client):
 
     async def transcribe_and_post_async(self, audio_data, speaker=None):
         loop = asyncio.get_running_loop()
+        speaker = clean_speaker_name(speaker)
         raw_text = await loop.run_in_executor(self._executor, transcribe_audio, audio_data, self.aqua_key, _script_dir)
         if raw_text:
             clean_text = poetic_parse(raw_text)
