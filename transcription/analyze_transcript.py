@@ -925,9 +925,9 @@ class BaseTranscriptionBot(discord.Client):
 
                     try:
                         try:
-                            from transcription.jules_api import submit_to_jules
+                            from transcription.poem_llm import reorder_poem_file
                         except ImportError:
-                            from jules_api import submit_to_jules
+                            from poem_llm import reorder_poem_file
 
                         prompt = (
                             "reorder all of the lines in this text file so that the most grammatically "
@@ -937,7 +937,7 @@ class BaseTranscriptionBot(discord.Client):
 
                         loop = asyncio.get_running_loop()
                         reordered_file_path = await loop.run_in_executor(
-                            self._executor, submit_to_jules, unordered_file_path, prompt, ordered_file_path
+                            self._executor, reorder_poem_file, unordered_file_path, prompt, ordered_file_path
                         )
 
                         with open(reordered_file_path, "r", encoding="utf-8") as f:
@@ -945,9 +945,9 @@ class BaseTranscriptionBot(discord.Client):
 
                         if reordered_lines:
                             poem_lines = reordered_lines
-                            logger.info(f"Reordered poem lines updated via Jules API from {reordered_file_path}")
+                            logger.info(f"Reordered poem lines updated via poem LLM (Jyotiprakash4357/poem-llm-small) from {reordered_file_path}")
                     except Exception as e:
-                        logger.error(f"Failed to reorder poem lines via Jules API: {e}")
+                        logger.error(f"Failed to reorder poem lines via poem LLM: {e}")
 
                     response = "\n".join(poem_lines).strip()
                     if len(response) > 1800:

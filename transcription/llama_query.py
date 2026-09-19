@@ -17,10 +17,11 @@ def get_tokenizer():
 def get_pipeline():
     global _pipe
     if _pipe is None:
-        print(f"Loading model {MODEL_ID} on CPU...")
+        device = 0 if torch.cuda.is_available() else "cpu"
+        device_str = "GPU" if torch.cuda.is_available() else "CPU"
+        print(f"Loading model {MODEL_ID} on {device_str}...")
         start_time = time.time()
-        # Using float32 for maximum compatibility on CPU
-        _pipe = pipeline("text-generation", model=MODEL_ID, torch_dtype=torch.float32, device="cpu")
+        _pipe = pipeline("text-generation", model=MODEL_ID, torch_dtype=torch.float32, device=device)
         load_time = time.time() - start_time
         print(f"Model loaded in {load_time:.2f} seconds.")
     return _pipe
