@@ -766,13 +766,34 @@ class BaseTranscriptionBot(discord.Client):
 
     async def analyze_logic(self, interaction: discord.Interaction):
         if not (isinstance(interaction.channel, discord.TextChannel) and interaction.channel.name == "world"):
-            await interaction.response.send_message("This command can only be used in the 'world' channel.", ephemeral=True)
+            try:
+                await interaction.response.send_message("This command can only be used in the 'world' channel.", ephemeral=True)
+            except Exception:
+                pass
             return
 
-        await interaction.response.defer()
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception as e:
+            logger.warning(f"Could not defer interaction in analyze_logic: {e}")
+
+        async def send_msg(text):
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(text)
+                else:
+                    await interaction.response.send_message(text)
+            except Exception as ex:
+                logger.warning(f"Could not send response via interaction followup ({ex}), falling back to channel.send()")
+                try:
+                    await interaction.channel.send(text)
+                except Exception as ex2:
+                    logger.error(f"Failed to send response via channel: {ex2}")
+
         try:
             logger.info(f"Analyze command (poem generation) received in {interaction.channel.name} from {interaction.user}")
-            await interaction.followup.send("Starting poem generation from accumulated syllable analysis...")
+            await send_msg("Starting poem generation from accumulated syllable analysis...")
 
             with self.analysis_lock:
                 collected_lines_syls = list(self.collected_lines_syls)
@@ -782,14 +803,14 @@ class BaseTranscriptionBot(discord.Client):
             self.save_histogram()
 
             if collected_lines_syls:
-                await interaction.followup.send("Generating poem from rhyming lines using backward syllable histogram analysis...")
+                await send_msg("Generating poem from rhyming lines using backward syllable histogram analysis...")
 
                 best_distance = None
                 if histogram:
                     best_distance = max(histogram.keys(), key=lambda d: histogram[d] * d)
 
                 if not best_distance:
-                    await interaction.followup.send("Could not identify any repeating vowel sounds in the syllable slots.")
+                    await send_msg("Could not identify any repeating vowel sounds in the syllable slots.")
                     return
 
                 syl_pairs = []
@@ -955,13 +976,13 @@ class BaseTranscriptionBot(discord.Client):
 
                     await interaction.channel.send(f"**Poem Generated from Analysis (Best Distance: {best_distance}):**\n\n{response}")
                 else:
-                    await interaction.followup.send(f"Could not find enough repeating lines with distance {best_distance}.")
+                    await send_msg(f"Could not find enough repeating lines with distance {best_distance}.")
 
-            await interaction.followup.send("Syllable analysis and poem generation complete.")
+            await send_msg("Syllable analysis and poem generation complete.")
 
         except Exception as e:
             logger.exception(f"Error during analyze (syllables/poem) in {interaction.channel.name}: {e}")
-            await interaction.followup.send(f"Error during analyze: {e}")
+            await send_msg(f"Error during analyze: {e}")
 
     async def post_transcription_to_channel(self, text, speaker=None):
         if not self.text_channel_id:

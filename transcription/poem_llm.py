@@ -124,6 +124,12 @@ else:
 _model = None
 _tokenizer = None
 
+def _preload_model_background():
+    try:
+        get_tokenizer_and_model()
+    except Exception as e:
+        logger.warning(f"Background preloading of poem LLM encountered an issue: {e}")
+
 def get_tokenizer_and_model():
     """
     Lazily loads and caches the SentencePiece tokenizer and PyTorch GPT model on the target device.
@@ -150,6 +156,11 @@ def get_tokenizer_and_model():
     _model = model
     logger.info(f"Successfully loaded {REPO_ID} on {DEVICE}.")
     return _tokenizer, _model
+
+if POEM_LLM_AVAILABLE:
+    import threading
+    preload_thread = threading.Thread(target=_preload_model_background, daemon=True)
+    preload_thread.start()
 
 def score_line_intra(line: str) -> float:
     """
