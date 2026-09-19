@@ -913,13 +913,15 @@ class BaseTranscriptionBot(discord.Client):
                 poem_lines = filtered_poem_lines
 
                 if poem_lines:
-                    poem_file_path = os.path.join(_script_dir, "poem_lines.txt")
+                    unordered_file_path = os.path.join(_script_dir, "unordered_poem_lines.txt")
+                    ordered_file_path = os.path.join(_script_dir, "ordered_poem_lines.txt")
+
                     try:
-                        with open(poem_file_path, "w", encoding="utf-8") as f:
+                        with open(unordered_file_path, "w", encoding="utf-8") as f:
                             f.write("\n".join(poem_lines))
-                        logger.info(f"Saved accumulated poem lines to {poem_file_path}")
+                        logger.info(f"Saved accumulated unordered poem lines to {unordered_file_path}")
                     except Exception as e:
-                        logger.error(f"Failed to save poem lines to {poem_file_path}: {e}")
+                        logger.error(f"Failed to save unordered poem lines to {unordered_file_path}: {e}")
 
                     try:
                         try:
@@ -935,7 +937,7 @@ class BaseTranscriptionBot(discord.Client):
 
                         loop = asyncio.get_running_loop()
                         reordered_file_path = await loop.run_in_executor(
-                            self._executor, submit_to_jules, poem_file_path, prompt
+                            self._executor, submit_to_jules, unordered_file_path, prompt, ordered_file_path
                         )
 
                         with open(reordered_file_path, "r", encoding="utf-8") as f:

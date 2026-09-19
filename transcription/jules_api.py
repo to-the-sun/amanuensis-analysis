@@ -15,10 +15,11 @@ class JulesAPI:
         self.api_url = api_url or os.environ.get("JULES_API_URL")
         self.api_key = api_key or os.environ.get("JULES_API_KEY")
 
-    def submit_file_and_prompt(self, file_path: str, prompt: str) -> str:
+    def submit_file_and_prompt(self, file_path: str, prompt: str, output_file_path: str = None) -> str:
         """
         Submits a text file and prompt to Jules via the API.
-        The reordered text file is saved/written back to file_path and the path is returned.
+        The reordered text file is saved/written to output_file_path (or file_path if not specified),
+        leaving the original file intact when output_file_path is specified.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -60,7 +61,7 @@ class JulesAPI:
             logger.info("Processing line reordering locally via Jules API fallback...")
 
             def score_line_grammar(line):
-                # Simple grammatical score heuristic based on standard structure (capitalization, punctuation, word count)
+                # Grammatical score heuristic based on standard structure (capitalization, punctuation, word count)
                 score = 0
                 words = line.split()
                 if len(words) >= 3:
@@ -74,15 +75,16 @@ class JulesAPI:
             sorted_lines = sorted(lines, key=score_line_grammar, reverse=True)
             reordered_content = "\n".join(sorted_lines)
 
-        with open(file_path, "w", encoding="utf-8") as f:
+        target_path = output_file_path if output_file_path else file_path
+        with open(target_path, "w", encoding="utf-8") as f:
             f.write(reordered_content)
 
-        logger.info(f"Reordered text file submitted back and saved to {file_path}")
-        return file_path
+        logger.info(f"Reordered text file submitted back and saved to {target_path}")
+        return target_path
 
-def submit_to_jules(file_path: str, prompt: str, api_url=None, api_key=None) -> str:
+def submit_to_jules(file_path: str, prompt: str, output_file_path: str = None, api_url=None, api_key=None) -> str:
     """
     Convenience function to submit a file and prompt to Jules via the API.
     """
     client = JulesAPI(api_url=api_url, api_key=api_key)
-    return client.submit_file_and_prompt(file_path, prompt)
+    return client.submit_file_and_prompt(file_path, prompt, output_file_path=output_file_path)
