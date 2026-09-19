@@ -2,13 +2,20 @@ import os
 import io
 import re
 import logging
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-import sentencepiece as spm
-from huggingface_hub import hf_hub_download
 
 logger = logging.getLogger("poem_llm")
+
+# Try importing ML / PyTorch dependencies safely
+try:
+    import torch
+    import torch.nn as nn
+    from torch.nn import functional as F
+    import sentencepiece as spm
+    from huggingface_hub import hf_hub_download
+    POEM_LLM_AVAILABLE = True
+except ImportError as e:
+    POEM_LLM_AVAILABLE = False
+    logger.warning(f"Poem LLM dependencies not available ({e}). Falling back to rule-based line ranking.")
 
 # Model configuration for Jyotiprakash4357/poem-llm-small
 REPO_ID = "Jyotiprakash4357/poem-llm-small"
@@ -19,106 +26,112 @@ CONTEXT = 256
 BIAS = True
 DROPOUT = 0.0
 
-# GPU / CPU Device selection
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-if torch.cuda.is_available():
-    logger.info(f"Poem LLM utilizing GPU device: {torch.cuda.get_device_name(0)}")
+if POEM_LLM_AVAILABLE:
+    # GPU / CPU Device selection
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        logger.info(f"Poem LLM utilizing GPU device: {torch.cuda.get_device_name(0)}")
+    else:
+        logger.info("Poem LLM utilizing CPU device (CUDA unavailable)")
+
+    class Head(nn.Module):
+        def __init__(self, head_size):
+            super().__init__()
+            self.queries = nn.Linear(EMBED_SIZE, head_size, bias=BIAS)
+            self.keys = nn.Linear(EMBED_SIZE, head_size, bias=BIAS)
+            self.values = nn.Linear(EMBED_SIZE, head_size, bias=BIAS)
+            self.register_buffer('tril', torch.tril(torch.ones(CONTEXT, CONTEXT)))
+            self.dropout = nn.Dropout(DROPOUT)
+
+        def forward(self, x):
+            BS, SL, VS = x.shape
+            q = self.queries(x)
+            k = self.keys(x)
+            v = self.values(x)
+            attn_w = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5
+            attn_w = attn_w.masked_fill(self.tril[:SL, :SL] == 0, float('-inf'))
+            attn_w = F.softmax(attn_w, dim=-1)
+            attn_w = self.dropout(attn_w)
+            return attn_w @ v
+
+    class Multihead(nn.Module):
+        def __init__(self, n_heads, head_size):
+            super().__init__()
+            self.heads = nn.ModuleList([Head(head_size) for _ in range(n_heads)])
+            self.combine = nn.Linear(head_size * n_heads, EMBED_SIZE, bias=BIAS)
+            self.dropout = nn.Dropout(DROPOUT)
+
+        def forward(self, x):
+            x = torch.cat([head(x) for head in self.heads], dim=-1)
+            x = self.combine(x)
+            return self.dropout(x)
+
+    class ForwardLayer(nn.Module):
+        def __init__(self, embed_size):
+            super().__init__()
+            self.network = nn.Sequential(
+                nn.Linear(embed_size, 6 * embed_size, bias=BIAS),
+                nn.GELU(),
+                nn.Linear(6 * embed_size, embed_size, bias=BIAS),
+                nn.Dropout(DROPOUT)
+            )
+
+        def forward(self, x):
+            return self.network(x)
+
+    class Block(nn.Module):
+        def __init__(self, n_heads):
+            super().__init__()
+            head_size = EMBED_SIZE // n_heads
+            self.ma = Multihead(n_heads, head_size)
+            self.feed_forward = ForwardLayer(EMBED_SIZE)
+            self.ln1 = nn.LayerNorm(EMBED_SIZE)
+            self.ln2 = nn.LayerNorm(EMBED_SIZE)
+
+        def forward(self, x):
+            x = x + self.ma(self.ln1(x))
+            x = x + self.feed_forward(self.ln2(x))
+            return x
+
+    class GPT(nn.Module):
+        def __init__(self, vocab_size):
+            super().__init__()
+            self.vocab_size = vocab_size
+            self.embeddings = nn.Embedding(vocab_size, EMBED_SIZE)
+            self.positions = nn.Embedding(CONTEXT, EMBED_SIZE)
+            self.blocks = nn.Sequential(*[Block(N_HEADS) for _ in range(N_LAYERS)])
+            self.ln = nn.LayerNorm(EMBED_SIZE)
+            self.final_linear = nn.Linear(EMBED_SIZE, vocab_size, bias=BIAS)
+
+        def forward(self, input_ids, targets=None):
+            loss = None
+            BS, SL = input_ids.shape
+            emb = self.embeddings(input_ids)
+            pos = self.positions(torch.arange(SL, device=input_ids.device))
+            x = emb + pos
+            x = self.blocks(x)
+            x = self.ln(x)
+            logits = self.final_linear(x)
+            if targets is not None:
+                BS, SL, VS = logits.shape
+                logits = logits.view(BS * SL, VS)
+                targets = targets.view(BS * SL)
+                loss = F.cross_entropy(logits, targets)
+            return logits, loss
 else:
-    logger.info("Poem LLM utilizing CPU device (CUDA unavailable)")
+    DEVICE = None
 
 _model = None
 _tokenizer = None
-
-class Head(nn.Module):
-    def __init__(self, head_size):
-        super().__init__()
-        self.queries = nn.Linear(EMBED_SIZE, head_size, bias=BIAS)
-        self.keys = nn.Linear(EMBED_SIZE, head_size, bias=BIAS)
-        self.values = nn.Linear(EMBED_SIZE, head_size, bias=BIAS)
-        self.register_buffer('tril', torch.tril(torch.ones(CONTEXT, CONTEXT)))
-        self.dropout = nn.Dropout(DROPOUT)
-
-    def forward(self, x):
-        BS, SL, VS = x.shape
-        q = self.queries(x)
-        k = self.keys(x)
-        v = self.values(x)
-        attn_w = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5
-        attn_w = attn_w.masked_fill(self.tril[:SL, :SL] == 0, float('-inf'))
-        attn_w = F.softmax(attn_w, dim=-1)
-        attn_w = self.dropout(attn_w)
-        return attn_w @ v
-
-class Multihead(nn.Module):
-    def __init__(self, n_heads, head_size):
-        super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(n_heads)])
-        self.combine = nn.Linear(head_size * n_heads, EMBED_SIZE, bias=BIAS)
-        self.dropout = nn.Dropout(DROPOUT)
-
-    def forward(self, x):
-        x = torch.cat([head(x) for head in self.heads], dim=-1)
-        x = self.combine(x)
-        return self.dropout(x)
-
-class ForwardLayer(nn.Module):
-    def __init__(self, embed_size):
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(embed_size, 6 * embed_size, bias=BIAS),
-            nn.GELU(),
-            nn.Linear(6 * embed_size, embed_size, bias=BIAS),
-            nn.Dropout(DROPOUT)
-        )
-
-    def forward(self, x):
-        return self.network(x)
-
-class Block(nn.Module):
-    def __init__(self, n_heads):
-        super().__init__()
-        head_size = EMBED_SIZE // n_heads
-        self.ma = Multihead(n_heads, head_size)
-        self.feed_forward = ForwardLayer(EMBED_SIZE)
-        self.ln1 = nn.LayerNorm(EMBED_SIZE)
-        self.ln2 = nn.LayerNorm(EMBED_SIZE)
-
-    def forward(self, x):
-        x = x + self.ma(self.ln1(x))
-        x = x + self.feed_forward(self.ln2(x))
-        return x
-
-class GPT(nn.Module):
-    def __init__(self, vocab_size):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.embeddings = nn.Embedding(vocab_size, EMBED_SIZE)
-        self.positions = nn.Embedding(CONTEXT, EMBED_SIZE)
-        self.blocks = nn.Sequential(*[Block(N_HEADS) for _ in range(N_LAYERS)])
-        self.ln = nn.LayerNorm(EMBED_SIZE)
-        self.final_linear = nn.Linear(EMBED_SIZE, vocab_size, bias=BIAS)
-
-    def forward(self, input_ids, targets=None):
-        loss = None
-        BS, SL = input_ids.shape
-        emb = self.embeddings(input_ids)
-        pos = self.positions(torch.arange(SL, device=input_ids.device))
-        x = emb + pos
-        x = self.blocks(x)
-        x = self.ln(x)
-        logits = self.final_linear(x)
-        if targets is not None:
-            BS, SL, VS = logits.shape
-            logits = logits.view(BS * SL, VS)
-            targets = targets.view(BS * SL)
-            loss = F.cross_entropy(logits, targets)
-        return logits, loss
 
 def get_tokenizer_and_model():
     """
     Lazily loads and caches the SentencePiece tokenizer and PyTorch GPT model on the target device.
     """
     global _model, _tokenizer
+    if not POEM_LLM_AVAILABLE:
+        raise RuntimeError("Poem LLM dependencies (torch, sentencepiece, huggingface_hub) are not installed.")
+
     if _model is not None and _tokenizer is not None:
         return _tokenizer, _model
 
@@ -138,12 +151,14 @@ def get_tokenizer_and_model():
     logger.info(f"Successfully loaded {REPO_ID} on {DEVICE}.")
     return _tokenizer, _model
 
-@torch.no_grad()
 def score_line_intra(line: str) -> float:
     """
     Computes token cross-entropy loss (intra-line coherence) for a single line of text.
     Lower loss indicates higher grammatical and poetic coherence.
     """
+    if not POEM_LLM_AVAILABLE:
+        return 999.0
+
     sp, model = get_tokenizer_and_model()
     tokens = sp.Encode(line)
     if len(tokens) < 2:
@@ -152,19 +167,22 @@ def score_line_intra(line: str) -> float:
     if len(tokens) > CONTEXT:
         tokens = tokens[:CONTEXT]
 
-    input_ids = torch.tensor(tokens[:-1], dtype=torch.long, device=DEVICE).unsqueeze(0)
-    target_ids = torch.tensor(tokens[1:], dtype=torch.long, device=DEVICE).unsqueeze(0)
+    with torch.no_grad():
+        input_ids = torch.tensor(tokens[:-1], dtype=torch.long, device=DEVICE).unsqueeze(0)
+        target_ids = torch.tensor(tokens[1:], dtype=torch.long, device=DEVICE).unsqueeze(0)
 
-    logits, _ = model(input_ids)
-    loss = F.cross_entropy(logits.view(-1, sp.get_piece_size()), target_ids.view(-1))
-    return loss.item()
+        logits, _ = model(input_ids)
+        loss = F.cross_entropy(logits.view(-1, sp.get_piece_size()), target_ids.view(-1))
+        return loss.item()
 
-@torch.no_grad()
 def score_inter_line(line1: str, line2: str) -> float:
     """
     Computes cross-entropy loss for line2 conditioned on preceding line1 context.
     Lower loss indicates smoother inter-line transition and higher coherence.
     """
+    if not POEM_LLM_AVAILABLE:
+        return 999.0
+
     sp, model = get_tokenizer_and_model()
     tokens1 = sp.Encode(line1)
     tokens2 = sp.Encode(line2)
@@ -177,16 +195,34 @@ def score_inter_line(line1: str, line2: str) -> float:
     if len(combined_tokens) < 2 or num_l2 == 0:
         return 999.0
 
-    input_ids = torch.tensor(combined_tokens[:-1], dtype=torch.long, device=DEVICE).unsqueeze(0)
-    target_ids = torch.tensor(combined_tokens[1:], dtype=torch.long, device=DEVICE).unsqueeze(0)
+    with torch.no_grad():
+        input_ids = torch.tensor(combined_tokens[:-1], dtype=torch.long, device=DEVICE).unsqueeze(0)
+        target_ids = torch.tensor(combined_tokens[1:], dtype=torch.long, device=DEVICE).unsqueeze(0)
 
-    logits, _ = model(input_ids)
+        logits, _ = model(input_ids)
 
-    target_l2 = target_ids[:, -num_l2:]
-    logits_l2 = logits[:, -num_l2:, :]
+        target_l2 = target_ids[:, -num_l2:]
+        logits_l2 = logits[:, -num_l2:, :]
 
-    loss = F.cross_entropy(logits_l2.view(-1, sp.get_piece_size()), target_l2.view(-1))
-    return loss.item()
+        loss = F.cross_entropy(logits_l2.view(-1, sp.get_piece_size()), target_l2.view(-1))
+        return loss.item()
+
+def _fallback_reorder_lines(lines: list[str]) -> list[str]:
+    """
+    Fallback heuristic line ranking based on basic grammatical structure.
+    """
+    def score_grammar(line):
+        score = 0
+        words = line.split()
+        if len(words) >= 3:
+            score += 2
+        if line and line[0].isupper():
+            score += 1
+        if line and line[-1] in ".!?":
+            score += 2
+        return score
+
+    return sorted(lines, key=score_grammar, reverse=True)
 
 def score_lines_coherence(lines: list[str]) -> list[str]:
     """
@@ -198,33 +234,39 @@ def score_lines_coherence(lines: list[str]) -> list[str]:
     if len(lines) == 1:
         return lines
 
-    # Pre-calculate intra-line loss for each line
-    intra_scores = {line: score_line_intra(line) for line in lines}
+    if not POEM_LLM_AVAILABLE:
+        return _fallback_reorder_lines(lines)
 
-    remaining = list(lines)
-    # Pick starting line with best (lowest) intra-line loss
-    remaining.sort(key=lambda l: intra_scores[l])
-    ordered = [remaining.pop(0)]
+    try:
+        # Pre-calculate intra-line loss for each line
+        intra_scores = {line: score_line_intra(line) for line in lines}
 
-    # Sequentially pick the next line that optimizes combined intra-line and inter-line transition score
-    while remaining:
-        prev_line = ordered[-1]
-        best_next = None
-        best_score = float('inf')
+        remaining = list(lines)
+        # Pick starting line with best (lowest) intra-line loss
+        remaining.sort(key=lambda l: intra_scores[l])
+        ordered = [remaining.pop(0)]
 
-        for candidate in remaining:
-            inter_loss = score_inter_line(prev_line, candidate)
-            intra_loss = intra_scores[candidate]
-            # Combined score giving weight to both intra and inter coherence
-            combined_score = 0.5 * intra_loss + 0.5 * inter_loss
-            if combined_score < best_score:
-                best_score = combined_score
-                best_next = candidate
+        # Sequentially pick the next line that optimizes combined intra-line and inter-line transition score
+        while remaining:
+            prev_line = ordered[-1]
+            best_next = None
+            best_score = float('inf')
 
-        ordered.append(best_next)
-        remaining.remove(best_next)
+            for candidate in remaining:
+                inter_loss = score_inter_line(prev_line, candidate)
+                intra_loss = intra_scores[candidate]
+                combined_score = 0.5 * intra_loss + 0.5 * inter_loss
+                if combined_score < best_score:
+                    best_score = combined_score
+                    best_next = candidate
 
-    return ordered
+            ordered.append(best_next)
+            remaining.remove(best_next)
+
+        return ordered
+    except Exception as e:
+        logger.error(f"Error evaluating poem lines with LLM: {e}. Falling back to rule-based reordering.")
+        return _fallback_reorder_lines(lines)
 
 def reorder_poem_file(file_path: str, prompt: str = None, output_file_path: str = None) -> str:
     """
@@ -249,5 +291,8 @@ def reorder_poem_file(file_path: str, prompt: str = None, output_file_path: str 
     with open(target_path, "w", encoding="utf-8") as f:
         f.write(reordered_content)
 
-    logger.info(f"Reordered poem saved to {target_path} using Jyotiprakash4357/poem-llm-small on device {DEVICE}")
+    if POEM_LLM_AVAILABLE:
+        logger.info(f"Reordered poem saved to {target_path} using Jyotiprakash4357/poem-llm-small on device {DEVICE}")
+    else:
+        logger.info(f"Reordered poem saved to {target_path} using fallback rule-based reordering")
     return target_path
