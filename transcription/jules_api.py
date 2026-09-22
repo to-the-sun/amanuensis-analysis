@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import logging
+import subprocess
 import requests
 
 logger = logging.getLogger("jules_api")
@@ -22,16 +23,29 @@ class JulesAPI:
     """
     def __init__(self, api_url=None, api_key=None, credentials_path=None):
         self.api_url = api_url or os.environ.get("JULES_API_URL")
-        self.api_key = api_key or os.environ.get("JULES_API_KEY")
-        self.key_source = "constructor" if api_key else ("environment variable JULES_API_KEY" if os.environ.get("JULES_API_KEY") else None)
+        self.api_key = api_key or os.environ.get("JULES_API_TOKEN") or os.environ.get("JULES_TOKEN") or os.environ.get("JULES_API_KEY")
+        self.key_source = "constructor" if api_key else ("environment variable" if (os.environ.get("JULES_API_TOKEN") or os.environ.get("JULES_TOKEN") or os.environ.get("JULES_API_KEY")) else None)
 
         if not self.api_key:
             self._load_from_credentials(credentials_path)
+
+        if not self.api_key:
+            self._try_gcloud_auth()
 
         if not self.api_url:
             self.api_url = DEFAULT_JULES_API_URL
 
         self._log_credential_status()
+
+    def _try_gcloud_auth(self):
+        try:
+            res = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                self.api_key = res.stdout.strip()
+                self.key_source = "gcloud CLI (gcloud auth print-access-token)"
+                logger.info("Retrieved Google OAuth2 access token automatically via gcloud CLI.")
+        except Exception:
+            pass
 
     def _mask_key(self, key: str) -> str:
         if not key:
@@ -86,8 +100,13 @@ class JulesAPI:
             )
         if not self.api_key:
             extracted_key = (
-                creds.get("jules_api_key")
+                creds.get("jules_api_token")
+                or creds.get("jules_token")
+                or creds.get("jules_oauth_token")
+                or creds.get("jules_api_key")
                 or creds.get("jules_key")
+                or creds.get("JULES_API_TOKEN")
+                or creds.get("JULES_TOKEN")
                 or creds.get("JULES_API_KEY")
                 or creds.get("JULES_KEY")
             )
@@ -121,7 +140,6 @@ class JulesAPI:
             try:
                 headers = {
                     "Content-Type": "application/json",
-                    "X-Goog-Api-Key": self.api_key,
                     "Authorization": f"Bearer {self.api_key}"
                 }
 
@@ -132,15 +150,16 @@ class JulesAPI:
                     "lines": lines
                 }
 
-                logger.info(f"Submitting line reordering request to Google Jules API at {endpoint_url} using key ({self._mask_key(self.api_key)})...")
+                logger.info(f"Submitting line reordering request to Google Jules API at {endpoint_url} using OAuth2 Bearer token ({self._mask_key(self.api_key)})...")
                 response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
 
                 if response.status_code == 401:
                     logger.error(
                         f"Jules API Authentication Failed (HTTP 401 Unauthorized).\n"
                         f"Endpoint: {endpoint_url}\n"
-                        f"Key Used: {self._mask_key(self.api_key)} (Source: {self.key_source or 'credentials.json'})\n"
-                        f"Reason: The provided API key was rejected by Google Jules API.\n"
+                        f"Token Used: {self._mask_key(self.api_key)} (Source: {self.key_source or 'credentials.json'})\n"
+                        f"Reason: Google Jules API requires a valid OAuth2 Access Token in Authorization: Bearer <token>. API keys are blocked (API_KEY_SERVICE_BLOCKED).\n"
+                        f"To generate a valid OAuth2 token, set 'jules_api_token' in credentials.json, run 'gcloud auth print-access-token', or export JULES_API_TOKEN.\n"
                         f"API Response Details: {response.text}"
                     )
                     reordered_content = file_content
