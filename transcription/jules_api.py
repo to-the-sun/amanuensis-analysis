@@ -23,12 +23,29 @@ class JulesAPI:
     def __init__(self, api_url=None, api_key=None, credentials_path=None):
         self.api_url = api_url or os.environ.get("JULES_API_URL")
         self.api_key = api_key or os.environ.get("JULES_API_KEY")
+        self.key_source = "constructor" if api_key else ("environment variable JULES_API_KEY" if os.environ.get("JULES_API_KEY") else None)
 
         if not self.api_key:
             self._load_from_credentials(credentials_path)
 
         if not self.api_url:
             self.api_url = DEFAULT_JULES_API_URL
+
+        self._log_credential_status()
+
+    def _mask_key(self, key: str) -> str:
+        if not key:
+            return "<None>"
+        if len(key) <= 8:
+            return key[0:2] + "..." + key[-1:]
+        return key[0:4] + "..." + key[-4:]
+
+    def _log_credential_status(self):
+        if self.api_key:
+            logger.info(f"Jules API Key found (source: {self.key_source or 'credentials.json'}): {self._mask_key(self.api_key)}")
+        else:
+            logger.warning("No Jules API key found in constructor, environment (JULES_API_KEY), or credentials.json (keys: jules_api_key, jules_key).")
+        logger.info(f"Jules API Target URL: {self.api_url}")
 
     def _load_from_credentials(self, credentials_path=None):
         dirs_to_check = []
@@ -38,8 +55,9 @@ class JulesAPI:
                 try:
                     with open(credentials_path, "r", encoding="utf-8") as f:
                         creds = json.load(f)
-                    self._apply_creds_dict(creds)
-                    return
+                    if self._apply_creds_dict(creds):
+                        self.key_source = f"{credentials_path}"
+                        return
                 except Exception as e:
                     logger.warning(f"Failed to load credentials from {credentials_path}: {e}")
 
@@ -50,14 +68,15 @@ class JulesAPI:
                 try:
                     with open(cp, "r", encoding="utf-8") as f:
                         creds = json.load(f)
-                    self._apply_creds_dict(creds)
-                    if self.api_url:
+                    if self._apply_creds_dict(creds):
+                        self.key_source = cp
                         logger.info(f"Loaded Jules API credentials from {cp}")
                         break
                 except Exception as e:
                     logger.warning(f"Failed to load credentials from {cp}: {e}")
 
-    def _apply_creds_dict(self, creds: dict):
+    def _apply_creds_dict(self, creds: dict) -> bool:
+        found = False
         if not self.api_url:
             self.api_url = (
                 creds.get("jules_api_url")
@@ -66,12 +85,16 @@ class JulesAPI:
                 or creds.get("JULES_URL")
             )
         if not self.api_key:
-            self.api_key = (
+            extracted_key = (
                 creds.get("jules_api_key")
                 or creds.get("jules_key")
                 or creds.get("JULES_API_KEY")
                 or creds.get("JULES_KEY")
             )
+            if extracted_key:
+                self.api_key = extracted_key
+                found = True
+        return found
 
     def submit_file_and_prompt(self, file_path: str, prompt: str, output_file_path: str = None) -> str:
         """
@@ -89,7 +112,12 @@ class JulesAPI:
 
         reordered_content = None
 
-        if self.api_url and self.api_key:
+        endpoint_url = self.api_url if self.api_url.endswith("/sessions") else f"{self.api_url.rstrip('/')}/sessions"
+
+        if not self.api_key:
+            logger.error("Cannot call Google Jules API: No API key found. Please specify 'jules_api_key' in credentials.json or set JULES_API_KEY environment variable.")
+            reordered_content = file_content
+        else:
             try:
                 headers = {
                     "Content-Type": "application/json",
@@ -104,55 +132,49 @@ class JulesAPI:
                     "lines": lines
                 }
 
-                endpoint_url = self.api_url if self.api_url.endswith("/sessions") else f"{self.api_url.rstrip('/')}/sessions"
+                logger.info(f"Submitting line reordering request to Google Jules API at {endpoint_url} using key ({self._mask_key(self.api_key)})...")
                 response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-                res_json = response.json()
-                if "reordered_content" in res_json:
-                    reordered_content = res_json["reordered_content"]
-                elif "reordered_lines" in res_json:
-                    reordered_content = "\n".join(res_json["reordered_lines"])
-                elif "text" in res_json:
-                    reordered_content = res_json["text"]
+
+                if response.status_code == 401:
+                    logger.error(
+                        f"Jules API Authentication Failed (HTTP 401 Unauthorized).\n"
+                        f"Endpoint: {endpoint_url}\n"
+                        f"Key Used: {self._mask_key(self.api_key)} (Source: {self.key_source or 'credentials.json'})\n"
+                        f"Reason: The provided API key was rejected by Google Jules API.\n"
+                        f"API Response Details: {response.text}"
+                    )
+                    reordered_content = file_content
+                else:
+                    response.raise_for_status()
+                    res_json = response.json()
+                    if "reordered_content" in res_json:
+                        reordered_content = res_json["reordered_content"]
+                    elif "reordered_lines" in res_json:
+                        reordered_content = "\n".join(res_json["reordered_lines"])
+                    elif "text" in res_json:
+                        reordered_content = res_json["text"]
+                    else:
+                        logger.warning(f"Jules API responded HTTP 200 but did not return reordered_content/reordered_lines. Response: {res_json}")
+                        reordered_content = file_content
+            except requests.exceptions.RequestException as e:
+                resp_detail = getattr(e.response, "text", "") if hasattr(e, "response") and e.response is not None else ""
+                logger.error(f"Error calling Google Jules API endpoint at {endpoint_url}: {e}. Response details: {resp_detail}")
+                reordered_content = file_content
             except Exception as e:
-                logger.error(f"Error calling Jules API endpoint at {self.api_url}: {e}")
+                logger.error(f"Unexpected error calling Google Jules API: {e}")
+                reordered_content = file_content
 
         if not reordered_content:
-            logger.info("Processing line reordering locally via grammatical coherence engine (no API URL required)...")
-
-            def score_line_grammar(line):
-                # Grammatical score heuristic based on standard structure and STT noise detection
-                score = 0
-                words = line.split()
-                word_count = len(words)
-                if word_count >= 3:
-                    score += 3
-                elif word_count == 2:
-                    score += 1
-                if line and line[0].isupper():
-                    score += 2
-                if line and line[-1] in ".!?":
-                    score += 3
-                elif line and line[-1] in ",;:":
-                    score += 1
-
-                # Penalize word repetitions (e.g. STT hallucinations like "the the")
-                for i in range(len(words) - 1):
-                    if words[i].lower() == words[i+1].lower():
-                        score -= 3
-                return score
-
-            sorted_lines = sorted(lines, key=score_line_grammar, reverse=True)
-            reordered_content = "\n".join(sorted_lines)
+            reordered_content = file_content
 
         target_path = output_file_path if output_file_path else file_path
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(reordered_content)
 
         if reordered_content != file_content:
-            logger.info(f"Reordered text file submitted back and saved to {target_path}")
+            logger.info(f"Reordered text file submitted back from Jules API and saved to {target_path}")
         else:
-            logger.info(f"Output saved to {target_path} with original unordered lines.")
+            logger.info(f"Output saved to {target_path} with original unordered lines (Jules API reordering was not applied).")
         return target_path
 
 def submit_to_jules(file_path: str, prompt: str, output_file_path: str = None, api_url=None, api_key=None) -> str:
