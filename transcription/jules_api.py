@@ -89,6 +89,31 @@ class JulesAPI:
                 except Exception as e:
                     logger.warning(f"Failed to load credentials from {cp}: {e}")
 
+    def _refresh_oauth2_token(self, refresh_token: str, client_id: str = None, client_secret: str = None) -> str:
+        try:
+            url = "https://oauth2.googleapis.com/token"
+            data = {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }
+            if client_id:
+                data["client_id"] = client_id
+            if client_secret:
+                data["client_secret"] = client_secret
+
+            res = requests.post(url, data=data, timeout=10)
+            if res.status_code == 200:
+                token_data = res.json()
+                access_token = token_data.get("access_token")
+                if access_token:
+                    logger.info("Successfully refreshed Google OAuth2 access token programmatically.")
+                    return access_token
+            else:
+                logger.warning(f"Google OAuth2 token refresh HTTP {res.status_code}: {res.text}")
+        except Exception as e:
+            logger.warning(f"Failed to refresh Google OAuth2 access token: {e}")
+        return None
+
     def _apply_creds_dict(self, creds: dict) -> bool:
         found = False
         if not self.api_url:
@@ -98,6 +123,16 @@ class JulesAPI:
                 or creds.get("JULES_API_URL")
                 or creds.get("JULES_URL")
             )
+        if not self.api_key:
+            refresh_token = creds.get("jules_refresh_token") or creds.get("refresh_token")
+            if refresh_token:
+                client_id = creds.get("jules_client_id") or creds.get("client_id")
+                client_secret = creds.get("jules_client_secret") or creds.get("client_secret")
+                refreshed = self._refresh_oauth2_token(refresh_token, client_id, client_secret)
+                if refreshed:
+                    self.api_key = refreshed
+                    found = True
+
         if not self.api_key:
             extracted_key = (
                 creds.get("jules_api_token")
