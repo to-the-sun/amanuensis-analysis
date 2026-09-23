@@ -193,65 +193,81 @@ class JulesAPI:
 
         reordered_content = None
 
-        endpoint_url = self.api_url if self.api_url.endswith("/sessions") else f"{self.api_url.rstrip('/')}/sessions"
+        base_url = self.api_url.rstrip('/')
+        if self.api_url.endswith("/sessions"):
+            candidate_endpoints = [self.api_url]
+        else:
+            candidate_endpoints = [
+                f"{base_url}/projects/{self.project_id}/sessions",
+                f"{base_url}/sessions"
+            ]
 
         if not self.api_key:
-            logger.error("Cannot call Google Jules API: No API key found. Please specify 'jules_api_key' in credentials.json or set JULES_API_KEY environment variable.")
+            logger.error("Cannot call Google Jules API: No OAuth2 token found. Please specify 'jules_api_token' in credentials.json or run 'gcloud auth login'.")
             reordered_content = file_content
         else:
-            try:
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                    "X-Goog-User-Project": self.project_id
-                }
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "X-Goog-User-Project": self.project_id
+            }
 
-                full_prompt = (
-                    f"{prompt}\n\n"
-                    f"File Name: {os.path.basename(file_path)}\n\n"
-                    f"Raw Lines To Reorder:\n{file_content}"
-                )
-                payload = {
-                    "prompt": full_prompt,
-                    "title": f"Reorder {os.path.basename(file_path)}"
-                }
+            full_prompt = (
+                f"{prompt}\n\n"
+                f"File Name: {os.path.basename(file_path)}\n\n"
+                f"Raw Lines To Reorder:\n{file_content}"
+            )
+            payload = {
+                "prompt": full_prompt,
+                "title": f"Reorder {os.path.basename(file_path)}"
+            }
 
-                logger.info(f"Submitting line reordering request to Google Jules API at {endpoint_url} using OAuth2 Bearer token ({self._mask_key(self.api_key)})...")
-                response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
+            for endpoint_url in candidate_endpoints:
+                try:
+                    logger.info(f"Submitting line reordering request to Google Jules API at {endpoint_url} using OAuth2 Bearer token ({self._mask_key(self.api_key)})...")
+                    response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
 
-                if response.status_code == 401:
-                    logger.error(
-                        f"Jules API Authentication Failed (HTTP 401 Unauthorized).\n"
-                        f"Endpoint: {endpoint_url}\n"
-                        f"Token Used: {self._mask_key(self.api_key)} (Source: {self.key_source or 'credentials.json'})\n"
-                        f"Reason: Google Jules API requires a valid OAuth2 Access Token in Authorization: Bearer <token>. API keys are blocked (API_KEY_SERVICE_BLOCKED).\n"
-                        f"To generate a valid OAuth2 token, set 'jules_api_token' in credentials.json, run 'gcloud auth print-access-token', or export JULES_API_TOKEN.\n"
-                        f"API Response Details: {response.text}"
-                    )
-                    reordered_content = file_content
-                else:
-                    response.raise_for_status()
-                    res_json = response.json()
-                    if "reordered_content" in res_json:
-                        reordered_content = res_json["reordered_content"]
-                    elif "reordered_lines" in res_json:
-                        reordered_content = "\n".join(res_json["reordered_lines"])
-                    elif "text" in res_json:
-                        reordered_content = res_json["text"]
-                    elif isinstance(res_json, dict) and "output" in res_json:
-                        reordered_content = str(res_json["output"])
-                    elif isinstance(res_json, dict) and "session" in res_json and isinstance(res_json["session"], dict) and "output" in res_json["session"]:
-                        reordered_content = str(res_json["session"]["output"])
-                    else:
-                        logger.warning(f"Jules API responded HTTP {response.status_code} with payload: {res_json}")
+                    if response.status_code == 404 and endpoint_url != candidate_endpoints[-1]:
+                        logger.warning(f"Endpoint {endpoint_url} returned 404 Not Found. Retrying on alternative candidate endpoint...")
+                        continue
+
+                    if response.status_code == 401:
+                        logger.error(
+                            f"Jules API Authentication Failed (HTTP 401 Unauthorized).\n"
+                            f"Endpoint: {endpoint_url}\n"
+                            f"Token Used: {self._mask_key(self.api_key)} (Source: {self.key_source or 'credentials.json'})\n"
+                            f"Reason: Google Jules API requires a valid OAuth2 Access Token in Authorization: Bearer <token>. API keys are blocked (API_KEY_SERVICE_BLOCKED).\n"
+                            f"To generate a valid OAuth2 token, set 'jules_api_token' in credentials.json, run 'gcloud auth print-access-token', or export JULES_API_TOKEN.\n"
+                            f"API Response Details: {response.text}"
+                        )
                         reordered_content = file_content
-            except requests.exceptions.RequestException as e:
-                resp_detail = getattr(e.response, "text", "") if hasattr(e, "response") and e.response is not None else ""
-                logger.error(f"Error calling Google Jules API endpoint at {endpoint_url}: {e}. Response details: {resp_detail}")
-                reordered_content = file_content
-            except Exception as e:
-                logger.error(f"Unexpected error calling Google Jules API: {e}")
-                reordered_content = file_content
+                        break
+                    else:
+                        response.raise_for_status()
+                        res_json = response.json()
+                        if "reordered_content" in res_json:
+                            reordered_content = res_json["reordered_content"]
+                        elif "reordered_lines" in res_json:
+                            reordered_content = "\n".join(res_json["reordered_lines"])
+                        elif "text" in res_json:
+                            reordered_content = res_json["text"]
+                        elif isinstance(res_json, dict) and "output" in res_json:
+                            reordered_content = str(res_json["output"])
+                        elif isinstance(res_json, dict) and "session" in res_json and isinstance(res_json["session"], dict) and "output" in res_json["session"]:
+                            reordered_content = str(res_json["session"]["output"])
+                        else:
+                            logger.warning(f"Jules API responded HTTP {response.status_code} with payload: {res_json}")
+                            reordered_content = file_content
+                        break
+                except requests.exceptions.RequestException as e:
+                    resp_detail = getattr(e.response, "text", "") if hasattr(e, "response") and e.response is not None else ""
+                    logger.error(f"Error calling Google Jules API endpoint at {endpoint_url}: {e}. Response details: {resp_detail}")
+                    reordered_content = file_content
+                    break
+                except Exception as e:
+                    logger.error(f"Unexpected error calling Google Jules API: {e}")
+                    reordered_content = file_content
+                    break
 
         if not reordered_content:
             reordered_content = file_content
