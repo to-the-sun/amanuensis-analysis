@@ -14,6 +14,7 @@ except NameError:
 
 
 DEFAULT_JULES_API_URL = "https://jules.googleapis.com/v1alpha"
+DEFAULT_JULES_PROJECT_ID = "714089051017"
 
 
 class JulesAPI:
@@ -21,12 +22,13 @@ class JulesAPI:
     API client interface for submitting files and prompts to Jules in the repository via the API,
     and receiving reordered text files back.
     """
-    def __init__(self, api_url=None, api_key=None, credentials_path=None):
+    def __init__(self, api_url=None, api_key=None, project_id=None, credentials_path=None):
         self.api_url = api_url or os.environ.get("JULES_API_URL")
         self.api_key = api_key or os.environ.get("JULES_API_TOKEN") or os.environ.get("JULES_TOKEN") or os.environ.get("JULES_API_KEY")
+        self.project_id = project_id or os.environ.get("JULES_PROJECT_ID")
         self.key_source = "constructor" if api_key else ("environment variable" if (os.environ.get("JULES_API_TOKEN") or os.environ.get("JULES_TOKEN") or os.environ.get("JULES_API_KEY")) else None)
 
-        if not self.api_key:
+        if not self.api_key or not self.project_id:
             self._load_from_credentials(credentials_path)
 
         if not self.api_key:
@@ -34,6 +36,9 @@ class JulesAPI:
 
         if not self.api_url:
             self.api_url = DEFAULT_JULES_API_URL
+
+        if not self.project_id:
+            self.project_id = DEFAULT_JULES_PROJECT_ID
 
         self._log_credential_status()
 
@@ -60,6 +65,7 @@ class JulesAPI:
         else:
             logger.warning("No Jules API key found in constructor, environment (JULES_API_KEY), or credentials.json (keys: jules_api_key, jules_key).")
         logger.info(f"Jules API Target URL: {self.api_url}")
+        logger.info(f"Google Cloud Project ID: {self.project_id} (Jules-harness)")
 
     def _load_from_credentials(self, credentials_path=None):
         dirs_to_check = []
@@ -123,6 +129,14 @@ class JulesAPI:
                 or creds.get("JULES_API_URL")
                 or creds.get("JULES_URL")
             )
+        if not self.project_id:
+            self.project_id = (
+                creds.get("jules_project_id")
+                or creds.get("jules_project")
+                or creds.get("project_id")
+                or creds.get("project")
+                or creds.get("JULES_PROJECT_ID")
+            )
         if not self.api_key:
             refresh_token = creds.get("jules_refresh_token") or creds.get("refresh_token")
             if refresh_token:
@@ -175,7 +189,8 @@ class JulesAPI:
             try:
                 headers = {
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}"
+                    "Authorization": f"Bearer {self.api_key}",
+                    "X-Goog-User-Project": self.project_id
                 }
 
                 payload = {

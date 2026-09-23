@@ -1,16 +1,17 @@
 @echo off
 setlocal enabledelayedexpansion
 
-title Transcription Bot Launcher
+title Transcription Bot Launcher (Jules-harness)
 
 echo ===================================================
 echo     Discord Transcription Bot Launcher
+echo     Google Cloud Project: Jules-harness (714089051017)
 echo ===================================================
 echo.
 
 cd /d "%~dp0transcription"
 
-echo [1/3] Checking Python environment...
+echo [1/4] Checking Python environment...
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERROR] Python is not installed or not in PATH.
@@ -20,22 +21,35 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [2/3] Verifying required Python packages...
+echo [2/4] Verifying required Python packages...
 python -m pip install -q discord.py requests pydub eng-to-ipa numpy send2trash >nul 2>&1
 
-echo [3/3] Checking Google Cloud / OAuth2 status...
+echo [3/4] Checking Google Cloud SDK & OAuth2 Status...
 gcloud --version >nul 2>&1
 if %errorlevel% equ 0 (
     echo [INFO] Google Cloud SDK detected.
+    echo [INFO] Setting Google Cloud project to Jules-harness (714089051017)...
+    call gcloud config set project 714089051017 >nul 2>&1
+
+    :: Check if user is authenticated
+    call gcloud auth print-access-token >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [INFO] OAuth2 authentication required. Launching Google login in browser...
+        call gcloud auth login
+    ) else (
+        echo [INFO] OAuth2 authentication active.
+    )
 ) else (
-    echo [INFO] Google Cloud SDK not detected.
-    echo        If using Google Jules API, ensure 'jules_api_token' or 'jules_refresh_token'
-    echo        is configured in credentials.json.
+    echo [WARNING] Google Cloud SDK (gcloud) is not installed on your system.
+    echo           If you wish to use Google Jules API, install gcloud or add
+    echo           'jules_api_token' to credentials.json.
+    echo.
+    echo           Quick Install Command (PowerShell / CMD):
+    echo           winget install Google.CloudSDK
+    echo.
 )
 
-echo.
-echo ===================================================
-echo Starting Transcription Bot (Aqua)...
+echo [4/4] Starting Transcription Bot (Aqua)...
 echo ===================================================
 echo.
 
