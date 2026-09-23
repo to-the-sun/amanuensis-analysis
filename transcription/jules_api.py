@@ -206,11 +206,14 @@ class JulesAPI:
                     "X-Goog-User-Project": self.project_id
                 }
 
+                full_prompt = (
+                    f"{prompt}\n\n"
+                    f"File Name: {os.path.basename(file_path)}\n\n"
+                    f"Raw Lines To Reorder:\n{file_content}"
+                )
                 payload = {
-                    "prompt": prompt,
-                    "filename": os.path.basename(file_path),
-                    "file_content": file_content,
-                    "lines": lines
+                    "prompt": full_prompt,
+                    "title": f"Reorder {os.path.basename(file_path)}"
                 }
 
                 logger.info(f"Submitting line reordering request to Google Jules API at {endpoint_url} using OAuth2 Bearer token ({self._mask_key(self.api_key)})...")
@@ -235,8 +238,12 @@ class JulesAPI:
                         reordered_content = "\n".join(res_json["reordered_lines"])
                     elif "text" in res_json:
                         reordered_content = res_json["text"]
+                    elif isinstance(res_json, dict) and "output" in res_json:
+                        reordered_content = str(res_json["output"])
+                    elif isinstance(res_json, dict) and "session" in res_json and isinstance(res_json["session"], dict) and "output" in res_json["session"]:
+                        reordered_content = str(res_json["session"]["output"])
                     else:
-                        logger.warning(f"Jules API responded HTTP 200 but did not return reordered_content/reordered_lines. Response: {res_json}")
+                        logger.warning(f"Jules API responded HTTP {response.status_code} with payload: {res_json}")
                         reordered_content = file_content
             except requests.exceptions.RequestException as e:
                 resp_detail = getattr(e.response, "text", "") if hasattr(e, "response") and e.response is not None else ""
