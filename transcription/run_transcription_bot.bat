@@ -14,15 +14,22 @@ cd /d "%~dp0"
 echo [1/4] Checking Python environment...
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] Python is not installed or not in PATH.
-    echo Please install Python 3.10+ and check "Add Python to PATH".
     echo.
+    echo [ERROR] Python is not installed or not added to PATH.
+    echo Please install Python 3.10+ and make sure "Add Python to PATH" is checked.
+    echo.
+    echo Press any key to exit...
     pause
     exit /b 1
 )
 
 echo [2/4] Verifying required Python packages...
-python -m pip install -q discord.py requests pydub eng-to-ipa numpy send2trash >nul 2>&1
+python -m pip install discord.py requests pydub eng-to-ipa numpy send2trash
+if %errorlevel% neq 0 (
+    echo.
+    echo [WARNING] Some Python dependencies failed to install. Continuing...
+    echo.
+)
 
 echo [3/4] Checking Google Cloud SDK & OAuth2 Status...
 gcloud --version >nul 2>&1
@@ -57,8 +64,15 @@ python transcription_bot_aqua.py
 
 if %errorlevel% neq 0 (
     echo.
-    echo [ERROR] Transcription bot exited with an error code (%errorlevel%).
+    echo ===================================================
+    echo [ERROR] Transcription bot stopped with error code (%errorlevel%).
+    echo ===================================================
+    echo.
+) else (
+    echo.
+    echo Transcription bot finished execution.
     echo.
 )
 
+echo Press any key to exit window...
 pause
