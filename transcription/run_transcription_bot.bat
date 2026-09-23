@@ -1,3 +1,8 @@
+@if not "%~1"=="__KEEPOPEN__" (
+    cmd /k ""%~f0" __KEEPOPEN__ %*"
+    exit /b
+)
+
 @echo off
 setlocal enabledelayedexpansion
 
@@ -5,7 +10,7 @@ title Transcription Bot Launcher (Jules-harness)
 
 echo ===================================================
 echo     Discord Transcription Bot Launcher
-echo     Google Cloud Project: Jules-harness (714089051017)
+echo     Google Cloud Project: Jules-harness [714089051017]
 echo ===================================================
 echo.
 
@@ -18,9 +23,7 @@ if !errorlevel! neq 0 (
     echo [ERROR] Python is not installed or not added to PATH.
     echo Please install Python 3.10+ and make sure "Add Python to PATH" is checked.
     echo.
-    echo Press any key to exit...
-    pause
-    exit /b 1
+    goto :end
 )
 
 echo [2/4] Verifying required Python packages...
@@ -74,5 +77,9 @@ if !errorlevel! neq 0 (
     echo.
 )
 
-echo Press any key to exit window...
+:end
+echo ===================================================
+echo Console window remaining open indefinitely.
+echo You can inspect logs above or close this window.
+echo ===================================================
 pause
