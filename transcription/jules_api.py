@@ -44,7 +44,8 @@ class JulesAPI:
 
     def _try_gcloud_auth(self):
         try:
-            res = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=5)
+            use_shell = sys.platform == "win32"
+            res = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=5, shell=use_shell)
             if res.returncode == 0 and res.stdout.strip():
                 self.api_key = res.stdout.strip()
                 self.key_source = "gcloud CLI (gcloud auth print-access-token)"
