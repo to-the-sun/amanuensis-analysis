@@ -31,8 +31,13 @@ class JulesAPI:
         if not self.api_key or not self.project_id:
             self._load_from_credentials(credentials_path)
 
-        if not self.api_key:
+        # Google Jules API requires a Google OAuth2 access token starting with "ya29.".
+        # If the loaded credential is an API key (e.g. starting with "AQ." or "AIza"), attempt to fetch the OAuth2 token via gcloud.
+        if not self.api_key or not self.api_key.startswith("ya29."):
+            old_key = self.api_key
             self._try_gcloud_auth()
+            if old_key and self.api_key and self.api_key != old_key:
+                logger.info(f"Replaced non-OAuth2 API key ({self._mask_key(old_key)}) with active gcloud OAuth2 token ({self._mask_key(self.api_key)}).")
 
         if not self.api_url:
             self.api_url = DEFAULT_JULES_API_URL
@@ -149,14 +154,21 @@ class JulesAPI:
                     found = True
 
         if not self.api_key:
-            extracted_key = (
+            extracted_token = (
                 creds.get("jules_api_token")
                 or creds.get("jules_token")
                 or creds.get("jules_oauth_token")
-                or creds.get("jules_api_key")
-                or creds.get("jules_key")
                 or creds.get("JULES_API_TOKEN")
                 or creds.get("JULES_TOKEN")
+            )
+            if extracted_token:
+                self.api_key = extracted_token
+                found = True
+
+        if not self.api_key:
+            extracted_key = (
+                creds.get("jules_api_key")
+                or creds.get("jules_key")
                 or creds.get("JULES_API_KEY")
                 or creds.get("JULES_KEY")
             )
