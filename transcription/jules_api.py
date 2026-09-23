@@ -13,8 +13,9 @@ except NameError:
     _script_dir = os.getcwd()
 
 
-DEFAULT_JULES_API_URL = "https://jules.googleapis.com/v1alpha"
+DEFAULT_JULES_API_URL = "https://jules.googleapis.com/v1"
 DEFAULT_JULES_PROJECT_ID = "714089051017"
+DEFAULT_JULES_SOURCE = "to_the_sun/amanuensis-analysis"
 
 
 class JulesAPI:
@@ -22,11 +23,18 @@ class JulesAPI:
     API client interface for submitting files and prompts to Jules in the repository via the API,
     and receiving reordered text files back.
     """
-    def __init__(self, api_url=None, api_key=None, project_id=None, credentials_path=None):
+    def __init__(self, api_url=None, api_key=None, project_id=None, source_repo=None, credentials_path=None):
         self.api_url = api_url or os.environ.get("JULES_API_URL")
         self.api_key = api_key or os.environ.get("JULES_API_TOKEN") or os.environ.get("JULES_TOKEN") or os.environ.get("JULES_API_KEY")
         self.project_id = project_id or os.environ.get("JULES_PROJECT_ID")
+        self.source_repo = source_repo or os.environ.get("JULES_SOURCE_REPO")
         self.key_source = "constructor" if api_key else ("environment variable" if (os.environ.get("JULES_API_TOKEN") or os.environ.get("JULES_TOKEN") or os.environ.get("JULES_API_KEY")) else None)
+
+        if not self.api_key or not self.project_id or not self.source_repo:
+            self._load_from_credentials(credentials_path)
+
+        if not self.source_repo:
+            self.source_repo = DEFAULT_JULES_SOURCE
 
         if not self.api_key or not self.project_id:
             self._load_from_credentials(credentials_path)
@@ -72,6 +80,7 @@ class JulesAPI:
             logger.warning("No Jules API key found in constructor, environment (JULES_API_KEY), or credentials.json (keys: jules_api_key, jules_key).")
         logger.info(f"Jules API Target URL: {self.api_url}")
         logger.info(f"Google Cloud Project ID: {self.project_id} (Jules-harness)")
+        logger.info(f"Google Jules Repository Source: {self.source_repo}")
 
     def _load_from_credentials(self, credentials_path=None):
         dirs_to_check = []
@@ -143,6 +152,14 @@ class JulesAPI:
                 or creds.get("project")
                 or creds.get("JULES_PROJECT_ID")
             )
+        if not self.source_repo:
+            self.source_repo = (
+                creds.get("jules_source_repo")
+                or creds.get("jules_source")
+                or creds.get("source_repo")
+                or creds.get("source")
+                or creds.get("JULES_SOURCE_REPO")
+            )
         if not self.api_key:
             refresh_token = creds.get("jules_refresh_token") or creds.get("refresh_token")
             if refresh_token:
@@ -194,12 +211,17 @@ class JulesAPI:
         reordered_content = None
 
         base_url = self.api_url.rstrip('/')
+        source_clean = self.source_repo.strip('/')
         if self.api_url.endswith("/sessions"):
             candidate_endpoints = [self.api_url]
         else:
             candidate_endpoints = [
-                f"{base_url}/projects/{self.project_id}/sessions",
-                f"{base_url}/sessions"
+                f"https://jules.googleapis.com/v1/projects/{self.project_id}/locations/global/sources/{source_clean}/sessions",
+                f"https://jules.googleapis.com/v1/projects/{self.project_id}/locations/global/sessions",
+                f"https://jules.googleapis.com/v1/projects/{self.project_id}/sessions",
+                f"https://jules.googleapis.com/v1alpha/projects/{self.project_id}/locations/global/sessions",
+                f"https://jules.googleapis.com/v1alpha/projects/{self.project_id}/sessions",
+                f"https://jules.googleapis.com/v1alpha/sessions"
             ]
 
         if not self.api_key:
