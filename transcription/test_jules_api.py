@@ -64,19 +64,23 @@ class TestJulesAPI(unittest.TestCase):
         mock_resp.json.return_value = {
             "sources": [
                 {
-                    "name": "sources/github-to_the_sun-amanuensis-analysis",
-                    "id": "github-to_the_sun-amanuensis-analysis",
+                    "name": "sources/github-to-the-sun-amanuensis-analysis",
+                    "id": "github-to-the-sun-amanuensis-analysis",
                     "githubRepo": {
-                        "owner": "to_the_sun",
-                        "repo": "amanuensis-analysis"
+                        "owner": "to-the-sun",
+                        "repo": "amanuensis-analysis",
+                        "defaultBranch": {
+                            "displayName": "main"
+                        }
                     }
                 }
             ]
         }
         mock_get.return_value = mock_resp
 
-        resolved = self.client.resolve_source()
-        self.assertEqual(resolved, "sources/github-to_the_sun-amanuensis-analysis")
+        s_name, s_branch = self.client.resolve_source()
+        self.assertEqual(s_name, "sources/github-to-the-sun-amanuensis-analysis")
+        self.assertEqual(s_branch, "main")
 
     @patch("requests.post")
     def test_create_session(self, mock_post):
@@ -89,7 +93,7 @@ class TestJulesAPI(unittest.TestCase):
         }
         mock_post.return_value = mock_resp
 
-        session = self.client.create_session("Test prompt", title="Test Title", source_name="sources/github-test")
+        session = self.client.create_session("Test prompt", title="Test Title", source_name="sources/github-test", starting_branch="main")
         self.assertEqual(session["id"], "sess123")
 
         mock_post.assert_called_once()
@@ -98,6 +102,7 @@ class TestJulesAPI(unittest.TestCase):
         self.assertEqual(payload["prompt"], "Test prompt")
         self.assertEqual(payload["requirePlanApproval"], False)
         self.assertEqual(payload["sourceContext"]["source"], "sources/github-test")
+        self.assertEqual(payload["sourceContext"]["githubRepoContext"]["startingBranch"], "main")
 
     @patch("requests.post")
     def test_approve_plan(self, mock_post):

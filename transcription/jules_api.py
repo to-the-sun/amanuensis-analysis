@@ -160,13 +160,16 @@ class JulesAPI:
             headers["x-goog-api-key"] = self.api_key
         return headers
 
-    def resolve_source(self) -> str:
+    def resolve_source(self) -> tuple[str, str]:
         """
         Queries GET /v1alpha/sources to resolve a user-configured source string (e.g. 'to_the_sun/amanuensis-analysis')
-        to a valid Jules source resource name (e.g. 'sources/github-to_the_sun-amanuensis-analysis').
+        to a tuple of (source_resource_name, starting_branch).
+        Handles underscore/hyphen normalization (e.g. 'to_the_sun' matching 'to-the-sun').
         """
+        default_branch = "main"
+
         if self.source_repo and self.source_repo.startswith("sources/"):
-            return self.source_repo
+            return self.source_repo, default_branch
 
         url = f"{self.api_url}/sources"
         try:
@@ -174,52 +177,82 @@ class JulesAPI:
             if res.status_code == 200:
                 sources = res.json().get("sources", [])
                 if sources:
-                    clean_repo = self.source_repo.strip("/")
+                    clean_repo = self.source_repo.strip("/").lower()
                     owner, _, repo_name = clean_repo.rpartition("/")
+                    normalized_owner = owner.replace("_", "-")
+                    normalized_repo = repo_name.replace("_", "-")
+
                     for src in sources:
                         gh = src.get("githubRepo", {})
                         s_name = src.get("name", "")
                         s_id = src.get("id", "")
-                        if gh.get("owner") == owner and gh.get("repo") == repo_name:
-                            logger.info(f"Resolved source '{self.source_repo}' to '{s_name}'")
-                            return s_name
-                        if clean_repo in s_id or clean_repo in s_name:
-                            logger.info(f"Matched source '{self.source_repo}' to '{s_name}'")
-                            return s_name
+                        gh_owner = (gh.get("owner") or "").lower().replace("_", "-")
+                        gh_repo = (gh.get("repo") or "").lower().replace("_", "-")
 
-                    fallback = sources[0].get("name")
-                    if fallback:
-                        logger.info(f"Using default available source '{fallback}' for '{self.source_repo}'")
-                        return fallback
+                        # Extract branch from githubRepo metadata if available
+                        def_branch = gh.get("defaultBranch", {}).get("displayName")
+                        if not def_branch and gh.get("branches"):
+                            def_branch = gh["branches"][0].get("displayName")
+                        branch_to_use = def_branch or default_branch
+
+                        if gh_owner == normalized_owner and gh_repo == normalized_repo:
+                            logger.info(f"Resolved source '{self.source_repo}' to '{s_name}' (branch: {branch_to_use})")
+                            return s_name, branch_to_use
+
+                        if normalized_repo in s_id.lower() or normalized_repo in s_name.lower():
+                            logger.info(f"Matched source '{self.source_repo}' to '{s_name}' (branch: {branch_to_use})")
+                            return s_name, branch_to_use
+
+                    fallback_src = sources[0]
+                    fallback_name = fallback_src.get("name")
+                    gh = fallback_src.get("githubRepo", {})
+                    def_branch = gh.get("defaultBranch", {}).get("displayName") or default_branch
+                    if fallback_name:
+                        logger.info(f"Using default available source '{fallback_name}' (branch: {def_branch}) for '{self.source_repo}'")
+                        return fallback_name, def_branch
             else:
                 logger.warning(f"List Sources API returned HTTP {res.status_code}: {res.text}")
         except Exception as e:
             logger.warning(f"Failed to list Jules sources: {e}")
 
-        sanitized = self.source_repo.replace("/", "-")
-        return f"sources/{sanitized}" if not sanitized.startswith("sources/") else sanitized
+        sanitized = self.source_repo.replace("/", "-").replace("_", "-")
+        s_res = f"sources/{sanitized}" if not sanitized.startswith("sources/") else sanitized
+        return s_res, default_branch
 
     def create_session(self, prompt: str, title: str = None, source_name: str = None, starting_branch: str = None) -> dict:
         """
         Creates a new coding session via POST /v1alpha/sessions.
+        Ensures startingBranch inside githubRepoContext is always provided.
         """
         url = f"{self.api_url}/sessions"
-        resolved_source = source_name or self.resolve_source()
+        if not source_name or not starting_branch:
+            res_source, res_branch = self.resolve_source()
+            resolved_source = source_name or res_source
+            resolved_branch = starting_branch or res_branch
+        else:
+            resolved_source = source_name
+            resolved_branch = starting_branch
 
         payload = {
             "prompt": prompt,
             "title": title or "Reorder Poem Lines",
             "requirePlanApproval": False,
             "sourceContext": {
-                "source": resolved_source
+                "source": resolved_source,
+                "githubRepoContext": {
+                    "startingBranch": resolved_branch or "main"
+                }
             }
         }
-        if starting_branch:
-            payload["sourceContext"]["githubRepoContext"] = {"startingBranch": starting_branch}
 
-        logger.info(f"Creating Jules session at {url} (source: {resolved_source})...")
+        logger.info(f"Creating Jules session at {url} (source: {resolved_source}, branch: {resolved_branch or 'main'})...")
         res = requests.post(url, headers=self._get_headers(), json=payload, timeout=30)
-        res.raise_for_status()
+        try:
+            res.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"Failed to create Jules session (HTTP {res.status_code}): {res.text}")
+            raise e
+
         session_data = res.json()
         logger.info(f"Successfully created Jules session: {session_data.get('name')} (ID: {session_data.get('id')}, State: {session_data.get('state')})")
         return session_data
@@ -350,11 +383,12 @@ class JulesAPI:
         )
 
         try:
-            source_name = self.resolve_source()
+            source_name, starting_branch = self.resolve_source()
             session = self.create_session(
                 prompt=full_prompt,
                 title=f"Reorder {filename}",
-                source_name=source_name
+                source_name=source_name,
+                starting_branch=starting_branch
             )
             session_id = session.get("name") or session.get("id")
 
