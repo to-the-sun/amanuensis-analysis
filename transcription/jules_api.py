@@ -14,7 +14,7 @@ except NameError:
 
 
 DEFAULT_JULES_API_URL = "https://jules.googleapis.com/v1alpha"
-DEFAULT_JULES_SOURCE = "to_the_sun/amanuensis-analysis"
+DEFAULT_JULES_SOURCE = "to-the-sun/amanuensis-analysis"
 
 
 def parse_unidiff_patch(patch_str: str, target_filename: str) -> str:
