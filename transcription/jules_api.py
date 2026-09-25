@@ -71,7 +71,7 @@ class JulesAPI:
         source_repo: str = None,
         credentials_path: str = None,
         poll_interval: int = 5,
-        poll_timeout: int = 300,
+        poll_timeout: int = None,
     ):
         self.api_url = (api_url or os.environ.get("JULES_API_URL") or DEFAULT_JULES_API_URL).rstrip("/")
         self.api_key = api_key or os.environ.get("JULES_API_KEY") or os.environ.get("JULES_API_TOKEN") or os.environ.get("JULES_TOKEN")
@@ -278,16 +278,22 @@ class JulesAPI:
     def poll_session(self, session_id: str, poll_interval: int = None, timeout: int = None) -> dict:
         """
         Polls GET /v1alpha/sessions/{sessionId} until the session reaches COMPLETED or FAILED state.
+        By default, polling continues without timing out unless timeout parameter or poll_timeout is specified.
         """
         clean_id = session_id.split("/")[-1]
         url = f"{self.api_url}/sessions/{clean_id}"
         interval = poll_interval or self.poll_interval
-        max_time = timeout or self.poll_timeout
+        max_time = timeout if timeout is not None else self.poll_timeout
 
         start_time = time.time()
-        logger.info(f"Polling session {clean_id} every {interval}s (timeout: {max_time}s)...")
+        timeout_str = f" (timeout: {max_time}s)" if max_time is not None else " (no timeout)"
+        logger.info(f"Polling session {clean_id} every {interval}s{timeout_str}...")
 
-        while time.time() - start_time < max_time:
+        while True:
+            if max_time is not None and (time.time() - start_time >= max_time):
+                logger.error(f"Timed out after {max_time}s polling session {clean_id}.")
+                return {"name": f"sessions/{clean_id}", "state": "TIMEOUT"}
+
             try:
                 res = requests.get(url, headers=self._get_headers(), timeout=15)
                 res.raise_for_status()
@@ -307,9 +313,6 @@ class JulesAPI:
                 logger.warning(f"Error polling session {clean_id}: {e}")
 
             time.sleep(interval)
-
-        logger.error(f"Timed out after {max_time}s polling session {clean_id}.")
-        return {"name": f"sessions/{clean_id}", "state": "TIMEOUT"}
 
     def get_activities(self, session_id: str) -> list:
         """
