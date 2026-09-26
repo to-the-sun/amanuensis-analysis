@@ -16,6 +16,25 @@ Generates high-resolution HTML reports and MP4 videos featuring real-time transi
 python3 analysis/analyze_files.py "path/to/audio.wav"
 ```
 
+### Pattern Recognition & Bar Length Finder (`pattern_finder.py`)
+Finds repeating structural patterns and determines optimal bar length using Dynamic Time Warping (DTW) on audio segment features. Includes a real-time Tkinter/Matplotlib GUI visualization showing segment comparisons and extracted pattern clips.
+
+**Usage:**
+```bash
+python3 analysis/pattern_finder.py "path/to/audio.wav" [options]
+```
+
+**Global Variables & Options:**
+*   `MIN_SEGMENT_LEN_MS` (default: 100ms): Starting segment length for DTW comparison.
+*   `ATOM_ITERATION_MS` (default: 50ms): Step size added to segment length on each iteration.
+*   `--threshold THRESHOLD`: Similarity threshold for DTW matches (default: 0.75).
+*   `--max-len MAX_MS`: Optional upper limit on segment length to test in milliseconds.
+*   `--no-gui`: Runs pattern analysis in headless CLI mode without rendering the Tkinter window.
+
+**Outputs:**
+*   **Optimal Bar Length:** Selected as the segment length yielding the maximum total duration of repeating patterns.
+*   **Pattern WAV Files:** Automatically extracts and saves each identified pattern segment as a new WAV file in the input audio file's directory (e.g. `song_bar_100ms_pattern_1.wav`).
+
 ### Real-Time Playback (`play_files.py`)
 Audibly plays audio files while simultaneously running the transient analysis engine and printing results to the console.
 
