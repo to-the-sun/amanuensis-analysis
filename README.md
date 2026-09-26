@@ -17,7 +17,15 @@ python3 analysis/analyze_files.py "path/to/audio.wav"
 ```
 
 ### Pattern Recognition & Bar Length Finder (`pattern_finder.py`)
-Finds repeating structural patterns and determines optimal bar length using Dynamic Time Warping (DTW) on audio segment features. Includes a real-time Tkinter/Matplotlib GUI visualization showing segment comparisons and extracted pattern clips.
+Finds repeating structural patterns and determines optimal bar length using transient-guided Dynamic Time Warping (DTW) on audio segment features.
+
+**Workflow & Optimization:**
+1. Performs full-file onset transient detection (`librosa.onset.onset_detect`).
+2. Evaluates the time difference between every transient pair across the audio file.
+3. Rounds each inter-transient interval to the nearest atom of iteration (50ms) to form a plausible set of candidate segment lengths.
+4. Executes Dynamic Time Warping (DTW) feature comparison across contiguous audio segments for each candidate length.
+5. Displays real-time GUI segment highlights and pattern duration metrics on a Tkinter/Matplotlib canvas.
+6. Saves extracted pattern clips at the optimal bar length directly as standalone WAV files in the input folder.
 
 **Usage:**
 ```bash
@@ -25,15 +33,15 @@ python3 analysis/pattern_finder.py "path/to/audio.wav" [options]
 ```
 
 **Global Variables & Options:**
-*   `MIN_SEGMENT_LEN_MS` (default: 100ms): Starting segment length for DTW comparison.
-*   `ATOM_ITERATION_MS` (default: 50ms): Step size added to segment length on each iteration.
+*   `MIN_SEGMENT_LEN_MS` (default: 100ms): Minimum segment length for candidate filtering.
+*   `ATOM_ITERATION_MS` (default: 50ms): Atom of iteration used to round inter-transient intervals.
 *   `--threshold THRESHOLD`: Similarity threshold for DTW matches (default: 0.75).
 *   `--max-len MAX_MS`: Optional upper limit on segment length to test in milliseconds.
 *   `--no-gui`: Runs pattern analysis in headless CLI mode without rendering the Tkinter window.
 
 **Outputs:**
-*   **Optimal Bar Length:** Selected as the segment length yielding the maximum total duration of repeating patterns.
-*   **Pattern WAV Files:** Automatically extracts and saves each identified pattern segment as a new WAV file in the input audio file's directory (e.g. `song_bar_100ms_pattern_1.wav`).
+*   **Optimal Bar Length:** Selected as the candidate segment length yielding the maximum total duration of repeating patterns.
+*   **Pattern WAV Files:** Automatically extracts and saves each identified pattern segment as a new WAV file in the input audio file's directory (e.g. `song_bar_750ms_pattern_1.wav`).
 
 ### Real-Time Playback (`play_files.py`)
 Audibly plays audio files while simultaneously running the transient analysis engine and printing results to the console.

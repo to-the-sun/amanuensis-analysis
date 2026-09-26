@@ -12,16 +12,17 @@ The `analysis` module provides high-performance audio transient analysis, pitch 
 ### Core Architecture
 - **Global Variables:**
   - `MIN_SEGMENT_LEN_MS = 100`: Minimum initial segment length in milliseconds.
-  - `ATOM_ITERATION_MS = 50`: Increment added to segment length on each iteration.
+  - `ATOM_ITERATION_MS = 50`: Atom of iteration used for rounding inter-transient time intervals.
   - `SIMILARITY_THRESHOLD = 0.75`: Normalized similarity threshold for DTW matches.
 - **Workflow:**
-  1. Audio feature matrix extraction at 16kHz resolution (10ms frame hop).
-  2. Iterative segmentation from `MIN_SEGMENT_LEN_MS` increasing by `ATOM_ITERATION_MS`.
-  3. Pairwise Dynamic Time Warping (DTW) cosine distance calculation between segment feature matrices.
-  4. Identification and contiguous grouping of similar segments into patterns.
-  5. Bar length selection based on maximum total duration of identified patterns.
-  6. Exporting each identified pattern as an individual WAV file in the input audio folder.
-  7. Real-time visualization via Tkinter/Matplotlib canvas (`analysis/pattern_gui.py`).
+  1. Full-file onset transient detection (`librosa.onset.onset_detect`).
+  2. Pairwise time difference calculation between all detected transients.
+  3. Rounding inter-transient durations to the nearest `ATOM_ITERATION_MS` (50ms) to produce a plausible set of candidate segment lengths.
+  4. Dynamic Time Warping (DTW) feature comparison across contiguous audio segments for each candidate length.
+  5. Contiguous grouping of matching segments into patterns.
+  6. Bar length selection based on maximum total duration of identified patterns.
+  7. Exporting each identified pattern as an individual WAV file in the input audio folder.
+  8. Real-time visualization via Tkinter/Matplotlib canvas (`analysis/pattern_gui.py`) with update throttling (~20 FPS) for visual smoothness.
 
 ---
 

@@ -39,6 +39,58 @@ def extract_frame_features(y, sr, hop_length=160):
     return y, sr, features, frame_duration_ms
 
 
+def detect_transient_candidate_lengths(y, sr, min_seg_ms=MIN_SEGMENT_LEN_MS, atom_ms=ATOM_ITERATION_MS, max_seg_ms=None):
+    """
+    Detects transients in the entire audio file, computes pairwise time differences between all transients,
+    rounds each difference to the nearest atom_ms (50ms), and returns a sorted list of unique candidate
+    segment lengths.
+    """
+    print("Detecting transients across audio file...")
+    # Onset strength envelope and peak detection
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, backtrack=False)
+    onset_times_ms = librosa.frames_to_time(onset_frames, sr=sr) * 1000.0
+
+    print(f"Detected {len(onset_times_ms)} transients.")
+
+    if len(onset_times_ms) < 2:
+        print("Not enough transients detected. Falling back to default range.")
+        total_dur_ms = (len(y) / sr) * 1000.0
+        upper_ms = total_dur_ms / 2.0 if max_seg_ms is None else min(total_dur_ms / 2.0, max_seg_ms)
+        curr = min_seg_ms
+        candidates = []
+        while curr <= upper_ms:
+            candidates.append(curr)
+            curr += atom_ms
+        return candidates
+
+    candidate_set = set()
+    total_dur_ms = (len(y) / sr) * 1000.0
+    upper_ms = total_dur_ms / 2.0 if max_seg_ms is None else min(total_dur_ms / 2.0, max_seg_ms)
+
+    # Assess time difference between every transient with every other transient
+    for i in range(len(onset_times_ms)):
+        for j in range(i + 1, len(onset_times_ms)):
+            diff_ms = abs(onset_times_ms[j] - onset_times_ms[i])
+            # Round to nearest atom_ms (50ms)
+            rounded_ms = int(round(diff_ms / atom_ms)) * atom_ms
+
+            if min_seg_ms <= rounded_ms <= upper_ms:
+                candidate_set.add(rounded_ms)
+
+    candidate_lengths = sorted(list(candidate_set))
+
+    if not candidate_lengths:
+        print("No valid transient interval candidates found in range. Falling back to default step range.")
+        curr = min_seg_ms
+        while curr <= upper_ms:
+            candidate_lengths.append(curr)
+            curr += atom_ms
+
+    print(f"Generated {len(candidate_lengths)} plausible segment lengths from transient intervals.")
+    return candidate_lengths
+
+
 def compute_segment_dtw_similarity(feat1, feat2):
     """
     Computes DTW similarity score between two segment feature matrices feat1 and feat2.
@@ -140,8 +192,8 @@ def analyze_segment_length(y, sr, features, frame_dur_ms, seg_len_ms, similarity
 
 def find_patterns(audio_path, min_segment_ms=MIN_SEGMENT_LEN_MS, atom_iteration_ms=ATOM_ITERATION_MS, similarity_threshold=SIMILARITY_THRESHOLD, max_len_ms=None, gui_mode=True):
     """
-    Full pipeline to search for patterns across segment lengths, determine optimal bar length,
-    and export pattern WAV files.
+    Full pipeline to search for patterns across transient-derived segment lengths,
+    determine optimal bar length, and export pattern WAV files.
     """
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -159,21 +211,16 @@ def find_patterns(audio_path, min_segment_ms=MIN_SEGMENT_LEN_MS, atom_iteration_
 
     print(f"Audio duration: {total_duration_ms:.2f} ms ({total_duration_ms/1000.0:.2f} s)")
 
-    upper_limit_ms = total_duration_ms / 2.0
-    if max_len_ms is not None:
-        upper_limit_ms = min(upper_limit_ms, max_len_ms)
+    # Conduct transient detection to find candidate segment lengths
+    segment_lengths = detect_transient_candidate_lengths(
+        y=y,
+        sr=sr,
+        min_seg_ms=min_segment_ms,
+        atom_ms=atom_iteration_ms,
+        max_seg_ms=max_len_ms
+    )
 
-    if upper_limit_ms < min_segment_ms:
-        print("Audio file is too short or max length setting is smaller than minimum segment length.")
-        return
-
-    segment_lengths = []
-    curr_len = min_segment_ms
-    while curr_len <= upper_limit_ms:
-        segment_lengths.append(curr_len)
-        curr_len += atom_iteration_ms
-
-    print(f"Testing segment lengths from {min_segment_ms} ms to {segment_lengths[-1]} ms (step: {atom_iteration_ms} ms)...")
+    print(f"Testing {len(segment_lengths)} plausible segment lengths (range: {segment_lengths[0]} ms to {segment_lengths[-1]} ms)...")
 
     gui_handler = None
     if gui_mode:
@@ -253,7 +300,7 @@ def find_patterns(audio_path, min_segment_ms=MIN_SEGMENT_LEN_MS, atom_iteration_
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Find audio patterns and bar length using Dynamic Time Warping (DTW).")
+    parser = argparse.ArgumentParser(description="Find audio patterns and bar length using transient-guided Dynamic Time Warping (DTW).")
     parser.add_argument("audio_file", nargs="?", help="Path to input audio file.")
     parser.add_argument("--min-segment", type=int, default=MIN_SEGMENT_LEN_MS, help="Minimum segment length in ms (default: 100ms).")
     parser.add_argument("--atom-iteration", type=int, default=ATOM_ITERATION_MS, help="Atom of iteration in ms (default: 50ms).")

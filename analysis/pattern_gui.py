@@ -1,3 +1,4 @@
+import time
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
@@ -13,6 +14,10 @@ class PatternGUIHandler:
         self.sr = sr
         self.total_duration_ms = total_duration_ms
         self.time_axis_s = np.linspace(0, len(y) / sr, len(y))
+
+        # GUI Throttling
+        self.last_update_time = 0
+        self.update_interval_s = 0.05  # Throttle updates to ~20 FPS max
 
         # Tkinter Root Window
         self.root = tk.Tk()
@@ -72,10 +77,16 @@ class PatternGUIHandler:
 
         self.root.update()
 
-    def update_testing_segment(self, seg_len_ms, seg1, seg2, similarity):
+    def update_testing_segment(self, seg_len_ms, seg1, seg2, similarity, force=False):
         """
         Visually highlight the two segments currently being compared via DTW.
+        Throttled to maintain performance.
         """
+        now = time.time()
+        if not force and (now - self.last_update_time < self.update_interval_s):
+            return
+
+        self.last_update_time = now
         try:
             self.lbl_status.config(
                 text=f"Testing Segment Length: {seg_len_ms} ms  |  Comparing Segment {seg1['index']} & {seg2['index']}"
