@@ -136,6 +136,7 @@ Both `Amanuensis.py` and the transcription bots require a `credentials.json` fil
 ```json
 {
   "token": "YOUR_DISCORD_BOT_TOKEN",
-  "aqua_key": "YOUR_AQUAVOICE_API_KEY"
+  "aqua_key": "YOUR_AQUAVOICE_API_KEY",
+  "typesafe_api_key": "YOUR_TYPESAFE_JEV_API_KEY"
 }
 ```
