@@ -34,18 +34,20 @@ if !errorlevel! neq 0 (
 echo [2/4] Python packages verified.
 echo.
 
-echo [3/4] Checking Google Jules API credentials...
-if defined JULES_API_KEY (
-    echo [3/4] [SUCCESS] JULES_API_KEY environment variable detected.
+echo [3/4] Checking TypeSafe Jev API credentials...
+if defined TYPESAFE_API_KEY (
+    echo [3/4] [SUCCESS] TYPESAFE_API_KEY environment variable detected.
+) else if defined JEV_API_KEY (
+    echo [3/4] [SUCCESS] JEV_API_KEY environment variable detected.
 ) else (
     if exist credentials.json (
         echo [3/4] [SUCCESS] Local credentials.json detected.
     ) else (
-        echo [3/4] [NOTICE] No JULES_API_KEY environment variable or credentials.json found.
-        echo                 Generate an API key at jules.google.com/settings and save 'jules_api_key' in credentials.json.
+        echo [3/4] [NOTICE] No TYPESAFE_API_KEY environment variable or credentials.json found.
+        echo                 Generate an API key at console.typesafe.ai and save 'typesafe_api_key' in credentials.json.
     )
 )
-echo [3/4] Jules API check complete.
+echo [3/4] TypeSafe Jev API check complete.
 echo.
 
 echo [4/4] Starting Transcription Bot [Aqua]...

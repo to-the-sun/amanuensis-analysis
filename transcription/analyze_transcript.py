@@ -925,19 +925,13 @@ class BaseTranscriptionBot(discord.Client):
 
                     try:
                         try:
-                            from transcription.jules_api import submit_to_jules
+                            from transcription.jev_api import reorder_poem_lines_via_jev
                         except ImportError:
-                            from jules_api import submit_to_jules
-
-                        prompt = (
-                            "reorder all of the lines in this text file so that the most grammatically "
-                            "correct ones appear at the top and the least grammatically correct appear at "
-                            "the bottom. This should take into account the grammar both intra-line and inter-line."
-                        )
+                            from jev_api import reorder_poem_lines_via_jev
 
                         loop = asyncio.get_running_loop()
                         reordered_file_path = await loop.run_in_executor(
-                            self._executor, submit_to_jules, unordered_file_path, prompt, ordered_file_path
+                            self._executor, reorder_poem_lines_via_jev, unordered_file_path, None, ordered_file_path
                         )
 
                         with open(reordered_file_path, "r", encoding="utf-8") as f:
@@ -945,9 +939,9 @@ class BaseTranscriptionBot(discord.Client):
 
                         if reordered_lines:
                             poem_lines = reordered_lines
-                            logger.info(f"Reordered poem lines updated via Jules API from {reordered_file_path}")
+                            logger.info(f"Reordered poem lines updated via Jev API from {reordered_file_path}")
                     except Exception as e:
-                        logger.error(f"Failed to reorder poem lines via Jules API: {e}")
+                        logger.error(f"Failed to reorder poem lines via Jev API: {e}")
 
                     response = "\n".join(poem_lines).strip()
                     if len(response) > 1800:

@@ -35,6 +35,14 @@ Examine how lines connect to and interact with neighboring lines in sequence:
 
 ---
 
+## Jev API Integration
+In addition to or in place of general LLM prompting, candidate poem lines, couplets, or triplets are evaluated via TypeSafe's Jev API (`transcription/jev_api.py`). For each candidate phrase, Jev is asked the Noul question:
+`"Is this a complete phrase with proper grammar?"`
+
+Jev returns a `noul` likelihood percentage (a float from 0.0 to 1.0). Phrases and couplets/triplets are compared and ranked in descending order based on this percentage score to determine the final sequence saved to `ordered_poem_lines.txt`.
+
+---
+
 ## Step-by-Step Ranking Methodology
 
 When processing a raw list of lines, execute the following procedure:
