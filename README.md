@@ -1,138 +1,130 @@
-# Audio Analysis and Transcription Suite
+# Audio Analysis, Synthesis, & Transcription Suite
 
-This repository contains a suite of tools for advanced audio transient analysis and real-time Discord voice transcription. The project is divided into two primary components: `analysis/` for structural audio visualization and `transcription/` for AI-powered voice-to-text.
+A comprehensive repository for advanced audio signal processing, transient analysis, polyphonic pitch tracking, stem tuning, additive synthesis, and real-time Discord voice transcription with AI-driven poetic parsing.
 
 ---
 
-## 1. Analyze (`analysis/`)
+## Repository Architecture
 
-The analysis suite focuses on identifying rhythmic energy, structural patterns, and transient density within audio files.
+```
+├── analysis/              # Transient analysis, pitch tracking, clustering & Amanuensis bot
+├── additive_synthesis/    # Additive synthesis engine, presets & psychoacoustic test suite
+├── transcription/         # Aqua Voice transcription bots, IPA overrides & Jev API ranking
+└── tune_stems.py          # Continuous stem pitch alignment utility via Rubber Band
+```
 
-### Interactive Reports (`analyze_files.py` & `cumulative_transience.py`)
-Generates high-resolution HTML reports and MP4 videos featuring real-time transient tracking.
+---
+
+## 1. Analysis Suite (`analysis/`)
+
+The analysis suite provides high-resolution transient detection, polyphonic pitch tracking, feature clustering, and Discord automation.
+
+### C/Cython Transient Engine (`analyze_files.py`, `cumulative_transience.c`, `ct_extension.pyx`)
+Features a high-performance signal processing engine using a centered Short-Time Fourier Transform (STFT, `n_fft=2048`, `1ms` hop size) mapped to a 128-band Slaney Mel scale.
+* **Spectral Division:** Onset strength is evaluated across 4 Mel sub-bands (32 bins per band): Sub-Bass (0–1.02 kHz), Bass/Low-Mid (0.99–2.85 kHz), High-Mid (2.76–7.93 kHz), and Treble (7.68–22.05 kHz).
+* **High Temporal Resolution:** Onset strength is evaluated at a 1 ms frame resolution with a 5-second historical cumulative buffer and automatic 15-second decay sweeps.
+* **Outputs:** High-resolution interactive HTML reports and MP4 visualization videos with synchronized transient tracking.
 
 **Usage:**
 ```bash
 python3 analysis/analyze_files.py "path/to/audio.wav"
 ```
 
-### Real-Time Playback (`play_files.py`)
-Audibly plays audio files while simultaneously running the transient analysis engine and printing results to the console.
+### Real-Time Playback Analysis (`play_files.py`)
+Plays WAV files audibly while running the Cython transient analysis engine simultaneously and logging live peak metrics to the console.
 
 **Usage:**
 ```bash
-python3 analysis/play_files.py "path/to/audio.wav"
+python3 analysis/play_files.py "path/to/audio.wav" [--device INDEX_OR_NAME] [--mock]
 ```
-
-**Diagnostic Options:**
-*   `--list-devices`: Displays all available audio output devices and their indices.
-*   `--device INDEX_OR_NAME`: Manually specify a playback device if the default is incorrect.
-*   `--mock`: Runs the analysis without attempting audio output (useful for headless environments).
 
 ### Pitch Tracking & Tuning Regression (`pitch_tracker.py`)
-Analyzes polyphonic recordings (such as guitar tracks) for continuous dominant pitch and steady tuning regression over time, without needing complex sound separation.
+Tracks continuous dominant pitch and tuning drift in polyphonic audio without requiring source separation.
 
 **Usage:**
 ```bash
-python3 analysis/pitch_tracker.py "path/to/audio.wav" [options]
+python3 analysis/pitch_tracker.py "path/to/audio.wav" --algo piptrack --fmin 50 --fmax 1000
 ```
+* **Algorithms:** Supports `yin`, `pyin`, and `piptrack` (spectral peak tracking recommended for polyphonic mixes).
+* **Outputs:** Generates CSV datasets (timestamps, Hz, fractional MIDI, note names, cents deviation) and high-resolution 2-panel visualization plots (spectrogram with pitch overlay and linear fractional MIDI timeline with equal-tempered gridlines).
 
-**Options & Customization:**
-*   `--algo {yin, pyin, piptrack}`: Pitch tracking algorithm to use. `piptrack` is highly recommended for finding the single most prominent spectral peak in dense polyphonic mixtures (default: `yin`).
-*   `--fmin HZ` & `--fmax HZ`: Customize tracking frequency range (default: 50Hz to 1000Hz).
-*   `--hop_length SAMPLES`: Specify analysis frame hop size (default: 512).
-*   `--output-img PATH` & `--output-csv PATH`: Custom output paths for the plot and CSV export.
-*   `--no-plot`: Disable generating/saving the matplotlib figure.
-*   `--interactive`: Show the plot in an interactive Matplotlib window.
+### Audio Feature Clustering (`generate_and_cluster.py`)
+Generates audio samples across musical archetypes, extracts features (MFCCs, spectral centroid, spectral flatness, chroma, onset autocorrelation), performs clustering, and exports 2x2 comparison projection grids (`analysis/cluster_analysis.png`).
 
-**Outputs:**
-*   **High-Resolution Visualization Plot (`.png`):** Generates a beautiful 2-panel visual analysis:
-    1.  *Spectrogram with Hz Overlay:* Displays the full polyphonic spectral context as a background with the tracked pitch curve overlaid.
-    2.  *Linear MIDI Timeline:* Plots the pitch as fractional MIDI numbers. Includes horizontal equal-tempered gridlines labeled with standard musical note names (e.g. C4, D#3) so tuning drift, vibratos, slides, and regression are instantly visible.
-*   **Detailed CSV Dataset (`.csv`):** Exports timestamps, continuous frequency (Hz), fractional MIDI values, closest note, tuning deviation in cents (e.g., `+12c`, `-34c`), and confidence scores.
-
-*   **Spectral Division:** Uses a Mel Spectrogram (128 bands) to split audio into four distinct bands for perceptual granularity:
-    *   **Sub-Bass (Bins 0-31):** 0 Hz – 1,024 Hz (at 44.1 kHz)
-    *   **Bass/Low-Mid (Bins 32-63):** 992 Hz – 2,849 Hz (at 44.1 kHz)
-    *   **High-Mid (Bins 64-95):** 2,759 Hz – 7,926 Hz (at 44.1 kHz)
-    *   **Treble (Bins 96-127):** 7,676 Hz – 22,050 Hz (at 44.1 kHz)
-*   **Temporal Resolution:** Onset strength is calculated with a **1ms resolution**, ensuring even the fastest attacks are captured.
-*   **Cumulative Buffer:** A 5001-sample (5-second) historical buffer tracks accumulated transient energy.
-    *   **Cleanup Sweep:** To prevent perpetual accumulation, transient contributions are subtracted from the buffer exactly 15 seconds after they are added.
-    *   **Peak Identification:** Identifies and labels the top three peaks in the buffer in real-time:
-        *   **Gold (#f1c40f):** 1st largest peak.
-        *   **Silver (#ecf0f1):** 2nd largest peak.
-        *   **Bronze (#bdc3c7):** 3rd largest peak.
-    *   **Scaling:** Dynamic Y-axis scaling excludes the last 100ms of the buffer to prevent visual distortion from the alignment peak.
-*   **Video Generation:** Produces MP4s with synchronized transient graphs and mono audio (forced via FFmpeg for size efficiency).
-
-### Automation: Amanuensis (`Amanuensis.py`)
-A Discord bot that automates the deployment of the analysis pipeline.
-
-*   **Monitoring:** Watches a local directory for new `.wav` files.
-*   **Conversion:** Automatically converts high-res WAVs to mono MP3s, dynamically adjusting bitrate to stay under Discord's 10MB limit.
-*   **Discord Integration:**
-    *   Uploads the MP3 to a designated `#works-in-progress` channel.
-    *   Posts a notification in `#general` and cleans up previous bot notifications.
-    *   Uses alphanumeric segment-based matching to delete older versions of the same file.
-*   **Background Processing:** Transient analysis and video generation are offloaded to background threads (using `asyncio.to_thread`) to prevent blocking the bot's heartbeat.
-*   **Recency Logic:** Skips files by comparing their Modified/Created UTC timestamps against the timestamp of the bot's most recent post in the history.
+### Amanuensis Automation Bot (`Amanuensis.py`)
+A Discord bot that monitors local directories for WAV uploads, converts them to MP3 (dynamically adjusting bitrates under 10MB), runs transient analysis in background threads, and posts synchronized MP3s and MP4 videos to designated channels (`#works-in-progress`, `#general`).
 
 ---
 
-## 2. Transcription (`transcription/`)
+## 2. Continuous Stem Tuning (`tune_stems.py`)
 
-The transcription suite provides real-time voice-to-text capabilities for Discord voice channels, with a focus on poetic formatting and linguistic analysis.
-
-### Aqua Transcription Bot (`transcription_bot_aqua.py`)
-A sophisticated Discord bot utilizing the AquaVoice API.
+Performs high-quality, continuous, time-varying pitch alignment of song stems relative to a prepended reference stem (`00_base_stem.wav`).
 
 **Usage:**
 ```bash
-python3 transcription/transcription_bot_aqua.py
+python3 tune_stems.py "path/to/00_reference.wav" "path/to/vocal_stem.wav" "path/to/synth_stem.wav" --algo pyin --formant
 ```
-
-*   **DAVE Decryption:** Implements custom patches for `discord.ext.voice_recv` to handle Discord's End-to-End Encryption (DAVE). It manages AES-GCM decryption and tracks Sequence Numbers/Roll-Over Counters (ROC) for stable audio streams.
-*   **Real-time Transcription:**
-    *   Connects to the `avalon-v1.5` model via the AquaVoice API.
-    *   Uses an in-memory buffer system to process audio chunks only when sufficient activity (RMS threshold) is detected.
-*   **Poetic Parsing:** A deterministic engine that formats raw transcripts into verse:
-    *   Splits lines based on punctuation (`. ! ? , ; : ( ) -`).
-    *   Lowercases the start of every line.
-    *   **Question Marks:** Specifically preserved and re-attached to the end of lines.
-    *   Word-internal punctuation (like apostrophes) is maintained.
-*   **Slash Commands:**
-    *   `/analyze`: Performs a deep dive into the channel's history.
-        *   Counts syllables for every line using NLTK (CMUdict) and the `syllables` library.
-        *   Detects rhymes using the `SoundsLike` library (vowel-class homophones).
-        *   Generates a poem by grouping lines by rhyme sound, selecting the syllable count with the highest weighted score (syllables * frequency).
-    *   `/purge`: Clears the transcription channel history.
-*   **Stability:** Includes a health-check loop that monitors decryption failures and automatically reconnects the voice client if the stream stalls.
+* **Interval-Relative Correction:** Calculates relative semitone deviations, applies temporal Gaussian smoothing, and passes time-varying pitch maps to `rubberband-cli` (`--pitchmap`).
+* **Multi-Channel & Formant Support:** Preserves multi-channel audio layout, duration, and optional vocal formant structures (`--formant`).
 
 ---
 
-## Installation & Dependencies
+## 3. Additive Synthesis (`additive_synthesis/`)
 
-### System Dependencies
-The suite requires standard audio and DSP libraries:
+A mathematical additive synthesis synthesizer supporting custom sinusoids, time-varying dynamic envelopes, interactive wave shapes, and automated psychoacoustic diagnostics.
+
+**Usage:**
 ```bash
-sudo apt-get update && sudo apt-get install -y libsndfile1-dev libaubio-dev libjson-c-dev libfftw3-dev ffmpeg
+python3 additive_synthesis/additive_synthesis.py [preset.json]
+```
+* **Built-in Presets:** Includes `square.json`, `bell.json`, `complex.json`, `cosmic` (16-step spatial detuned texture), and `generative` (deterministic algorithmic sound generator).
+* **Symbolic Equations:** Displays live updated mathematical equations in text, LaTeX, and Sigma ($\sum$) sum notation.
+* **Automated Psychoacoustic Test Suite:** Runs quantitative diagnostics checking Sethares Roughness, Lower Interval Limit (LIL) violations, low-frequency beating, and decay-frequency coupling:
+  ```bash
+  python3 -m unittest additive_synthesis/test_suite.py
+  ```
+
+---
+
+## 4. Voice Transcription & Poetic Parsing (`transcription/`)
+
+Real-time Discord voice transcription, IPA syllabification, weak vowel override resolution, and AI grammatical poem ranking.
+
+### Transcription Bots (`transcription_bot_aqua.py` & `desktop_transcriber.py`)
+* **Aqua Voice Integration:** Connects to Avalon (`avalon-v1.5`) API. Speech utterances are accumulated in memory buffers and submitted when total speech reaches $\ge 10.0$ seconds or after 49 seconds of channel inactivity.
+* **DAVE Decryption:** Patches `discord.ext.voice_recv` to handle Discord's End-to-End Encryption (AES-GCM decryption with sequence number and ROC tracking).
+* **Desktop Audio Capture:** `desktop_transcriber.py` uses `soundcard` loopback audio recording with RMS Voice Activity Detection (300ms pre-roll, 1.0s silence timeout).
+* **Punctuation & Sentence Splitting:** `poetic_parse` removes periods after uppercase abbreviations and splits text on sentence punctuation (`.`, `!`, `?`), placing each phrase on its own line.
+* **IPA & Phonetic Syllabification:** Interleaves syllable-segmented IPA transcriptions (e.g., `/syl1/syl2/ /syl3/`) below each line, incorporating over 8,000 weak-vowels IPA overrides (`ipa_overrides.json`).
+* **Slash Commands (`/analyze`, `/purge`):**
+  * `/analyze`: Builds backward syllable histogram chains, identifies repeating vowel sounds at the optimal syllable distance, formats rhyming syllables in ALL CAPS, temporarily restores original word capitalization for TypeSafe Jev API (`jev_api.py`) grammatical evaluation, and posts the reordered poem.
+  * `/purge`: Clears channel messages and resets in-memory syllable histogram state.
+
+---
+
+## Installation & Setup
+
+### 1. System Dependencies
+```bash
+sudo apt-get update && sudo apt-get install -y \
+    libsndfile1-dev libaubio-dev libjson-c-dev libfftw3-dev \
+    ffmpeg rubberband-cli
 ```
 
-### Python Environment
-Install the required Python modules:
+### 2. Python Dependencies
 ```bash
-pip install librosa numpy scipy matplotlib soundcard soundfile discord.py[voice] discord-ext-voice-recv davey cryptography faster-whisper google-genai torch transformers mido plotly playwright openai requests tqdm nltk syllables SoundsLike pydub eng-to-ipa
+pip install librosa numpy scipy matplotlib soundcard soundfile \
+    discord.py[voice] discord-ext-voice-recv davey cryptography \
+    requests tqdm nltk syllables SoundsLike eng-to-ipa pydub Cython
 ```
 
-### Linguistic Data
-Required for the `/analyze` command in the transcription bot:
+### 3. Linguistic Data
 ```bash
 python3 -m nltk.downloader cmudict averaged_perceptron_tagger
 ```
 
-## Configuration
-Both `Amanuensis.py` and the transcription bots require a `credentials.json` file in the root directory:
+### 4. Credentials Configuration
+Create `credentials.json` in the project root:
 ```json
 {
   "token": "YOUR_DISCORD_BOT_TOKEN",

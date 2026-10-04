@@ -324,7 +324,7 @@ def get_chain_rhyme_pairs(chain):
                     pairs.add(pair_key)
     return pairs
 
-def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
+def reconstruct_line_from_syllables(syllables_list, bold_indices=None, preserve_case=False):
     if not syllables_list:
         return ""
     if bold_indices is None:
@@ -332,7 +332,9 @@ def reconstruct_line_from_syllables(syllables_list, bold_indices=None):
     parts = []
     for idx, item in enumerate(syllables_list):
         syl_text = item['syllable']
-        if idx in bold_indices:
+        if preserve_case:
+            pass
+        elif idx in bold_indices:
             syl_text = syl_text.upper()
         else:
             syl_text = syl_text.lower()
@@ -870,10 +872,13 @@ class BaseTranscriptionBot(discord.Client):
                     return ""
 
                 poem_couplets = []
+                jev_couplets = []
+                couplet_map = {}
                 seen_couplet_keys = set()
 
                 for chain in filtered_chains:
                     chain_lines = []
+                    jev_chain_lines = []
                     for line_idx, l_syls in enumerate(chain):
                         bold_indices = set()
                         for k in range(len(l_syls)):
@@ -892,10 +897,13 @@ class BaseTranscriptionBot(discord.Client):
                                         break
 
                         formatted_line = reconstruct_line_from_syllables(l_syls, bold_indices=bold_indices)
+                        jev_line = reconstruct_line_from_syllables(l_syls, preserve_case=True)
                         chain_lines.append(formatted_line)
+                        jev_chain_lines.append(jev_line)
 
                     # Filter consecutive lines in chain with identical last words
                     filtered_chain_lines = []
+                    filtered_jev_lines = []
                     i = 0
                     while i < len(chain_lines):
                         if i < len(chain_lines) - 1:
@@ -906,14 +914,18 @@ class BaseTranscriptionBot(discord.Client):
                                 i += 1
                                 continue
                         filtered_chain_lines.append(chain_lines[i])
+                        filtered_jev_lines.append(jev_chain_lines[i])
                         i += 1
 
                     if filtered_chain_lines:
                         couplet_str = "\n".join(filtered_chain_lines)
+                        jev_str = "\n".join(filtered_jev_lines)
                         couplet_key = re.sub(r'\s+', ' ', couplet_str).strip().lower()
                         if couplet_key and couplet_key not in seen_couplet_keys:
                             seen_couplet_keys.add(couplet_key)
                             poem_couplets.append(couplet_str)
+                            jev_couplets.append(jev_str)
+                            couplet_map[jev_str] = couplet_str
 
                 if poem_couplets:
                     unordered_file_path = os.path.join(_script_dir, "unordered_poem_lines.txt")
@@ -921,7 +933,7 @@ class BaseTranscriptionBot(discord.Client):
 
                     try:
                         with open(unordered_file_path, "w", encoding="utf-8") as f:
-                            f.write("\n\n".join(poem_couplets) + "\n")
+                            f.write("\n\n".join(jev_couplets) + "\n")
                         logger.info(f"Saved accumulated unordered poem couplets to {unordered_file_path}")
                     except Exception as e:
                         logger.error(f"Failed to save unordered poem couplets to {unordered_file_path}: {e}")
@@ -943,7 +955,10 @@ class BaseTranscriptionBot(discord.Client):
                         reordered_blocks = [b.strip() for b in re.split(r"\n\s*\n", reordered_content) if b.strip()]
 
                         if reordered_blocks:
-                            poem_couplets = reordered_blocks
+                            final_couplets = []
+                            for block in reordered_blocks:
+                                final_couplets.append(couplet_map.get(block, block))
+                            poem_couplets = final_couplets
                             logger.info(f"Reordered poem couplets updated via Jev API from {reordered_file_path}")
                     except Exception as e:
                         logger.error(f"Failed to reorder poem couplets via Jev API: {e}")
