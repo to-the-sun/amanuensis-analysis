@@ -6,11 +6,10 @@
 @echo off
 setlocal enabledelayedexpansion
 
-title Transcription Bot Launcher (Jules-harness)
+title Transcription Bot Launcher
 
 echo ===================================================
 echo     Discord Transcription Bot Launcher
-echo     Google Cloud Project: Jules-harness [714089051017]
 echo ===================================================
 echo.
 
