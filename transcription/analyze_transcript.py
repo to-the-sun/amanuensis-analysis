@@ -869,10 +869,7 @@ class BaseTranscriptionBot(discord.Client):
                         return words[-1].lower()
                     return ""
 
-                poem_couplets = []
-                seen_couplet_keys = set()
-
-                for chain in filtered_chains:
+                def format_chain_with_rhymes(chain):
                     chain_lines = []
                     for line_idx, l_syls in enumerate(chain):
                         bold_indices = set()
@@ -893,19 +890,29 @@ class BaseTranscriptionBot(discord.Client):
 
                         formatted_line = reconstruct_line_from_syllables(l_syls, bold_indices=bold_indices)
                         chain_lines.append(formatted_line)
+                    return "\n".join(chain_lines)
+
+                poem_couplets = []
+                seen_couplet_keys = set()
+                couplet_chain_map = {}
+
+                for chain in filtered_chains:
+                    plain_chain_lines = [reconstruct_line_from_syllables(l_syls) for l_syls in chain]
 
                     # Filter consecutive lines in chain with identical last words
                     filtered_chain_lines = []
+                    filtered_syl_chain = []
                     i = 0
-                    while i < len(chain_lines):
-                        if i < len(chain_lines) - 1:
-                            w1 = get_last_word(chain_lines[i])
-                            w2 = get_last_word(chain_lines[i+1])
+                    while i < len(plain_chain_lines):
+                        if i < len(plain_chain_lines) - 1:
+                            w1 = get_last_word(plain_chain_lines[i])
+                            w2 = get_last_word(plain_chain_lines[i+1])
                             if w1 and w2 and w1 == w2:
-                                logger.info(f"Omit line due to identical last word '{w1}': {chain_lines[i]}")
+                                logger.info(f"Omit line due to identical last word '{w1}': {plain_chain_lines[i]}")
                                 i += 1
                                 continue
-                        filtered_chain_lines.append(chain_lines[i])
+                        filtered_chain_lines.append(plain_chain_lines[i])
+                        filtered_syl_chain.append(chain[i])
                         i += 1
 
                     if filtered_chain_lines:
@@ -914,6 +921,7 @@ class BaseTranscriptionBot(discord.Client):
                         if couplet_key and couplet_key not in seen_couplet_keys:
                             seen_couplet_keys.add(couplet_key)
                             poem_couplets.append(couplet_str)
+                            couplet_chain_map[couplet_key] = filtered_syl_chain
 
                 if poem_couplets:
                     unordered_file_path = os.path.join(_script_dir, "unordered_poem_lines.txt")
@@ -948,7 +956,17 @@ class BaseTranscriptionBot(discord.Client):
                     except Exception as e:
                         logger.error(f"Failed to reorder poem couplets via Jev API: {e}")
 
-                    response = "\n\n".join(poem_couplets).strip()
+                    # Apply upper/lower casing for rhyming/non-rhyming syllables AFTER Jev evaluation
+                    formatted_poem_couplets = []
+                    for block in poem_couplets:
+                        block_key = re.sub(r'\s+', ' ', block).strip().lower()
+                        if block_key in couplet_chain_map:
+                            formatted_block = format_chain_with_rhymes(couplet_chain_map[block_key])
+                            formatted_poem_couplets.append(formatted_block)
+                        else:
+                            formatted_poem_couplets.append(block)
+
+                    response = "\n\n".join(formatted_poem_couplets).strip()
                     if len(response) > 1800:
                         response = response[:1800] + "\n\n... (truncated due to length)"
 
