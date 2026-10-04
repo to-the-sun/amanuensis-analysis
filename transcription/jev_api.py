@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 import requests
@@ -114,33 +115,44 @@ def rank_phrases_via_jev(phrases: list[str], api_key: str = None, max_workers: i
 
 def reorder_poem_lines_via_jev(file_path: str, prompt: str = None, output_file_path: str = None, api_key: str = None) -> str:
     """
-    Reads lines from file_path, queries Jev API with 'Is this a complete phrase with proper grammar?'
-    getting a NOUL response, and ranks all likelihood values to reorder the poem lines into output_file_path.
+    Reads couplets/triplets/blocks from file_path (separated by double newlines or single lines if no double newlines exist),
+    queries Jev API with 'Is this a complete phrase with proper grammar?' getting a NOUL response for each block,
+    and ranks all likelihood values to reorder the couplets/triplets into output_file_path.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Input poem lines file not found: {file_path}")
 
     with open(file_path, "r", encoding="utf-8") as f:
-        lines = [line.strip() for line in f.readlines() if line.strip()]
+        content = f.read()
 
-    if not lines:
-        logger.warning(f"No lines found in {file_path}")
+    # Split by double newlines to treat couplets/triplets as intact blocks
+    raw_blocks = re.split(r"\n\s*\n", content)
+    blocks = [b.strip() for b in raw_blocks if b.strip()]
+
+    # Fallback to single lines if no double-newline blocks were found
+    if not blocks:
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        blocks = lines
+
+    if not blocks:
+        logger.warning(f"No content found in {file_path}")
         out_path = output_file_path or file_path
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("")
         return out_path
 
-    logger.info(f"Evaluating {len(lines)} poem lines via TypeSafe Jev API...")
-    ranked = rank_phrases_via_jev(lines, api_key=api_key)
+    logger.info(f"Evaluating {len(blocks)} couplet/triplet blocks via TypeSafe Jev API...")
+    ranked = rank_phrases_via_jev(blocks, api_key=api_key)
 
     for phrase, score in ranked:
-        logger.info(f"Score {score:.2f} ({score * 100:.1f}%): '{phrase}'")
+        formatted_phrase = phrase.replace('\n', ' / ')
+        logger.info(f"Score {score:.2f} ({score * 100:.1f}%): '{formatted_phrase}'")
 
-    ordered_lines = [phrase for phrase, score in ranked]
+    ordered_blocks = [phrase for phrase, score in ranked]
 
     target_path = output_file_path or file_path
     with open(target_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(ordered_lines) + "\n")
+        f.write("\n\n".join(ordered_blocks) + "\n")
 
-    logger.info(f"Successfully reordered poem lines via Jev API and saved to {target_path}")
+    logger.info(f"Successfully reordered {len(ordered_blocks)} couplet/triplet blocks via Jev API and saved to {target_path}")
     return target_path

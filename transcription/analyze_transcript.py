@@ -863,10 +863,17 @@ class BaseTranscriptionBot(discord.Client):
                     if not contained:
                         filtered_chains.append(c1)
 
-                poem_lines = []
-                seen_line_keys = set()
+                def get_last_word(line_text):
+                    words = re.findall(r"[a-zA-Z0-9']+", line_text)
+                    if words:
+                        return words[-1].lower()
+                    return ""
+
+                poem_couplets = []
+                seen_couplet_keys = set()
 
                 for chain in filtered_chains:
+                    chain_lines = []
                     for line_idx, l_syls in enumerate(chain):
                         bold_indices = set()
                         for k in range(len(l_syls)):
@@ -885,43 +892,39 @@ class BaseTranscriptionBot(discord.Client):
                                         break
 
                         formatted_line = reconstruct_line_from_syllables(l_syls, bold_indices=bold_indices)
-                        plain_key = re.sub(r'\s+', ' ', formatted_line).strip().lower()
+                        chain_lines.append(formatted_line)
 
-                        if plain_key and plain_key not in seen_line_keys:
-                            seen_line_keys.add(plain_key)
-                            poem_lines.append(formatted_line)
+                    # Filter consecutive lines in chain with identical last words
+                    filtered_chain_lines = []
+                    i = 0
+                    while i < len(chain_lines):
+                        if i < len(chain_lines) - 1:
+                            w1 = get_last_word(chain_lines[i])
+                            w2 = get_last_word(chain_lines[i+1])
+                            if w1 and w2 and w1 == w2:
+                                logger.info(f"Omit line due to identical last word '{w1}': {chain_lines[i]}")
+                                i += 1
+                                continue
+                        filtered_chain_lines.append(chain_lines[i])
+                        i += 1
 
-                def get_last_word(line_text):
-                    words = re.findall(r"[a-zA-Z0-9']+", line_text)
-                    if words:
-                        return words[-1].lower()
-                    return ""
+                    if filtered_chain_lines:
+                        couplet_str = "\n".join(filtered_chain_lines)
+                        couplet_key = re.sub(r'\s+', ' ', couplet_str).strip().lower()
+                        if couplet_key and couplet_key not in seen_couplet_keys:
+                            seen_couplet_keys.add(couplet_key)
+                            poem_couplets.append(couplet_str)
 
-                filtered_poem_lines = []
-                i = 0
-                while i < len(poem_lines):
-                    if i < len(poem_lines) - 1:
-                        w1 = get_last_word(poem_lines[i])
-                        w2 = get_last_word(poem_lines[i+1])
-                        if w1 and w2 and w1 == w2:
-                            logger.info(f"Omit line due to identical last word '{w1}': {poem_lines[i]}")
-                            i += 1
-                            continue
-                    filtered_poem_lines.append(poem_lines[i])
-                    i += 1
-
-                poem_lines = filtered_poem_lines
-
-                if poem_lines:
+                if poem_couplets:
                     unordered_file_path = os.path.join(_script_dir, "unordered_poem_lines.txt")
                     ordered_file_path = os.path.join(_script_dir, "ordered_poem_lines.txt")
 
                     try:
                         with open(unordered_file_path, "w", encoding="utf-8") as f:
-                            f.write("\n".join(poem_lines))
-                        logger.info(f"Saved accumulated unordered poem lines to {unordered_file_path}")
+                            f.write("\n\n".join(poem_couplets) + "\n")
+                        logger.info(f"Saved accumulated unordered poem couplets to {unordered_file_path}")
                     except Exception as e:
-                        logger.error(f"Failed to save unordered poem lines to {unordered_file_path}: {e}")
+                        logger.error(f"Failed to save unordered poem couplets to {unordered_file_path}: {e}")
 
                     try:
                         try:
@@ -935,15 +938,17 @@ class BaseTranscriptionBot(discord.Client):
                         )
 
                         with open(reordered_file_path, "r", encoding="utf-8") as f:
-                            reordered_lines = [line.strip() for line in f.readlines() if line.strip()]
+                            reordered_content = f.read()
 
-                        if reordered_lines:
-                            poem_lines = reordered_lines
-                            logger.info(f"Reordered poem lines updated via Jev API from {reordered_file_path}")
+                        reordered_blocks = [b.strip() for b in re.split(r"\n\s*\n", reordered_content) if b.strip()]
+
+                        if reordered_blocks:
+                            poem_couplets = reordered_blocks
+                            logger.info(f"Reordered poem couplets updated via Jev API from {reordered_file_path}")
                     except Exception as e:
-                        logger.error(f"Failed to reorder poem lines via Jev API: {e}")
+                        logger.error(f"Failed to reorder poem couplets via Jev API: {e}")
 
-                    response = "\n".join(poem_lines).strip()
+                    response = "\n\n".join(poem_couplets).strip()
                     if len(response) > 1800:
                         response = response[:1800] + "\n\n... (truncated due to length)"
 
