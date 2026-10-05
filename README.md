@@ -74,8 +74,8 @@ Provides real-time voice-to-text capabilities for Discord voice channels with ph
 ### Poetic Analysis & Jev Grammar Reordering (`analyze_transcript.py` & `jev_api.py`)
 - **Vowel Histogram & Syllable Matching**: Tracks syllable vowel sounds backward to discover optimal line repetition distances.
 - **Couplet Construction & Jev Evaluation**: Reconstructs plain candidate couplets without capitalizations, saves them to `unordered_poem_lines.txt`, and evaluates their grammatical coherence via TypeSafe Jev API (`jev_api.py`).
-- **Rhyme Formatting Deferral**: Rhyming syllables are converted to `UPPERCASE` and non-rhyming syllables to `lowercase` **only after** Jev API reorders the poem couplets into `ordered_poem_lines.txt`.
-- **Slash Commands**: `/analyze` generates the ranked poem, `/purge` resets channel history and in-memory histogram state.
+- **Rhyme Formatting & Confidence Scores**: Rhyming syllables are converted to `UPPERCASE` and non-rhyming syllables to `lowercase` **after** Jev API reorders the poem couplets into `ordered_poem_lines.txt`. Each displayed couplet includes its Jev confidence score e.g. `(Jev Confidence: XX.X%)`.
+- **Slash Commands**: `/analyze` generates the ranked poem along with Jev confidence scores, `/purge` resets channel history and in-memory histogram state.
 
 ### Batch Launcher (`run_transcription_bot.bat`)
 Single double-click Windows batch launcher that verifies dependencies, resolves API keys (`TYPESAFE_API_KEY` / `JEV_API_KEY`), launches `transcription_bot_aqua.py`, and maintains interactive command line context on exit or error.

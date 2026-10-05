@@ -113,11 +113,12 @@ def rank_phrases_via_jev(phrases: list[str], api_key: str = None, max_workers: i
     results.sort(key=lambda x: (-x[2], x[0]))
     return [(phrase, score) for idx, phrase, score in results]
 
-def reorder_poem_lines_via_jev(file_path: str, prompt: str = None, output_file_path: str = None, api_key: str = None) -> str:
+def reorder_poem_lines_via_jev(file_path: str, prompt: str = None, output_file_path: str = None, api_key: str = None) -> tuple[str, list[tuple[str, float]]]:
     """
     Reads couplets/triplets/blocks from file_path (separated by double newlines or single lines if no double newlines exist),
     queries Jev API with 'Is this a complete phrase with proper grammar?' getting a NOUL response for each block,
     and ranks all likelihood values to reorder the couplets/triplets into output_file_path.
+    Returns a tuple of (output_file_path, ranked_tuples), where ranked_tuples is list of (phrase, score).
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Input poem lines file not found: {file_path}")
@@ -139,7 +140,7 @@ def reorder_poem_lines_via_jev(file_path: str, prompt: str = None, output_file_p
         out_path = output_file_path or file_path
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("")
-        return out_path
+        return out_path, []
 
     logger.info(f"Evaluating {len(blocks)} couplet/triplet blocks via TypeSafe Jev API...")
     ranked = rank_phrases_via_jev(blocks, api_key=api_key)
@@ -155,4 +156,4 @@ def reorder_poem_lines_via_jev(file_path: str, prompt: str = None, output_file_p
         f.write("\n\n".join(ordered_blocks) + "\n")
 
     logger.info(f"Successfully reordered {len(ordered_blocks)} couplet/triplet blocks via Jev API and saved to {target_path}")
-    return target_path
+    return target_path, ranked
