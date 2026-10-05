@@ -934,6 +934,7 @@ class BaseTranscriptionBot(discord.Client):
                     except Exception as e:
                         logger.error(f"Failed to save unordered poem couplets to {unordered_file_path}: {e}")
 
+                    jev_scores_map = {}
                     try:
                         try:
                             from transcription.jev_api import reorder_poem_lines_via_jev
@@ -941,7 +942,7 @@ class BaseTranscriptionBot(discord.Client):
                             from jev_api import reorder_poem_lines_via_jev
 
                         loop = asyncio.get_running_loop()
-                        reordered_file_path = await loop.run_in_executor(
+                        reordered_file_path, ranked_tuples = await loop.run_in_executor(
                             self._executor, reorder_poem_lines_via_jev, unordered_file_path, None, ordered_file_path
                         )
 
@@ -953,6 +954,10 @@ class BaseTranscriptionBot(discord.Client):
                         if reordered_blocks:
                             poem_couplets = reordered_blocks
                             logger.info(f"Reordered poem couplets updated via Jev API from {reordered_file_path}")
+
+                        for phrase, score in ranked_tuples:
+                            phrase_key = re.sub(r'\s+', ' ', phrase).strip().lower()
+                            jev_scores_map[phrase_key] = score
                     except Exception as e:
                         logger.error(f"Failed to reorder poem couplets via Jev API: {e}")
 
@@ -962,9 +967,14 @@ class BaseTranscriptionBot(discord.Client):
                         block_key = re.sub(r'\s+', ' ', block).strip().lower()
                         if block_key in couplet_chain_map:
                             formatted_block = format_chain_with_rhymes(couplet_chain_map[block_key])
-                            formatted_poem_couplets.append(formatted_block)
                         else:
-                            formatted_poem_couplets.append(block)
+                            formatted_block = block
+
+                        if block_key in jev_scores_map:
+                            score = jev_scores_map[block_key]
+                            formatted_block += f"\n(Jev Confidence: {score * 100:.1f}%)"
+
+                        formatted_poem_couplets.append(formatted_block)
 
                     response = "\n\n".join(formatted_poem_couplets).strip()
                     if len(response) > 1800:
