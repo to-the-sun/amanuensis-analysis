@@ -4,11 +4,15 @@ CC ?= gcc
 CFLAGS ?= -O3 -Wall -std=c99
 LDFLAGS ?= -lm
 
+WIN_CC = x86_64-w64-mingw32-gcc
+WIN_CFLAGS = -O3 -Wall -std=c99 -static
+
 TARGET = pitch_separator
+WIN_TARGET = pitch_separator.exe
 SRCS = pitch_separator.c
 OBJS = $(SRCS:.c=.o)
 
-all: $(TARGET)
+all: $(TARGET) win
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
@@ -16,7 +20,10 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-clean:
-	rm -f $(OBJS) $(TARGET) $(TARGET).exe
+win: $(SRCS)
+	$(WIN_CC) $(WIN_CFLAGS) $(SRCS) -o $(WIN_TARGET) $(LDFLAGS)
 
-.PHONY: all clean
+clean:
+	rm -f $(OBJS) $(TARGET) $(WIN_TARGET)
+
+.PHONY: all win clean

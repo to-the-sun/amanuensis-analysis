@@ -12,10 +12,12 @@ A primary mathematical feature of `pitch_separator` is **Perfect Reconstruction 
 `pitch_separator` is built to run standalone on Linux, macOS, and Windows without external dynamic software dependencies.
 
 1. **Drag-and-Drop / Command-Line Interface (CLI)**:
-   - Dragging an audio file onto the executable icon or running `./pitch_separator "path/to/audio.wav"` automatically passes the file path as `argv[1]`.
+   - Dragging an audio file onto `pitch_separator.exe`, `run_pitch_separator.bat`, or running `./pitch_separator "path/to/audio.wav"` passes the file path as `argv[1]`.
 2. **Interactive Double-Click Execution**:
-   - Double-clicking the binary directly without command-line arguments prompts the user to enter or drag-and-drop the file path into the console.
+   - Double-clicking `pitch_separator.exe`, `run_pitch_separator.bat`, or the compiled binary directly without arguments prompts the user in console to enter or drag-and-drop the audio file path.
    - Upon completion or failure, the program pauses (`Press ENTER to exit...`) to prevent console windows from closing instantly.
+3. **Cross-Compilation for Windows**:
+   - The repository includes `pitch_separator.exe` statically compiled using MinGW (`x86_64-w64-mingw32-gcc -O3 -static`) and `run_pitch_separator.bat`, requiring no compiler installation on Windows.
 
 ---
 
