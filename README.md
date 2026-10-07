@@ -6,11 +6,28 @@ The project is organized into three primary subdirectories and root utility scri
 1. `analysis/` – Rhythmic energy tracking, spectral transient analysis, dominant pitch tracking, audio feature clustering, and Discord bot automation.
 2. `transcription/` – Real-time Discord voice-to-text transcription (Aqua Voice API), phonetic syllabification, custom IPA weak-vowel overrides, backward vowel histogram analysis, and AI-driven poem generation (TypeSafe Jev API).
 3. `additive_synthesis/` – Interactive additive sound synthesis engine, LaTeX/Sigma notation displays, preset management, psychoacoustic analysis test suite, and generative sound creation.
-4. `tune_stems.py` – Continuous interval-relative pitch alignment for song stems.
+4. `pitch_separator.c` – C-based Perfect Reconstruction Pitch Stem Separator (drag-and-drop / double-click executable).
+5. `tune_stems.py` – Continuous interval-relative pitch alignment for song stems.
 
 ---
 
-## 1. Stem Tuning & Alignment (`tune_stems.py`)
+## 1. Perfect Reconstruction Pitch Stem Separator (`pitch_separator.c`)
+
+Separates an audio file into individual MIDI integer pitch stems ($0..127$, representing C-1 to G9) using a Short-Time Fourier Transform (STFT) COLA filter bank. Every detected pitch present in the audio file is exported to a separate 16-bit PCM WAV file inside a `<basename>_pitch_stems/` directory.
+
+**Key Features:**
+- **Perfect Reconstruction**: Summing all exported pitch stems sample-by-sample audibly and mathematically reconstructs the original WAV file perfectly.
+- **Double-Click & Drag-and-Drop**: Can be run via drag-and-drop (`./pitch_separator "audio.wav"`) or double-clicking the compiled executable (interactive path prompt with terminal window pause).
+
+**Compilation & Usage:**
+```bash
+make
+./pitch_separator "path/to/audio.wav"
+```
+
+---
+
+## 2. Stem Tuning & Alignment (`tune_stems.py`)
 
 Performs high-quality, continuous, time-varying pitch alignment of song stems relative to a "00" prepended base stem (e.g. `00_bass.wav`). Uses `librosa` for continuous pitch tracking, temporal Gaussian smoothing, and calls `rubberband` with `--pitchmap` to execute time-varying pitch shifting while preserving multi-channel layouts and song duration.
 
@@ -21,7 +38,7 @@ python3 tune_stems.py --stem-dir "path/to/stems" [options]
 
 ---
 
-## 2. Audio Analysis Suite (`analysis/`)
+## 3. Audio Analysis Suite (`analysis/`)
 
 Focuses on identifying rhythmic transient energy, dominant pitch tracking, structural audio patterns, and feature clustering.
 
@@ -57,7 +74,7 @@ A Discord bot that monitors local directories for WAV files, automatically downm
 
 ---
 
-## 3. Real-Time Transcription & Poetic Analysis Suite (`transcription/`)
+## 4. Real-Time Transcription & Poetic Analysis Suite (`transcription/`)
 
 Provides real-time voice-to-text capabilities for Discord voice channels with phonetic syllabification, custom IPA weak-vowel overrides, and AI-driven poetic analysis.
 
@@ -82,7 +99,7 @@ Single double-click Windows batch launcher that verifies dependencies, resolves 
 
 ---
 
-## 4. Additive Sound Synthesis Suite (`additive_synthesis/`)
+## 5. Additive Sound Synthesis Suite (`additive_synthesis/`)
 
 An interactive additive sound synthesis engine and psychoacoustic analysis framework (`additive_synthesis.py`).
 

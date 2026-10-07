@@ -21,3 +21,8 @@ additive_synthesis/generative/
 additive_synthesis/square/
 additive_synthesis/bell/
 additive_synthesis/complex/
+
+# Pitch separator executables and stem outputs
+pitch_separator
+pitch_separator.exe
+*_pitch_stems/
