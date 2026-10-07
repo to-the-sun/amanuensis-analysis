@@ -110,10 +110,10 @@ Examples:
 - `song_pitch_069_A4.wav`
 
 ### Noise Floor Gating & Audibility Threshold
-To prevent STFT sideband leakage and ambient spectral noise from exporting hundreds of nearly-silent WAV files, `pitch_separator` calculates the overall peak signal magnitude $M_{\text{overall}}$ and enforces a relative audibility noise floor gate:
-$$T_{\text{gate}} = M_{\text{overall}} \times 10^{\frac{-20.0}{20}} = M_{\text{overall}} \times 0.10 \quad (-20\text{ dB} \text{ / } 10.0\% \text{ peak threshold})$$
+To prevent STFT sideband leakage and ambient spectral noise from exporting hundreds of nearly-silent WAV files, `pitch_separator` calculates the overall peak signal magnitude $M_{\text{overall}}$ and enforces a relative audibility noise floor gate set to 19% of the peak signal amplitude:
+$$T_{\text{gate}} = M_{\text{overall}} \times 0.19 \quad (19.0\% \text{ peak threshold / } \approx -14.4 \text{ dB})$$
 
-For each pitch stem $p$, any sample $y_{p,c}[n]$ with $|y_{p,c}[n]| < T_{\text{gate}}$ is gated to $0.0$ (pure silence). Stems are exported only if their peak amplitude after gating satisfies $M_p \ge T_{\text{gate}}$ and non-zero RMS energy. This severely reduces the exported WAV file count down to only the true, audible musical notes.
+For each pitch stem $p$, any sample $y_{p,c}[n]$ with $|y_{p,c}[n]| < T_{\text{gate}}$ is gated to $0.0$ (pure silence). Stems are exported only if their peak amplitude after gating satisfies $M_p \ge T_{\text{gate}}$ and non-zero RMS energy. This severely reduces the exported WAV file count down strictly to the true, audible musical notes.
 
 ---
 

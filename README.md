@@ -16,7 +16,7 @@ The project is organized into three primary subdirectories and root utility scri
 Separates an audio file into individual MIDI integer pitch stems ($0..127$, representing C-1 to G9) using a Short-Time Fourier Transform (STFT) COLA filter bank. Every detected pitch present in the audio file is exported to a separate 16-bit PCM WAV file inside a `<basename>_pitch_stems/` directory.
 
 **Key Features:**
-- **Perfect Reconstruction & Noise Floor Gating**: Summing all exported pitch stems sample-by-sample reconstructs the original audible notes perfectly. Imposes a $-20\text{ dB}$ ($10\%$ peak) noise floor gate to eliminate sideband noise and restrict stem exports strictly to prominent, audible notes.
+- **Perfect Reconstruction & Noise Floor Gating**: Summing all exported pitch stems sample-by-sample reconstructs the original audible notes perfectly. Imposes a $19\%$ peak signal amplitude ($\approx -14.4\text{ dB}$) noise floor gate to eliminate sideband noise and restrict stem exports strictly to prominent, audible notes.
 - **Console Progress Bars & Metadata**: Displays live ASCII progress bars during STFT processing, an acoustic metadata table (peak/RMS amplitudes, active duration, center frequencies) per pitch, and real-time processing speed factors.
 - **Double-Click & Drag-and-Drop**:
   - **Windows**: Drag and drop any WAV audio file directly onto `pitch_separator.exe` or `run_pitch_separator.bat`, or double-click to launch interactive mode.
