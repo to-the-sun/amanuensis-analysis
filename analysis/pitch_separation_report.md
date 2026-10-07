@@ -21,6 +21,25 @@ A primary mathematical feature of `pitch_separator` is **Perfect Reconstruction 
 
 ---
 
+## Console Interface & Progress Tracking
+
+`pitch_separator` provides rich real-time visual feedback during processing:
+
+1. **Live STFT Progress Bar**:
+   - Displays real-time frame progress percentage, completed frame count, and wall-clock elapsed time:
+     `Processing STFT Frames [=======================>             ] 64% (5120/8000) - 2.3s`
+2. **Pitch Stem Export Metadata Table**:
+   - Displays per-pitch acoustic properties during export:
+     - **MIDI Note & Name** (e.g. `060 C4`)
+     - **Target Pitch Center Frequency** (e.g. `261.63 Hz`)
+     - **Peak & RMS Amplitudes**
+     - **Active Frame Coverage Percentage**
+     - **Exported Output File Path**
+3. **Executive Summary & Processing Speed**:
+   - Prints total execution duration, active pitch count, and real-time speed factor (e.g., `24.5x Real-Time`).
+
+---
+
 ## Mathematical Formulation: STFT COLA Filter Bank
 
 ### 1. Framing & Overlap-Add

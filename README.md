@@ -17,6 +17,7 @@ Separates an audio file into individual MIDI integer pitch stems ($0..127$, repr
 
 **Key Features:**
 - **Perfect Reconstruction**: Summing all exported pitch stems sample-by-sample audibly and mathematically reconstructs the original WAV file perfectly.
+- **Console Progress Bars & Metadata**: Displays live ASCII progress bars during STFT processing, an acoustic metadata table (peak/RMS amplitudes, active duration, center frequencies) per pitch, and real-time processing speed factors.
 - **Double-Click & Drag-and-Drop**:
   - **Windows**: Drag and drop any WAV audio file directly onto `pitch_separator.exe` or `run_pitch_separator.bat`, or double-click to launch interactive mode.
   - **Linux / macOS**: Run `./pitch_separator "audio.wav"` or double-click the binary executable.
