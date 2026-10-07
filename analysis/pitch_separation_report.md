@@ -109,7 +109,11 @@ Examples:
 - `song_pitch_060_C4.wav`
 - `song_pitch_069_A4.wav`
 
-Only pitches with detected energy above noise threshold ($M_p > 10^{-7}$) are exported to avoid cluttering output directories with silent files.
+### Noise Floor Gating & Audibility Threshold
+To prevent STFT sideband leakage and ambient spectral noise from exporting hundreds of nearly-silent WAV files, `pitch_separator` calculates the overall peak signal magnitude $M_{\text{overall}}$ and enforces a relative audibility noise floor gate:
+$$T_{\text{gate}} = M_{\text{overall}} \times 10^{\frac{-20.0}{20}} = M_{\text{overall}} \times 0.10 \quad (-20\text{ dB} \text{ / } 10.0\% \text{ peak threshold})$$
+
+For each pitch stem $p$, any sample $y_{p,c}[n]$ with $|y_{p,c}[n]| < T_{\text{gate}}$ is gated to $0.0$ (pure silence). Stems are exported only if their peak amplitude after gating satisfies $M_p \ge T_{\text{gate}}$ and non-zero RMS energy. This severely reduces the exported WAV file count down to only the true, audible musical notes.
 
 ---
 
