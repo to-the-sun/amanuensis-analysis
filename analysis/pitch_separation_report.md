@@ -109,11 +109,12 @@ Examples:
 - `song_pitch_060_C4.wav`
 - `song_pitch_069_A4.wav`
 
-### Noise Floor Gating & Audibility Threshold
+### Noise Floor Gating & Under-Gate Audio Accumulation
 To prevent STFT sideband leakage and ambient spectral noise from exporting hundreds of nearly-silent WAV files, `pitch_separator` calculates the overall peak signal magnitude $M_{\text{overall}}$ and enforces a relative audibility noise floor gate set to 19% of the peak signal amplitude:
 $$T_{\text{gate}} = M_{\text{overall}} \times 0.19 \quad (19.0\% \text{ peak threshold / } \approx -14.4 \text{ dB})$$
 
-For each pitch stem $p$, any sample $y_{p,c}[n]$ with $|y_{p,c}[n]| < T_{\text{gate}}$ is gated to $0.0$ (pure silence). Stems are exported only if their peak amplitude after gating satisfies $M_p \ge T_{\text{gate}}$ and non-zero RMS energy. This severely reduces the exported WAV file count down strictly to the true, audible musical notes.
+- **Stem Creation Eligibility**: A pitch stem $p$ is omitted and its WAV file stem is not created if all frames across the entire recording remain strictly under $T_{\text{gate}}$.
+- **Under-Gate Audio Copying & Temporal Tolerance**: Audio signals under $T_{\text{gate}}$ are not zeroed or deleted. Instead, for every STFT frame $m$, under-gate audio from all sub-threshold pitch stems is summed. During frames where a pitch stem $p$ is active—defined as exceeding $T_{\text{gate}}$ within a $200\text{ ms}$ temporal tolerance window—the under-gate audio sum is copied and added directly into stem $p$. This preserves subtle background ambience and continuous decay tails across active stems without generating extraneous low-amplitude WAV files.
 
 ---
 

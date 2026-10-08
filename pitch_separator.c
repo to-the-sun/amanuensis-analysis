@@ -41,6 +41,9 @@
 /* Noise Floor Threshold: 19.0% of signal peak amplitude (-14.43 dB) */
 #define DEFAULT_NOISE_FLOOR_RATIO 0.19
 
+/* Temporal Tolerance Window: 200 milliseconds */
+#define DEFAULT_TOLERANCE_MS 200.0
+
 typedef struct {
     double r;
     double i;
@@ -394,7 +397,8 @@ int process_audio(const char *input_path) {
     printf("  Channels:        %u (%s)\n", wav->num_channels, (wav->num_channels == 1) ? "Mono" : "Stereo");
     printf("  Total Duration:  %.2f seconds (%u frames per channel)\n", audio_duration, wav->total_samples);
     printf("  Signal Peak:     %.5f\n", overall_peak);
-    printf("  Noise Floor Gate: %.5f (19.0%% peak audibility gate / -14.4 dB)\n\n", noise_floor_threshold);
+    printf("  Noise Floor Gate: %.5f (19.0%% peak audibility gate / -14.4 dB)\n", noise_floor_threshold);
+    printf("  Temporal Tolerance: %.0f ms\n\n", DEFAULT_TOLERANCE_MS);
 
     uint32_t pad_samples = FFT_SIZE;
     uint32_t padded_total_samples = total_samples + 2 * pad_samples;
@@ -508,6 +512,103 @@ int process_audio(const char *input_path) {
     free(fft_frame);
     free(pitch_frame);
 
+    // COLA normalization in-place
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
+        for (uint32_t c = 0; c < num_channels; c++) {
+            for (uint32_t i = 0; i < padded_total_samples; i++) {
+                double norm = cola_norm[i];
+                if (norm > 1e-12) {
+                    stem_buffers[p][c][i] /= norm;
+                } else {
+                    stem_buffers[p][c][i] = 0.0;
+                }
+            }
+        }
+    }
+
+    uint8_t **raw_above_gate = (uint8_t**)malloc(NUM_MIDI_PITCHES * sizeof(uint8_t*));
+    uint8_t **active_at_frame = (uint8_t**)malloc(NUM_MIDI_PITCHES * sizeof(uint8_t*));
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        raw_above_gate[p] = (uint8_t*)calloc(num_frames, sizeof(uint8_t));
+        active_at_frame[p] = (uint8_t*)calloc(num_frames, sizeof(uint8_t));
+    }
+
+    // Determine raw frame-by-frame gate status for each pitch stem
+    for (uint32_t m = 0; m < num_frames; m++) {
+        uint32_t offset = m * HOP_SIZE;
+        for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+            if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
+            double frame_peak = 0.0;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                for (int k = 0; k < FFT_SIZE; k++) {
+                    if (offset + k < padded_total_samples) {
+                        double val = fabs(stem_buffers[p][c][offset + k]);
+                        if (val > frame_peak) frame_peak = val;
+                    }
+                }
+            }
+            if (frame_peak >= noise_floor_threshold) {
+                raw_above_gate[p][m] = 1;
+            }
+        }
+    }
+
+    // Apply temporal tolerance window (e.g. 200 ms)
+    double frame_duration_ms = (1000.0 * HOP_SIZE) / sample_rate;
+    int tol_frames = (int)ceil(DEFAULT_TOLERANCE_MS / frame_duration_ms);
+
+    for (uint32_t m = 0; m < num_frames; m++) {
+        int start_m = ((int)m - tol_frames < 0) ? 0 : ((int)m - tol_frames);
+        int end_m = ((int)m + tol_frames >= (int)num_frames) ? ((int)num_frames - 1) : ((int)m + tol_frames);
+
+        for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+            if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
+            uint8_t active = 0;
+            for (int m_check = start_m; m_check <= end_m; m_check++) {
+                if (raw_above_gate[p][m_check]) {
+                    active = 1;
+                    break;
+                }
+            }
+            active_at_frame[p][m] = active;
+        }
+    }
+
+    // Determine overall peak across recording & decide which pitch stems get exported
+    int export_pitch[NUM_MIDI_PITCHES] = {0};
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
+        double max_p = 0.0;
+        for (uint32_t c = 0; c < num_channels; c++) {
+            for (uint32_t i = 0; i < total_samples; i++) {
+                double val = fabs(stem_buffers[p][c][i + pad_samples]);
+                if (val > max_p) max_p = val;
+            }
+        }
+        if (max_p >= noise_floor_threshold) {
+            export_pitch[p] = 1;
+        }
+    }
+
+    // Precalculate under-gate audio sum across all under-gate pitches frame by frame
+    double *under_gate_sum_buf = (double*)calloc((size_t)total_samples * num_channels, sizeof(double));
+
+    for (uint32_t i = 0; i < total_samples; i++) {
+        int m = (int)((i + pad_samples - FFT_SIZE / 2 + HOP_SIZE / 2) / HOP_SIZE);
+        if (m < 0) m = 0;
+        if (m >= (int)num_frames) m = (int)num_frames - 1;
+
+        for (int q = 0; q < NUM_MIDI_PITCHES; q++) {
+            if (!pitch_active[q] || stem_buffers[q] == NULL) continue;
+            if (raw_above_gate[q][m] == 0) {
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    under_gate_sum_buf[i * num_channels + c] += stem_buffers[q][c][i + pad_samples];
+                }
+            }
+        }
+    }
+
     char dir[1024], basename[512];
     get_filepath_components(input_path, dir, basename, sizeof(basename));
 
@@ -515,7 +616,7 @@ int process_audio(const char *input_path) {
     snprintf(stem_dir, sizeof(stem_dir), "%s/%s_pitch_stems", dir, basename);
     MKDIR(stem_dir);
 
-    printf("\nApplying noise floor gate (19.0%% peak audibility threshold / -14.4 dB)...\n");
+    printf("\nApplying noise floor gate (19.0%% peak audibility threshold / -14.4 dB) with %.0fms temporal tolerance...\n", DEFAULT_TOLERANCE_MS);
     printf("Exporting audible pitch stem WAV files to: %s/\n\n", stem_dir);
 
     int exported_count = 0;
@@ -526,22 +627,27 @@ int process_audio(const char *input_path) {
     printf("-----------------------------------------------------------------------------------\n");
 
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-        if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
+        if (!export_pitch[p] || stem_buffers[p] == NULL) continue;
 
         double max_peak = 0.0;
         double sum_sq = 0.0;
         uint32_t active_samples = 0;
         double *unpadded_data = (double*)malloc((size_t)total_samples * num_channels * sizeof(double));
 
-        for (uint32_t c = 0; c < num_channels; c++) {
-            for (uint32_t i = 0; i < total_samples; i++) {
-                uint32_t padded_idx = i + pad_samples;
-                double norm = cola_norm[padded_idx];
-                double val = (norm > 1e-12) ? (stem_buffers[p][c][padded_idx] / norm) : 0.0;
+        for (uint32_t i = 0; i < total_samples; i++) {
+            int m = (int)((i + pad_samples - FFT_SIZE / 2 + HOP_SIZE / 2) / HOP_SIZE);
+            if (m < 0) m = 0;
+            if (m >= (int)num_frames) m = (int)num_frames - 1;
 
-                // Apply Noise Floor Gate (19% peak audibility threshold)
-                if (fabs(val) < noise_floor_threshold) {
-                    val = 0.0;
+            uint8_t p_active = active_at_frame[p][m];
+            if (p_active) active_samples++;
+
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double val = stem_buffers[p][c][i + pad_samples];
+                if (p_active) {
+                    double ug_sum = under_gate_sum_buf[i * num_channels + c];
+                    double add_under_gate = raw_above_gate[p][m] ? ug_sum : (ug_sum - val);
+                    val += add_under_gate;
                 }
 
                 unpadded_data[i * num_channels + c] = val;
@@ -549,32 +655,36 @@ int process_audio(const char *input_path) {
                 double abs_val = fabs(val);
                 if (abs_val > max_peak) max_peak = abs_val;
                 sum_sq += val * val;
-                if (abs_val >= noise_floor_threshold) active_samples++;
             }
         }
 
         double rms = sqrt(sum_sq / (total_samples * num_channels));
-        double active_pct = (100.0 * active_samples) / (total_samples * num_channels);
+        double active_pct = (100.0 * active_samples) / total_samples;
 
-        // Only export stems that have audible notes surviving the noise floor gate
-        if (max_peak >= noise_floor_threshold && rms > 1e-6) {
-            char note_name[32];
-            get_note_name(p, note_name, sizeof(note_name));
+        char note_name[32];
+        get_note_name(p, note_name, sizeof(note_name));
 
-            char out_filepath[4096];
-            snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%03d_%s.wav",
-                     stem_dir, basename, p, note_name);
+        char out_filepath[4096];
+        snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%03d_%s.wav",
+                 stem_dir, basename, p, note_name);
 
-            if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, unpadded_data)) {
-                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %5.1f%%        | %s_pitch_%03d_%s.wav\n",
-                       p, note_name, midi_to_frequency(p), max_peak, rms, active_pct, basename, p, note_name);
-                exported_count++;
-            }
+        if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, unpadded_data)) {
+            printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %5.1f%%        | %s_pitch_%03d_%s.wav\n",
+                   p, note_name, midi_to_frequency(p), max_peak, rms, active_pct, basename, p, note_name);
+            exported_count++;
         }
 
         free(unpadded_data);
     }
     printf("-----------------------------------------------------------------------------------\n\n");
+
+    free(under_gate_sum_buf);
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        free(raw_above_gate[p]);
+        free(active_at_frame[p]);
+    }
+    free(raw_above_gate);
+    free(active_at_frame);
 
     double total_elapsed = (double)(clock() - start_clock) / CLOCKS_PER_SEC;
     double speed_ratio = audio_duration / (total_elapsed > 0.001 ? total_elapsed : 0.001);
