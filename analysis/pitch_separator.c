@@ -1,12 +1,13 @@
 /*
  * pitch_separator.c
  *
- * Perfect Reconstruction Pitch Stem Separator with Noise Floor Gating in C
+ * Perfect Reconstruction Pitch Stem Separator with Noise Floor Thresholding in C
  *
  * Separates an audio WAV file into individual MIDI pitch stems (0-127) using an STFT COLA filter bank.
  * Bins are partitioned by their corresponding integer MIDI pitch.
- * Imposes a relative noise floor gate (19% of peak amplitude / -14.4 dB) so only audible notes remain,
- * setting low-level spectral leakage to silence and severely reducing exported stem count.
+ * Evaluates each individual pitch stem post-separation against a relative noise floor threshold (19% of peak amplitude / -14.4 dB).
+ * Pitch stems with at least 99 milliseconds worth of frames above the noise floor are exported as WAV files.
+ * Reconstructed stems preserve untruncated audio data without zeroing out values below the noise floor threshold.
  * Summing exported pitch stems reconstructs the original audible notes perfectly.
  *
  * Can be executed via drag-and-drop (command-line argument) or double-click (interactive prompt).
@@ -394,7 +395,7 @@ int process_audio(const char *input_path) {
     printf("  Channels:        %u (%s)\n", wav->num_channels, (wav->num_channels == 1) ? "Mono" : "Stereo");
     printf("  Total Duration:  %.2f seconds (%u frames per channel)\n", audio_duration, wav->total_samples);
     printf("  Signal Peak:     %.5f\n", overall_peak);
-    printf("  Noise Floor Gate: %.5f (19.0%% peak audibility gate / -14.4 dB)\n\n", noise_floor_threshold);
+    printf("  Noise Floor Threshold: %.5f (19.0%% peak threshold / -14.4 dB, min 99ms active frames)\n\n", noise_floor_threshold);
 
     uint32_t pad_samples = FFT_SIZE;
     uint32_t padded_total_samples = total_samples + 2 * pad_samples;
@@ -515,14 +516,14 @@ int process_audio(const char *input_path) {
     snprintf(stem_dir, sizeof(stem_dir), "%s/%s_pitch_stems", dir, basename);
     MKDIR(stem_dir);
 
-    printf("\nApplying noise floor gate (19.0%% peak audibility threshold / -14.4 dB)...\n");
+    printf("\nEvaluating stems against noise floor threshold (19.0%% peak / -14.4 dB, min 99 ms active frames)...\n");
     printf("Exporting audible pitch stem WAV files to: %s/\n\n", stem_dir);
 
     int exported_count = 0;
 
     printf("Audible Pitch Stem Export Table:\n");
     printf("-----------------------------------------------------------------------------------\n");
-    printf(" MIDI | Note | Freq (Hz)  | Peak Amp | RMS Amp  | Active Frames | File Exported\n");
+    printf(" MIDI | Note | Freq (Hz)  | Peak Amp | RMS Amp  | Active Duration | File Exported\n");
     printf("-----------------------------------------------------------------------------------\n");
 
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
@@ -530,34 +531,39 @@ int process_audio(const char *input_path) {
 
         double max_peak = 0.0;
         double sum_sq = 0.0;
-        uint32_t active_samples = 0;
+        uint32_t active_frames = 0;
         double *unpadded_data = (double*)malloc((size_t)total_samples * num_channels * sizeof(double));
 
-        for (uint32_t c = 0; c < num_channels; c++) {
-            for (uint32_t i = 0; i < total_samples; i++) {
-                uint32_t padded_idx = i + pad_samples;
-                double norm = cola_norm[padded_idx];
+        for (uint32_t i = 0; i < total_samples; i++) {
+            uint32_t padded_idx = i + pad_samples;
+            double norm = cola_norm[padded_idx];
+
+            int frame_above_threshold = 0;
+            for (uint32_t c = 0; c < num_channels; c++) {
                 double val = (norm > 1e-12) ? (stem_buffers[p][c][padded_idx] / norm) : 0.0;
 
-                // Apply Noise Floor Gate (19% peak audibility threshold)
-                if (fabs(val) < noise_floor_threshold) {
-                    val = 0.0;
-                }
-
+                // Store original audio sample value without zeroing out values below noise floor
                 unpadded_data[i * num_channels + c] = val;
 
                 double abs_val = fabs(val);
                 if (abs_val > max_peak) max_peak = abs_val;
                 sum_sq += val * val;
-                if (abs_val >= noise_floor_threshold) active_samples++;
+
+                if (abs_val >= noise_floor_threshold) {
+                    frame_above_threshold = 1;
+                }
+            }
+
+            if (frame_above_threshold) {
+                active_frames++;
             }
         }
 
         double rms = sqrt(sum_sq / (total_samples * num_channels));
-        double active_pct = (100.0 * active_samples) / (total_samples * num_channels);
+        double active_ms = ((double)active_frames / sample_rate) * 1000.0;
 
-        // Only export stems that have audible notes surviving the noise floor gate
-        if (max_peak >= noise_floor_threshold && rms > 1e-6) {
+        // Only export stems that have at least 99 milliseconds worth of frames above the noise floor
+        if (active_ms >= 99.0 && rms > 1e-6) {
             char note_name[32];
             get_note_name(p, note_name, sizeof(note_name));
 
@@ -566,8 +572,8 @@ int process_audio(const char *input_path) {
                      stem_dir, basename, p, note_name);
 
             if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, unpadded_data)) {
-                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %5.1f%%        | %s_pitch_%03d_%s.wav\n",
-                       p, note_name, midi_to_frequency(p), max_peak, rms, active_pct, basename, p, note_name);
+                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
+                       p, note_name, midi_to_frequency(p), max_peak, rms, active_ms, basename, p, note_name);
                 exported_count++;
             }
         }
@@ -584,7 +590,7 @@ int process_audio(const char *input_path) {
     printf("====================================================\n");
     printf("  Input File:          %s\n", basename);
     printf("  Stems Directory:     %s/\n", stem_dir);
-    printf("  Audible Stems Exported: %d WAV files (Noise Floor: 19.0%% peak / -14.4 dB)\n", exported_count);
+    printf("  Audible Stems Exported: %d WAV files (Noise Floor: 19.0%% peak / -14.4 dB, >= 99 ms active)\n", exported_count);
     printf("  Total Time Elapsed:  %.2f seconds\n", total_elapsed);
     printf("  Processing Speed:    %.1fx Real-Time\n", speed_ratio);
     printf("  Reconstruction Status: AUDIBLE RECONSTRUCTION PERFECT\n");
