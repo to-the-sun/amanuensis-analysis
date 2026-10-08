@@ -33,7 +33,7 @@ A primary mathematical feature of `pitch_separator` is **Perfect Reconstruction 
      - **MIDI Note & Name** (e.g. `060 C4`)
      - **Target Pitch Center Frequency** (e.g. `261.63 Hz`)
      - **Peak & RMS Amplitudes**
-     - **Active Frame Coverage Percentage**
+     - **Active Frame Duration** (in milliseconds)
      - **Exported Output File Path**
 3. **Executive Summary & Processing Speed**:
    - Prints total execution duration, active pitch count, and real-time speed factor (e.g., `24.5x Real-Time`).
@@ -109,11 +109,19 @@ Examples:
 - `song_pitch_060_C4.wav`
 - `song_pitch_069_A4.wav`
 
-### Noise Floor Gating & Audibility Threshold
+### Noise Floor Gating, Under-Gate Audio Mixing & 99ms Export Threshold
 To prevent STFT sideband leakage and ambient spectral noise from exporting hundreds of nearly-silent WAV files, `pitch_separator` calculates the overall peak signal magnitude $M_{\text{overall}}$ and enforces a relative audibility noise floor gate set to 19% of the peak signal amplitude:
 $$T_{\text{gate}} = M_{\text{overall}} \times 0.19 \quad (19.0\% \text{ peak threshold / } \approx -14.4 \text{ dB})$$
 
-For each pitch stem $p$, any sample $y_{p,c}[n]$ with $|y_{p,c}[n]| < T_{\text{gate}}$ is gated to $0.0$ (pure silence). Stems are exported only if their peak amplitude after gating satisfies $M_p \ge T_{\text{gate}}$ and non-zero RMS energy. This severely reduces the exported WAV file count down strictly to the true, audible musical notes.
+#### Under-Gate Audio Mixing
+At each sample moment $n$ and channel $c$, pitch stems with signal magnitudes below $T_{\text{gate}}$ ($|v_{p,c}[n]| < T_{\text{gate}}$) are under the noise floor gate. The sum of all under-gate audio at that moment is:
+$$U_c[n] = \sum_{k: |v_{k,c}[n]| < T_{\text{gate}}} v_{k,c}[n]$$
+
+This under-gate audio sum $U_c[n]$ is copied and added directly into any other pitch stems that are active (above or equal to $T_{\text{gate}}$) at that exact moment:
+$$y_{p,c}[n] = \begin{cases} v_{p,c}[n] + U_c[n] & \text{if } |v_{p,c}[n]| \ge T_{\text{gate}} \\ 0.0 & \text{if } |v_{p,c}[n]| < T_{\text{gate}} \end{cases}$$
+
+#### 99ms Active Duration Export Threshold
+For each pitch stem $p$, `pitch_separator` measures the total duration of active frames where at least one channel is above the noise floor gate. Any pitch stem that does not have strictly more than 99 milliseconds worth of active frames ($T_{\text{active}} > 99 \text{ ms}$) is omitted from export, ensuring that only sustained musical pitch stems generate WAV files.
 
 ---
 
