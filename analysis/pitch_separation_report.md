@@ -114,7 +114,7 @@ To prevent STFT sideband leakage and ambient spectral noise from exporting hundr
 $$T_{\text{gate}} = M_{\text{overall}} \times 0.19 \quad (19.0\% \text{ peak threshold / } \approx -14.4 \text{ dB})$$
 
 - **Stem Creation Eligibility**: A pitch stem $p$ is omitted and its WAV file stem is not created if all frames across the entire recording remain strictly under $T_{\text{gate}}$.
-- **Under-Gate Audio Copying & Temporal Tolerance**: Audio signals under $T_{\text{gate}}$ are not created as separate pitch stem files if everything in the stem is under the gate across the recording. Instead, for every STFT frame $m$, under-gate audio from inactive pitch stems is summed. During frames where a pitch stem $p$ is active—defined as exceeding $T_{\text{gate}}$ within a $999\text{ ms}$ temporal tolerance window—the under-gate audio sum is copied and added directly into stem $p$. Outside the $999\text{ ms}$ active tolerance window, frames in exported pitch stems are silenced.
+- **Under-Gate Audio Copying & Temporal Tolerance**: Audio signals under $T_{\text{gate}}$ are not created as separate pitch stem files if everything in the stem is under the gate across the recording. Instead, for every STFT frame $m$, under-gate audio from inactive pitch stems is summed. During frames where a pitch stem $p$ is active—defined as exceeding $T_{\text{gate}}$ within a $99\text{ ms}$ temporal tolerance window—the under-gate audio sum is copied and added directly into stem $p$. Outside the $99\text{ ms}$ active tolerance window, frames in exported pitch stems are silenced.
 
 ---
 

@@ -41,8 +41,8 @@
 /* Noise Floor Threshold: 19.0% of signal peak amplitude (-14.43 dB) */
 #define DEFAULT_NOISE_FLOOR_RATIO 0.19
 
-/* Temporal Tolerance Window: 999 milliseconds */
-#define DEFAULT_TOLERANCE_MS 999.0
+/* Temporal Tolerance Window: 99 milliseconds */
+#define DEFAULT_TOLERANCE_MS 99.0
 
 typedef struct {
     double r;
