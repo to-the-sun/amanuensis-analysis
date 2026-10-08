@@ -6,12 +6,12 @@ The project is organized into three primary subdirectories and root utility scri
 1. `analysis/` – Rhythmic energy tracking, spectral transient analysis, dominant pitch tracking, audio feature clustering, and Discord bot automation.
 2. `transcription/` – Real-time Discord voice-to-text transcription (Aqua Voice API), phonetic syllabification, custom IPA weak-vowel overrides, backward vowel histogram analysis, and AI-driven poem generation (TypeSafe Jev API).
 3. `additive_synthesis/` – Interactive additive sound synthesis engine, LaTeX/Sigma notation displays, preset management, psychoacoustic analysis test suite, and generative sound creation.
-4. `pitch_separator.c` / `pitch_separator.exe` – C-based Perfect Reconstruction Pitch Stem Separator (drag-and-drop / double-click executable for Windows and Linux).
+4. `analysis/pitch_separator.c` / `analysis/pitch_separator.exe` – C-based Perfect Reconstruction Pitch Stem Separator (drag-and-drop / double-click executable for Windows and Linux).
 5. `tune_stems.py` – Continuous interval-relative pitch alignment for song stems.
 
 ---
 
-## 1. Perfect Reconstruction Pitch Stem Separator (`pitch_separator.c`)
+## 1. Perfect Reconstruction Pitch Stem Separator (`analysis/pitch_separator.c`)
 
 Separates an audio file into individual MIDI integer pitch stems ($0..127$, representing C-1 to G9) using a Short-Time Fourier Transform (STFT) COLA filter bank. Every detected pitch present in the audio file is exported to a separate 16-bit PCM WAV file inside a `<basename>_pitch_stems/` directory.
 
@@ -19,17 +19,17 @@ Separates an audio file into individual MIDI integer pitch stems ($0..127$, repr
 - **Perfect Reconstruction & Noise Floor Gating**: Summing all exported pitch stems sample-by-sample reconstructs the original audible notes perfectly. Imposes a $19\%$ peak signal amplitude ($\approx -14.4\text{ dB}$) noise floor gate to eliminate sideband noise and restrict stem exports strictly to prominent, audible notes.
 - **Console Progress Bars & Metadata**: Displays live ASCII progress bars during STFT processing, an acoustic metadata table (peak/RMS amplitudes, active duration, center frequencies) per pitch, and real-time processing speed factors.
 - **Double-Click & Drag-and-Drop**:
-  - **Windows**: Drag and drop any WAV audio file directly onto `pitch_separator.exe` or `run_pitch_separator.bat`, or double-click to launch interactive mode.
-  - **Linux / macOS**: Run `./pitch_separator "audio.wav"` or double-click the binary executable.
+  - **Windows**: Drag and drop any WAV audio file directly onto `analysis/pitch_separator.exe` or `run_pitch_separator.bat`, or double-click to launch interactive mode.
+  - **Linux / macOS**: Run `./analysis/pitch_separator "audio.wav"` or double-click the binary executable.
 
 **Compilation & Usage:**
 ```bash
-# Build native Linux/macOS binary and cross-compile Windows executable (pitch_separator.exe):
+# Build native Linux/macOS binary and cross-compile Windows executable (analysis/pitch_separator.exe):
 make
 
 # Usage:
-./pitch_separator "path/to/audio.wav"          # Linux / macOS
-pitch_separator.exe "path/to/audio.wav"        # Windows
+./analysis/pitch_separator "path/to/audio.wav"          # Linux / macOS
+analysis/pitch_separator.exe "path/to/audio.wav"        # Windows
 ```
 
 ---

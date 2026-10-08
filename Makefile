@@ -7,9 +7,9 @@ LDFLAGS ?= -lm
 WIN_CC = x86_64-w64-mingw32-gcc
 WIN_CFLAGS = -O3 -Wall -std=c99 -static
 
-TARGET = pitch_separator
-WIN_TARGET = pitch_separator.exe
-SRCS = pitch_separator.c
+TARGET = analysis/pitch_separator
+WIN_TARGET = analysis/pitch_separator.exe
+SRCS = analysis/pitch_separator.c
 OBJS = $(SRCS:.c=.o)
 
 all: $(TARGET) win
@@ -17,7 +17,7 @@ all: $(TARGET) win
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
 
-%.o: %.c
+analysis/%.o: analysis/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 win: $(SRCS)
