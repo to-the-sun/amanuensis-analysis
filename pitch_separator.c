@@ -41,8 +41,8 @@
 /* Noise Floor Threshold: 19.0% of signal peak amplitude (-14.43 dB) */
 #define DEFAULT_NOISE_FLOOR_RATIO 0.19
 
-/* Temporal Tolerance Window: 200 milliseconds */
-#define DEFAULT_TOLERANCE_MS 200.0
+/* Temporal Tolerance Window: 999 milliseconds */
+#define DEFAULT_TOLERANCE_MS 999.0
 
 typedef struct {
     double r;
@@ -601,7 +601,7 @@ int process_audio(const char *input_path) {
 
         for (int q = 0; q < NUM_MIDI_PITCHES; q++) {
             if (!pitch_active[q] || stem_buffers[q] == NULL) continue;
-            if (raw_above_gate[q][m] == 0) {
+            if (active_at_frame[q][m] == 0) {
                 for (uint32_t c = 0; c < num_channels; c++) {
                     under_gate_sum_buf[i * num_channels + c] += stem_buffers[q][c][i + pad_samples];
                 }
@@ -643,11 +643,11 @@ int process_audio(const char *input_path) {
             if (p_active) active_samples++;
 
             for (uint32_t c = 0; c < num_channels; c++) {
-                double val = stem_buffers[p][c][i + pad_samples];
+                double val = 0.0;
                 if (p_active) {
+                    double stem_val = stem_buffers[p][c][i + pad_samples];
                     double ug_sum = under_gate_sum_buf[i * num_channels + c];
-                    double add_under_gate = raw_above_gate[p][m] ? ug_sum : (ug_sum - val);
-                    val += add_under_gate;
+                    val = stem_val + ug_sum;
                 }
 
                 unpadded_data[i * num_channels + c] = val;
