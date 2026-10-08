@@ -7,6 +7,7 @@
  * Bins are partitioned by their corresponding integer MIDI pitch.
  * Imposes a relative noise floor gate (19% of peak amplitude / -14.4 dB) so only audible notes remain,
  * setting low-level spectral leakage to silence and severely reducing exported stem count.
+ * Any span of contiguous active frames that does not exceed 49 ms is also reduced to silence.
  * Summing exported pitch stems reconstructs the original audible notes perfectly.
  *
  * Can be executed via drag-and-drop (command-line argument) or double-click (interactive prompt).
@@ -515,7 +516,7 @@ int process_audio(const char *input_path) {
     snprintf(stem_dir, sizeof(stem_dir), "%s/%s_pitch_stems", dir, basename);
     MKDIR(stem_dir);
 
-    printf("\nApplying noise floor gate (19.0%% peak audibility threshold / -14.4 dB)...\n");
+    printf("\nApplying noise floor gate (19.0%% peak audibility threshold / -14.4 dB, min active span > 49 ms)...\n");
     printf("Exporting audible pitch stem WAV files to: %s/\n\n", stem_dir);
 
     int exported_count = 0;
@@ -545,7 +546,36 @@ int process_audio(const char *input_path) {
                 }
 
                 unpadded_data[i * num_channels + c] = val;
+            }
+        }
 
+        // Filter out any contiguous span of active frames that does not exceed 49 ms
+        for (uint32_t c = 0; c < num_channels; c++) {
+            uint32_t i = 0;
+            while (i < total_samples) {
+                if (fabs(unpadded_data[i * num_channels + c]) >= noise_floor_threshold) {
+                    uint32_t start_i = i;
+                    while (i < total_samples && fabs(unpadded_data[i * num_channels + c]) >= noise_floor_threshold) {
+                        i++;
+                    }
+                    uint32_t end_i = i - 1;
+                    uint32_t span_samples = end_i - start_i + 1;
+                    double span_duration_ms = (double)span_samples * 1000.0 / sample_rate;
+                    if (span_duration_ms <= 49.0) {
+                        for (uint32_t k = start_i; k <= end_i; k++) {
+                            unpadded_data[k * num_channels + c] = 0.0;
+                        }
+                    }
+                } else {
+                    i++;
+                }
+            }
+        }
+
+        // Compute post-filtering statistics
+        for (uint32_t c = 0; c < num_channels; c++) {
+            for (uint32_t i = 0; i < total_samples; i++) {
+                double val = unpadded_data[i * num_channels + c];
                 double abs_val = fabs(val);
                 if (abs_val > max_peak) max_peak = abs_val;
                 sum_sq += val * val;
