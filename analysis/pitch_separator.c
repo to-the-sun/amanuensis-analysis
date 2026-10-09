@@ -42,6 +42,9 @@
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
 
+/* Silence Threshold: Peak amplitude limit for silent boundary samples (0.0009) */
+double g_silence_threshold = 0.0009;
+
 typedef struct {
     double r;
     double i;
@@ -380,7 +383,7 @@ void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channel
     while (i < total_samples) {
         int silent = 1;
         for (uint32_t c = 0; c < num_channels; c++) {
-            if (fabs(data[i * num_channels + c]) > 1e-6) {
+            if (fabs(data[i * num_channels + c]) > g_silence_threshold) {
                 silent = 0;
                 break;
             }
@@ -391,7 +394,7 @@ void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channel
             while (i < total_samples) {
                 int s = 1;
                 for (uint32_t c = 0; c < num_channels; c++) {
-                    if (fabs(data[i * num_channels + c]) > 1e-6) {
+                    if (fabs(data[i * num_channels + c]) > g_silence_threshold) {
                         s = 0;
                         break;
                     }
