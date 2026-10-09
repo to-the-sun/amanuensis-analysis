@@ -39,8 +39,8 @@
 #define MAX_CHANNELS 2
 #define NUM_MIDI_PITCHES 128
 
-/* Noise Floor Threshold: 19.0% of signal peak amplitude (-14.43 dB) */
-#define DEFAULT_NOISE_FLOOR_RATIO 0.19
+/* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
+double g_noise_floor_ratio = 0.19;
 
 typedef struct {
     double r;
@@ -362,6 +362,89 @@ void get_filepath_components(const char *filepath, char *out_dir, char *out_base
     }
 }
 
+/*
+ * Sophisticated Noise Gate:
+ * For each section of audio bounded on either side by one full millisecond of all 0.0 silent samples
+ * (or audio file boundary), if that segment of audio at no point rises above the noise floor threshold,
+ * that entire segment is reduced to 0.0 silence across all channels.
+ */
+void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double noise_floor_threshold) {
+    if (total_samples == 0 || data == NULL) return;
+
+    uint32_t ms_samples = (uint32_t)ceil((double)sample_rate / 1000.0);
+    if (ms_samples < 1) ms_samples = 1;
+
+    uint32_t section_start = 0;
+    uint32_t i = 0;
+
+    while (i < total_samples) {
+        int silent = 1;
+        for (uint32_t c = 0; c < num_channels; c++) {
+            if (fabs(data[i * num_channels + c]) > 1e-6) {
+                silent = 0;
+                break;
+            }
+        }
+
+        if (silent) {
+            uint32_t silence_start = i;
+            while (i < total_samples) {
+                int s = 1;
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    if (fabs(data[i * num_channels + c]) > 1e-6) {
+                        s = 0;
+                        break;
+                    }
+                }
+                if (!s) break;
+                i++;
+            }
+            uint32_t silence_len = i - silence_start;
+
+            if (silence_len >= ms_samples) {
+                if (silence_start > section_start) {
+                    uint32_t sec_end = silence_start - 1;
+                    double sec_peak = 0.0;
+                    for (uint32_t k = section_start; k <= sec_end; k++) {
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            double val = fabs(data[k * num_channels + c]);
+                            if (val > sec_peak) sec_peak = val;
+                        }
+                    }
+                    if (sec_peak < noise_floor_threshold) {
+                        for (uint32_t k = section_start; k <= sec_end; k++) {
+                            for (uint32_t c = 0; c < num_channels; c++) {
+                                data[k * num_channels + c] = 0.0;
+                            }
+                        }
+                    }
+                }
+                section_start = i;
+            }
+        } else {
+            i++;
+        }
+    }
+
+    if (section_start < total_samples) {
+        uint32_t sec_end = total_samples - 1;
+        double sec_peak = 0.0;
+        for (uint32_t k = section_start; k <= sec_end; k++) {
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double val = fabs(data[k * num_channels + c]);
+                if (val > sec_peak) sec_peak = val;
+            }
+        }
+        if (sec_peak < noise_floor_threshold) {
+            for (uint32_t k = section_start; k <= sec_end; k++) {
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    data[k * num_channels + c] = 0.0;
+                }
+            }
+        }
+    }
+}
+
 int process_audio(const char *input_path) {
     clock_t start_clock = clock();
 
@@ -386,8 +469,7 @@ int process_audio(const char *input_path) {
     if (overall_peak < 1e-6) overall_peak = 1e-6;
 
     // Calculate noise floor threshold (19.0% of overall peak amplitude)
-    double noise_floor_ratio = DEFAULT_NOISE_FLOOR_RATIO; // 0.19 (19.0% of peak)
-    double noise_floor_threshold = overall_peak * noise_floor_ratio;
+    double noise_floor_threshold = overall_peak * g_noise_floor_ratio;
 
     printf("\nAudio File Properties:\n");
     printf("  Format:          %s PCM (%u bits)\n", (wav->audio_format == 3) ? "IEEE Float" : "Integer", wav->bits_per_sample);
@@ -538,13 +620,19 @@ int process_audio(const char *input_path) {
             uint32_t padded_idx = i + pad_samples;
             double norm = cola_norm[padded_idx];
 
-            int frame_above_threshold = 0;
             for (uint32_t c = 0; c < num_channels; c++) {
                 double val = (norm > 1e-12) ? (stem_buffers[p][c][padded_idx] / norm) : 0.0;
-
-                // Store original audio sample value without zeroing out values below noise floor
                 unpadded_data[i * num_channels + c] = val;
+            }
+        }
 
+        // Apply noise gate to zero out segments bounded by 1ms silence that never exceed the noise floor
+        apply_noise_gate(unpadded_data, total_samples, num_channels, sample_rate, noise_floor_threshold);
+
+        for (uint32_t i = 0; i < total_samples; i++) {
+            int frame_above_threshold = 0;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double val = unpadded_data[i * num_channels + c];
                 double abs_val = fabs(val);
                 if (abs_val > max_peak) max_peak = abs_val;
                 sum_sq += val * val;
