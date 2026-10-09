@@ -509,6 +509,46 @@ int process_audio(const char *input_path) {
     free(fft_frame);
     free(pitch_frame);
 
+    /* Instantaneous Cross-Stem Peak Thresholding:
+     * At each sample point along the audio file, determine the peak amplitude across all pitch stems
+     * and zero out to silence any stems that do not have at least 50% of that peak amplitude at that point.
+     */
+    for (uint32_t i = 0; i < total_samples; i++) {
+        uint32_t padded_idx = i + pad_samples;
+        double norm = cola_norm[padded_idx];
+        if (norm < 1e-12) continue;
+
+        double stem_peaks[NUM_MIDI_PITCHES] = {0.0};
+        double frame_max_amp = 0.0;
+
+        for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+            if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
+            double p_max = 0.0;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double abs_val = fabs(stem_buffers[p][c][padded_idx]);
+                if (abs_val > p_max) {
+                    p_max = abs_val;
+                }
+            }
+            stem_peaks[p] = p_max;
+            if (p_max > frame_max_amp) {
+                frame_max_amp = p_max;
+            }
+        }
+
+        double frame_threshold = 0.5 * frame_max_amp;
+        if (frame_threshold > 1e-12) {
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
+                if (stem_peaks[p] < frame_threshold) {
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        stem_buffers[p][c][padded_idx] = 0.0;
+                    }
+                }
+            }
+        }
+    }
+
     char dir[1024], basename[512];
     get_filepath_components(input_path, dir, basename, sizeof(basename));
 
