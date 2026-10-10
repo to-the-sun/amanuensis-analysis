@@ -5,7 +5,7 @@ CFLAGS ?= -O3 -Wall -std=c99
 LDFLAGS ?= -lm
 
 WIN_CC = x86_64-w64-mingw32-gcc
-WIN_CFLAGS = -O3 -Wall -std=c99 -static
+WIN_CFLAGS = -O3 -Wall -std=c99 -static -Wl,--stack,16777216
 
 TARGET = analysis/pitch_separator
 WIN_TARGET = analysis/pitch_separator.exe
