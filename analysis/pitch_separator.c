@@ -17,6 +17,8 @@
  * Can be executed via drag-and-drop (command-line argument) or double-click (interactive prompt).
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +33,7 @@
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 #define MKDIR(dir) mkdir(dir, 0755)
 #endif
 
@@ -105,7 +108,24 @@ void init_fft_tables(void) {
 
 void wait_for_keypress(void) {
     printf("\nPress ENTER to exit...\n");
-    getchar();
+    fflush(stdout);
+#if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+    system("pause");
+#else
+    if (isatty(fileno(stdin))) {
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+        if (c == '\n') {
+            getchar();
+        }
+    } else {
+        FILE *tty = fopen("/dev/tty", "r");
+        if (tty) {
+            fgetc(tty);
+            fclose(tty);
+        }
+    }
+#endif
 }
 
 void trim_string(char *str) {
