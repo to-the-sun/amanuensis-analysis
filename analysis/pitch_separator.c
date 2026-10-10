@@ -366,13 +366,19 @@ void get_filepath_components(const char *filepath, char *out_dir, char *out_base
 }
 
 /*
- * Sophisticated Noise Gate:
+ * Sophisticated Noise Gate with Masking:
  * For each section of audio bounded on either side by one full millisecond of all 0.0 silent samples
  * (or audio file boundary), if that segment of audio at no point rises above the noise floor threshold,
- * that entire segment is reduced to 0.0 silence across all channels.
+ * that entire segment is reduced to 0.0 silence across all channels and marked as inactive in active_mask.
  */
-void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double noise_floor_threshold) {
-    if (total_samples == 0 || data == NULL) return;
+void apply_noise_gate_with_mask(const double *in_data, double *out_data, uint8_t *active_mask, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double noise_floor_threshold) {
+    if (total_samples == 0 || in_data == NULL) return;
+
+    size_t total_channel_samples = (size_t)total_samples * num_channels;
+    for (size_t k = 0; k < total_channel_samples; k++) {
+        out_data[k] = in_data[k];
+        active_mask[k] = 1;
+    }
 
     uint32_t ms_samples = (uint32_t)ceil((double)sample_rate / 1000.0);
     if (ms_samples < 1) ms_samples = 1;
@@ -383,7 +389,7 @@ void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channel
     while (i < total_samples) {
         int silent = 1;
         for (uint32_t c = 0; c < num_channels; c++) {
-            if (fabs(data[i * num_channels + c]) > g_silence_threshold) {
+            if (fabs(in_data[i * num_channels + c]) > g_silence_threshold) {
                 silent = 0;
                 break;
             }
@@ -394,7 +400,7 @@ void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channel
             while (i < total_samples) {
                 int s = 1;
                 for (uint32_t c = 0; c < num_channels; c++) {
-                    if (fabs(data[i * num_channels + c]) > g_silence_threshold) {
+                    if (fabs(in_data[i * num_channels + c]) > g_silence_threshold) {
                         s = 0;
                         break;
                     }
@@ -410,14 +416,16 @@ void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channel
                     double sec_peak = 0.0;
                     for (uint32_t k = section_start; k <= sec_end; k++) {
                         for (uint32_t c = 0; c < num_channels; c++) {
-                            double val = fabs(data[k * num_channels + c]);
+                            double val = fabs(in_data[k * num_channels + c]);
                             if (val > sec_peak) sec_peak = val;
                         }
                     }
                     if (sec_peak < noise_floor_threshold) {
                         for (uint32_t k = section_start; k <= sec_end; k++) {
                             for (uint32_t c = 0; c < num_channels; c++) {
-                                data[k * num_channels + c] = 0.0;
+                                size_t idx = (size_t)k * num_channels + c;
+                                out_data[idx] = 0.0;
+                                active_mask[idx] = 0;
                             }
                         }
                     }
@@ -434,14 +442,16 @@ void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channel
         double sec_peak = 0.0;
         for (uint32_t k = section_start; k <= sec_end; k++) {
             for (uint32_t c = 0; c < num_channels; c++) {
-                double val = fabs(data[k * num_channels + c]);
+                double val = fabs(in_data[k * num_channels + c]);
                 if (val > sec_peak) sec_peak = val;
             }
         }
         if (sec_peak < noise_floor_threshold) {
             for (uint32_t k = section_start; k <= sec_end; k++) {
                 for (uint32_t c = 0; c < num_channels; c++) {
-                    data[k * num_channels + c] = 0.0;
+                    size_t idx = (size_t)k * num_channels + c;
+                    out_data[idx] = 0.0;
+                    active_mask[idx] = 0;
                 }
             }
         }
@@ -611,13 +621,17 @@ int process_audio(const char *input_path) {
     printf(" MIDI | Note | Freq (Hz)  | Peak Amp | RMS Amp  | Active Duration | File Exported\n");
     printf("-----------------------------------------------------------------------------------\n");
 
+    double *unpadded_stems[NUM_MIDI_PITCHES] = {NULL};
+    double *gated_stems[NUM_MIDI_PITCHES] = {NULL};
+    uint8_t *active_masks[NUM_MIDI_PITCHES] = {NULL};
+
+    // Step 1: Extract unpadded audio and apply noise gate with mask for all pitch stems
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
         if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
 
-        double max_peak = 0.0;
-        double sum_sq = 0.0;
-        uint32_t active_frames = 0;
-        double *unpadded_data = (double*)malloc((size_t)total_samples * num_channels * sizeof(double));
+        unpadded_stems[p] = (double*)malloc(total_channel_samples * sizeof(double));
+        gated_stems[p] = (double*)malloc(total_channel_samples * sizeof(double));
+        active_masks[p] = (uint8_t*)malloc(total_channel_samples * sizeof(uint8_t));
 
         for (uint32_t i = 0; i < total_samples; i++) {
             uint32_t padded_idx = i + pad_samples;
@@ -625,17 +639,46 @@ int process_audio(const char *input_path) {
 
             for (uint32_t c = 0; c < num_channels; c++) {
                 double val = (norm > 1e-12) ? (stem_buffers[p][c][padded_idx] / norm) : 0.0;
-                unpadded_data[i * num_channels + c] = val;
+                unpadded_stems[p][i * num_channels + c] = val;
             }
         }
 
-        // Apply noise gate to zero out segments bounded by 1ms silence that never exceed the noise floor
-        apply_noise_gate(unpadded_data, total_samples, num_channels, sample_rate, noise_floor_threshold);
+        // Apply noise gate to extract gated_stems and active_masks
+        apply_noise_gate_with_mask(unpadded_stems[p], gated_stems[p], active_masks[p],
+                                   total_samples, num_channels, sample_rate, noise_floor_threshold);
+    }
+
+    // Step 2: Sample-by-sample redistribution of zeroed-out audio to stems above the noise floor
+    for (size_t k = 0; k < total_channel_samples; k++) {
+        double sum_zeroed = 0.0;
+
+        for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+            if (active_masks[p] != NULL && active_masks[p][k] == 0) {
+                sum_zeroed += unpadded_stems[p][k];
+            }
+        }
+
+        if (sum_zeroed != 0.0) {
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                if (active_masks[p] != NULL && active_masks[p][k] == 1) {
+                    gated_stems[p][k] += sum_zeroed;
+                }
+            }
+        }
+    }
+
+    // Step 3: Evaluate metrics and export active stems to WAV
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (!pitch_active[p] || gated_stems[p] == NULL) continue;
+
+        double max_peak = 0.0;
+        double sum_sq = 0.0;
+        uint32_t active_frames = 0;
 
         for (uint32_t i = 0; i < total_samples; i++) {
             int frame_above_threshold = 0;
             for (uint32_t c = 0; c < num_channels; c++) {
-                double val = unpadded_data[i * num_channels + c];
+                double val = gated_stems[p][i * num_channels + c];
                 double abs_val = fabs(val);
                 if (abs_val > max_peak) max_peak = abs_val;
                 sum_sq += val * val;
@@ -662,14 +705,16 @@ int process_audio(const char *input_path) {
             snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%03d_%s.wav",
                      stem_dir, basename, p, note_name);
 
-            if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, unpadded_data)) {
+            if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, gated_stems[p])) {
                 printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
                        p, note_name, midi_to_frequency(p), max_peak, rms, active_ms, basename, p, note_name);
                 exported_count++;
             }
         }
 
-        free(unpadded_data);
+        free(unpadded_stems[p]);
+        free(gated_stems[p]);
+        free(active_masks[p]);
     }
     printf("-----------------------------------------------------------------------------------\n\n");
 
