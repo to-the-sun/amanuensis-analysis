@@ -698,32 +698,122 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Step 2: Sample-by-sample redistribution of sum_zeroed ONLY to audible stems exceeding 79% of max moment peak
-    for (size_t k = 0; k < total_channel_samples; k++) {
-        if (sum_zeroed[k] == 0.0) continue;
-
-        double max_moment_peak = 0.0;
-        for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-            if (is_audible_stem[p] && gated_stems[p] != NULL) {
-                double abs_val = fabs(gated_stems[p][k]);
-                if (abs_val > max_moment_peak) {
-                    max_moment_peak = abs_val;
-                }
-            }
-        }
-
-        if (max_moment_peak > 0.0) {
-            double moment_threshold = 0.79 * max_moment_peak;
+    // Step 2: Redistribution of sum_zeroed into sections bounded by 1ms below 89% moment peak threshold
+    double *moment_max = (double*)calloc(total_channel_samples, sizeof(double));
+    if (moment_max) {
+        for (size_t k = 0; k < total_channel_samples; k++) {
+            double max_val = 0.0;
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
                 if (is_audible_stem[p] && gated_stems[p] != NULL) {
-                    if (fabs(gated_stems[p][k]) > moment_threshold) {
-                        gated_stems[p][k] += sum_zeroed[k];
+                    double abs_val = fabs(gated_stems[p][k]);
+                    if (abs_val > max_val) {
+                        max_val = abs_val;
                     }
                 }
             }
+            moment_max[k] = max_val;
         }
     }
 
+    uint32_t ms_samples = (uint32_t)ceil((double)sample_rate / 1000.0);
+    if (ms_samples < 1) ms_samples = 1;
+
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (!is_audible_stem[p] || gated_stems[p] == NULL) continue;
+
+        uint8_t *redistribute_mask = (uint8_t*)calloc(total_samples, sizeof(uint8_t));
+        if (!redistribute_mask) continue;
+
+        uint32_t section_start = 0;
+        uint32_t i = 0;
+
+        while (i < total_samples) {
+            int below_thresh = 1;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                size_t k = (size_t)i * num_channels + c;
+                if (moment_max != NULL && moment_max[k] > 0.0 && fabs(gated_stems[p][k]) > 0.89 * moment_max[k]) {
+                    below_thresh = 0;
+                    break;
+                }
+            }
+
+            if (below_thresh) {
+                uint32_t thresh_start = i;
+                while (i < total_samples) {
+                    int b = 1;
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        size_t k = (size_t)i * num_channels + c;
+                        if (moment_max != NULL && moment_max[k] > 0.0 && fabs(gated_stems[p][k]) > 0.89 * moment_max[k]) {
+                            b = 0;
+                            break;
+                        }
+                    }
+                    if (!b) break;
+                    i++;
+                }
+                uint32_t thresh_len = i - thresh_start;
+
+                if (thresh_len >= ms_samples) {
+                    if (thresh_start > section_start) {
+                        uint32_t sec_end = thresh_start - 1;
+                        int section_exceeds = 0;
+                        for (uint32_t k_frame = section_start; k_frame <= sec_end; k_frame++) {
+                            for (uint32_t c = 0; c < num_channels; c++) {
+                                size_t idx = (size_t)k_frame * num_channels + c;
+                                if (moment_max != NULL && moment_max[idx] > 0.0 && fabs(gated_stems[p][idx]) > 0.89 * moment_max[idx]) {
+                                    section_exceeds = 1;
+                                    break;
+                                }
+                            }
+                            if (section_exceeds) break;
+                        }
+                        if (section_exceeds) {
+                            for (uint32_t k_frame = section_start; k_frame <= sec_end; k_frame++) {
+                                redistribute_mask[k_frame] = 1;
+                            }
+                        }
+                    }
+                    section_start = i;
+                }
+            } else {
+                i++;
+            }
+        }
+
+        if (section_start < total_samples) {
+            uint32_t sec_end = total_samples - 1;
+            int section_exceeds = 0;
+            for (uint32_t k_frame = section_start; k_frame <= sec_end; k_frame++) {
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    size_t idx = (size_t)k_frame * num_channels + c;
+                    if (moment_max != NULL && moment_max[idx] > 0.0 && fabs(gated_stems[p][idx]) > 0.89 * moment_max[idx]) {
+                        section_exceeds = 1;
+                        break;
+                    }
+                }
+                if (section_exceeds) break;
+            }
+            if (section_exceeds) {
+                for (uint32_t k_frame = section_start; k_frame <= sec_end; k_frame++) {
+                    redistribute_mask[k_frame] = 1;
+                }
+            }
+        }
+
+        // Add sum_zeroed into gated_stems[p] for frames marked in redistribute_mask
+        for (uint32_t k_frame = 0; k_frame < total_samples; k_frame++) {
+            if (redistribute_mask[k_frame]) {
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    size_t idx = (size_t)k_frame * num_channels + c;
+                    gated_stems[p][idx] += sum_zeroed[idx];
+                }
+            }
+        }
+
+        free(redistribute_mask);
+    }
+
+    if (moment_max) free(moment_max);
     free(sum_zeroed);
 
     // Step 3: Export pre-identified audible pitch stems to WAV
