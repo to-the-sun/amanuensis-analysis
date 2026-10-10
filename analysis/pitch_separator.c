@@ -42,8 +42,8 @@
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
 
-/* Silence Threshold: Peak amplitude limit for silent boundary samples (0.0009) */
-double g_silence_threshold = 0.0009;
+/* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
+double g_silence_threshold = 0.009;
 
 typedef struct {
     double r;
