@@ -405,6 +405,11 @@ void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channel
             uint32_t silence_len = i - silence_start;
 
             if (silence_len >= ms_samples) {
+                for (uint32_t k = silence_start; k < i; k++) {
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        data[k * num_channels + c] = 0.0;
+                    }
+                }
                 if (silence_start > section_start) {
                     uint32_t sec_end = silence_start - 1;
                     double sec_peak = 0.0;
