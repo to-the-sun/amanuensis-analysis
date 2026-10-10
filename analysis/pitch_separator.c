@@ -624,6 +624,7 @@ int process_audio(const char *input_path) {
     double *unpadded_stems[NUM_MIDI_PITCHES] = {NULL};
     double *gated_stems[NUM_MIDI_PITCHES] = {NULL};
     uint8_t *active_masks[NUM_MIDI_PITCHES] = {NULL};
+    uint8_t *frame_active[NUM_MIDI_PITCHES] = {NULL};
 
     // Step 1: Extract unpadded audio and apply noise gate with mask for all pitch stems
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
@@ -632,6 +633,7 @@ int process_audio(const char *input_path) {
         unpadded_stems[p] = (double*)malloc(total_channel_samples * sizeof(double));
         gated_stems[p] = (double*)malloc(total_channel_samples * sizeof(double));
         active_masks[p] = (uint8_t*)malloc(total_channel_samples * sizeof(uint8_t));
+        frame_active[p] = (uint8_t*)calloc(total_samples, sizeof(uint8_t));
 
         for (uint32_t i = 0; i < total_samples; i++) {
             uint32_t padded_idx = i + pad_samples;
@@ -646,22 +648,37 @@ int process_audio(const char *input_path) {
         // Apply noise gate to extract gated_stems and active_masks
         apply_noise_gate_with_mask(unpadded_stems[p], gated_stems[p], active_masks[p],
                                    total_samples, num_channels, sample_rate, noise_floor_threshold);
-    }
 
-    // Step 2: Sample-by-sample redistribution of zeroed-out audio to stems above the noise floor
-    for (size_t k = 0; k < total_channel_samples; k++) {
-        double sum_zeroed = 0.0;
-
-        for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-            if (active_masks[p] != NULL && active_masks[p][k] == 0) {
-                sum_zeroed += unpadded_stems[p][k];
+        // Record which frames in gated_stems have non-zero peak amplitude post noise gate
+        for (uint32_t i = 0; i < total_samples; i++) {
+            double frame_peak = 0.0;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double abs_val = fabs(gated_stems[p][i * num_channels + c]);
+                if (abs_val > frame_peak) frame_peak = abs_val;
+            }
+            if (frame_peak > 0.0) {
+                frame_active[p][i] = 1;
             }
         }
+    }
 
-        if (sum_zeroed != 0.0) {
+    // Step 2: Sample-by-sample redistribution of zeroed-out audio to stems with active frames (> 0.0 peak amplitude)
+    for (uint32_t i = 0; i < total_samples; i++) {
+        for (uint32_t c = 0; c < num_channels; c++) {
+            size_t k = (size_t)i * num_channels + c;
+            double sum_zeroed = 0.0;
+
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                if (active_masks[p] != NULL && active_masks[p][k] == 1) {
-                    gated_stems[p][k] += sum_zeroed;
+                if (unpadded_stems[p] != NULL && gated_stems[p] != NULL) {
+                    sum_zeroed += (unpadded_stems[p][k] - gated_stems[p][k]);
+                }
+            }
+
+            if (sum_zeroed != 0.0) {
+                for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                    if (gated_stems[p] != NULL && frame_active[p] != NULL && frame_active[p][i]) {
+                        gated_stems[p][k] += sum_zeroed;
+                    }
                 }
             }
         }
@@ -715,6 +732,7 @@ int process_audio(const char *input_path) {
         free(unpadded_stems[p]);
         free(gated_stems[p]);
         free(active_masks[p]);
+        free(frame_active[p]);
     }
     printf("-----------------------------------------------------------------------------------\n\n");
 
