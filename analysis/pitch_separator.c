@@ -366,19 +366,13 @@ void get_filepath_components(const char *filepath, char *out_dir, char *out_base
 }
 
 /*
- * Sophisticated Noise Gate with Masking:
+ * Sophisticated Noise Gate:
  * For each section of audio bounded on either side by one full millisecond of all 0.0 silent samples
  * (or audio file boundary), if that segment of audio at no point rises above the noise floor threshold,
- * that entire segment is reduced to 0.0 silence across all channels and marked as inactive in active_mask.
+ * that entire segment is reduced to 0.0 silence across all channels.
  */
-void apply_noise_gate_with_mask(const double *in_data, double *out_data, uint8_t *active_mask, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double noise_floor_threshold) {
-    if (total_samples == 0 || in_data == NULL) return;
-
-    size_t total_channel_samples = (size_t)total_samples * num_channels;
-    for (size_t k = 0; k < total_channel_samples; k++) {
-        out_data[k] = in_data[k];
-        active_mask[k] = 0;
-    }
+void apply_noise_gate(double *data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double noise_floor_threshold) {
+    if (total_samples == 0 || data == NULL) return;
 
     uint32_t ms_samples = (uint32_t)ceil((double)sample_rate / 1000.0);
     if (ms_samples < 1) ms_samples = 1;
@@ -389,7 +383,7 @@ void apply_noise_gate_with_mask(const double *in_data, double *out_data, uint8_t
     while (i < total_samples) {
         int silent = 1;
         for (uint32_t c = 0; c < num_channels; c++) {
-            if (fabs(in_data[i * num_channels + c]) > g_silence_threshold) {
+            if (fabs(data[i * num_channels + c]) > g_silence_threshold) {
                 silent = 0;
                 break;
             }
@@ -400,7 +394,7 @@ void apply_noise_gate_with_mask(const double *in_data, double *out_data, uint8_t
             while (i < total_samples) {
                 int s = 1;
                 for (uint32_t c = 0; c < num_channels; c++) {
-                    if (fabs(in_data[i * num_channels + c]) > g_silence_threshold) {
+                    if (fabs(data[i * num_channels + c]) > g_silence_threshold) {
                         s = 0;
                         break;
                     }
@@ -411,28 +405,26 @@ void apply_noise_gate_with_mask(const double *in_data, double *out_data, uint8_t
             uint32_t silence_len = i - silence_start;
 
             if (silence_len >= ms_samples) {
+                // Ensure silent boundary samples are zeroed out
+                for (uint32_t k = silence_start; k < i; k++) {
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        data[k * num_channels + c] = 0.0;
+                    }
+                }
+
                 if (silence_start > section_start) {
                     uint32_t sec_end = silence_start - 1;
                     double sec_peak = 0.0;
                     for (uint32_t k = section_start; k <= sec_end; k++) {
                         for (uint32_t c = 0; c < num_channels; c++) {
-                            double val = fabs(in_data[k * num_channels + c]);
+                            double val = fabs(data[k * num_channels + c]);
                             if (val > sec_peak) sec_peak = val;
                         }
                     }
                     if (sec_peak < noise_floor_threshold) {
                         for (uint32_t k = section_start; k <= sec_end; k++) {
                             for (uint32_t c = 0; c < num_channels; c++) {
-                                size_t idx = (size_t)k * num_channels + c;
-                                out_data[idx] = 0.0;
-                                active_mask[idx] = 0;
-                            }
-                        }
-                    } else {
-                        for (uint32_t k = section_start; k <= sec_end; k++) {
-                            for (uint32_t c = 0; c < num_channels; c++) {
-                                size_t idx = (size_t)k * num_channels + c;
-                                active_mask[idx] = 1;
+                                data[k * num_channels + c] = 0.0;
                             }
                         }
                     }
@@ -449,23 +441,14 @@ void apply_noise_gate_with_mask(const double *in_data, double *out_data, uint8_t
         double sec_peak = 0.0;
         for (uint32_t k = section_start; k <= sec_end; k++) {
             for (uint32_t c = 0; c < num_channels; c++) {
-                double val = fabs(in_data[k * num_channels + c]);
+                double val = fabs(data[k * num_channels + c]);
                 if (val > sec_peak) sec_peak = val;
             }
         }
         if (sec_peak < noise_floor_threshold) {
             for (uint32_t k = section_start; k <= sec_end; k++) {
                 for (uint32_t c = 0; c < num_channels; c++) {
-                    size_t idx = (size_t)k * num_channels + c;
-                    out_data[idx] = 0.0;
-                    active_mask[idx] = 0;
-                }
-            }
-        } else {
-            for (uint32_t k = section_start; k <= sec_end; k++) {
-                for (uint32_t c = 0; c < num_channels; c++) {
-                    size_t idx = (size_t)k * num_channels + c;
-                    active_mask[idx] = 1;
+                    data[k * num_channels + c] = 0.0;
                 }
             }
         }
@@ -637,7 +620,6 @@ int process_audio(const char *input_path) {
 
     double *unpadded_stems[NUM_MIDI_PITCHES] = {NULL};
     double *gated_stems[NUM_MIDI_PITCHES] = {NULL};
-    uint8_t *active_masks[NUM_MIDI_PITCHES] = {NULL};
     int is_audible_stem[NUM_MIDI_PITCHES] = {0};
 
     // Step 1: Extract unpadded audio, apply noise gate, and pre-identify audible pitch stems
@@ -646,7 +628,6 @@ int process_audio(const char *input_path) {
 
         unpadded_stems[p] = (double*)malloc(total_channel_samples * sizeof(double));
         gated_stems[p] = (double*)malloc(total_channel_samples * sizeof(double));
-        active_masks[p] = (uint8_t*)malloc(total_channel_samples * sizeof(uint8_t));
 
         for (uint32_t i = 0; i < total_samples; i++) {
             uint32_t padded_idx = i + pad_samples;
@@ -655,12 +636,12 @@ int process_audio(const char *input_path) {
             for (uint32_t c = 0; c < num_channels; c++) {
                 double val = (norm > 1e-12) ? (stem_buffers[p][c][padded_idx] / norm) : 0.0;
                 unpadded_stems[p][i * num_channels + c] = val;
+                gated_stems[p][i * num_channels + c] = val;
             }
         }
 
-        // Apply noise gate to extract gated_stems and active_masks
-        apply_noise_gate_with_mask(unpadded_stems[p], gated_stems[p], active_masks[p],
-                                   total_samples, num_channels, sample_rate, noise_floor_threshold);
+        // Apply noise gate in-place on gated_stems
+        apply_noise_gate(gated_stems[p], total_samples, num_channels, sample_rate, noise_floor_threshold);
 
         // Compute metrics on gated_stems to identify audible stems
         double max_peak = 0.0;
@@ -696,7 +677,7 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Step 2: Sample-by-sample redistribution of zeroed-out audio ONLY to pre-identified audible stems at active segment frames
+    // Step 2: Sample-by-sample redistribution of zeroed-out audio ONLY to pre-identified audible stems at active segment samples
     for (size_t k = 0; k < total_channel_samples; k++) {
         double sum_zeroed = 0.0;
 
@@ -708,7 +689,7 @@ int process_audio(const char *input_path) {
 
         if (sum_zeroed != 0.0) {
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                if (is_audible_stem[p] && gated_stems[p] != NULL && active_masks[p] != NULL && active_masks[p][k] == 1) {
+                if (is_audible_stem[p] && gated_stems[p] != NULL && fabs(gated_stems[p][k]) > 0.0) {
                     gated_stems[p][k] += sum_zeroed;
                 }
             }
@@ -761,7 +742,6 @@ int process_audio(const char *input_path) {
 
         free(unpadded_stems[p]);
         free(gated_stems[p]);
-        free(active_masks[p]);
     }
     printf("-----------------------------------------------------------------------------------\n\n");
 
