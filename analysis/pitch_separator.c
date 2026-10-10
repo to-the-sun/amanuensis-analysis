@@ -698,13 +698,28 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Step 2: Sample-by-sample redistribution of sum_zeroed ONLY to pre-identified audible stems at active samples
-    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-        if (!is_audible_stem[p] || gated_stems[p] == NULL) continue;
+    // Step 2: Sample-by-sample redistribution of sum_zeroed ONLY to audible stems exceeding 79% of max moment peak
+    for (size_t k = 0; k < total_channel_samples; k++) {
+        if (sum_zeroed[k] == 0.0) continue;
 
-        for (size_t k = 0; k < total_channel_samples; k++) {
-            if (fabs(gated_stems[p][k]) > 0.0) {
-                gated_stems[p][k] += sum_zeroed[k];
+        double max_moment_peak = 0.0;
+        for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+            if (is_audible_stem[p] && gated_stems[p] != NULL) {
+                double abs_val = fabs(gated_stems[p][k]);
+                if (abs_val > max_moment_peak) {
+                    max_moment_peak = abs_val;
+                }
+            }
+        }
+
+        if (max_moment_peak > 0.0) {
+            double moment_threshold = 0.79 * max_moment_peak;
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                if (is_audible_stem[p] && gated_stems[p] != NULL) {
+                    if (fabs(gated_stems[p][k]) > moment_threshold) {
+                        gated_stems[p][k] += sum_zeroed[k];
+                    }
+                }
             }
         }
     }
