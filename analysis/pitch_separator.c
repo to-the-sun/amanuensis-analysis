@@ -625,8 +625,9 @@ int process_audio(const char *input_path) {
     double *gated_stems[NUM_MIDI_PITCHES] = {NULL};
     uint8_t *active_masks[NUM_MIDI_PITCHES] = {NULL};
     uint8_t *frame_active[NUM_MIDI_PITCHES] = {NULL};
+    int is_audible_stem[NUM_MIDI_PITCHES] = {0};
 
-    // Step 1: Extract unpadded audio and apply noise gate with mask for all pitch stems
+    // Step 1: Extract unpadded audio, apply noise gate, and pre-identify audible pitch stems
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
         if (!pitch_active[p] || stem_buffers[p] == NULL) continue;
 
@@ -649,20 +650,45 @@ int process_audio(const char *input_path) {
         apply_noise_gate_with_mask(unpadded_stems[p], gated_stems[p], active_masks[p],
                                    total_samples, num_channels, sample_rate, noise_floor_threshold);
 
-        // Record which frames in gated_stems have non-zero peak amplitude post noise gate
+        // Compute metrics on gated_stems to identify audible stems and record active frames
+        double max_peak = 0.0;
+        double sum_sq = 0.0;
+        uint32_t active_frames = 0;
+
         for (uint32_t i = 0; i < total_samples; i++) {
+            int frame_above_threshold = 0;
             double frame_peak = 0.0;
+
             for (uint32_t c = 0; c < num_channels; c++) {
-                double abs_val = fabs(gated_stems[p][i * num_channels + c]);
+                double val = gated_stems[p][i * num_channels + c];
+                double abs_val = fabs(val);
+                if (abs_val > max_peak) max_peak = abs_val;
                 if (abs_val > frame_peak) frame_peak = abs_val;
+                sum_sq += val * val;
+
+                if (abs_val >= noise_floor_threshold) {
+                    frame_above_threshold = 1;
+                }
+            }
+
+            if (frame_above_threshold) {
+                active_frames++;
             }
             if (frame_peak > 0.0) {
                 frame_active[p][i] = 1;
             }
         }
+
+        double rms = sqrt(sum_sq / (total_samples * num_channels));
+        double active_ms = ((double)active_frames / sample_rate) * 1000.0;
+
+        // Pre-identify audible stems meeting the noise floor threshold criteria
+        if (active_ms >= 99.0 && rms > 1e-6) {
+            is_audible_stem[p] = 1;
+        }
     }
 
-    // Step 2: Sample-by-sample redistribution of zeroed-out audio to stems with active frames (> 0.0 peak amplitude)
+    // Step 2: Sample-by-sample redistribution of zeroed-out audio ONLY to pre-identified audible stems at active frames
     for (uint32_t i = 0; i < total_samples; i++) {
         for (uint32_t c = 0; c < num_channels; c++) {
             size_t k = (size_t)i * num_channels + c;
@@ -676,7 +702,7 @@ int process_audio(const char *input_path) {
 
             if (sum_zeroed != 0.0) {
                 for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                    if (gated_stems[p] != NULL && frame_active[p] != NULL && frame_active[p][i]) {
+                    if (is_audible_stem[p] && gated_stems[p] != NULL && frame_active[p] != NULL && frame_active[p][i]) {
                         gated_stems[p][k] += sum_zeroed;
                     }
                 }
@@ -684,37 +710,36 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Step 3: Evaluate metrics and export active stems to WAV
+    // Step 3: Export pre-identified audible pitch stems to WAV
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
         if (!pitch_active[p] || gated_stems[p] == NULL) continue;
 
-        double max_peak = 0.0;
-        double sum_sq = 0.0;
-        uint32_t active_frames = 0;
+        if (is_audible_stem[p]) {
+            double max_peak = 0.0;
+            double sum_sq = 0.0;
+            uint32_t active_frames = 0;
 
-        for (uint32_t i = 0; i < total_samples; i++) {
-            int frame_above_threshold = 0;
-            for (uint32_t c = 0; c < num_channels; c++) {
-                double val = gated_stems[p][i * num_channels + c];
-                double abs_val = fabs(val);
-                if (abs_val > max_peak) max_peak = abs_val;
-                sum_sq += val * val;
+            for (uint32_t i = 0; i < total_samples; i++) {
+                int frame_above_threshold = 0;
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    double val = gated_stems[p][i * num_channels + c];
+                    double abs_val = fabs(val);
+                    if (abs_val > max_peak) max_peak = abs_val;
+                    sum_sq += val * val;
 
-                if (abs_val >= noise_floor_threshold) {
-                    frame_above_threshold = 1;
+                    if (abs_val >= noise_floor_threshold) {
+                        frame_above_threshold = 1;
+                    }
+                }
+
+                if (frame_above_threshold) {
+                    active_frames++;
                 }
             }
 
-            if (frame_above_threshold) {
-                active_frames++;
-            }
-        }
+            double rms = sqrt(sum_sq / (total_samples * num_channels));
+            double active_ms = ((double)active_frames / sample_rate) * 1000.0;
 
-        double rms = sqrt(sum_sq / (total_samples * num_channels));
-        double active_ms = ((double)active_frames / sample_rate) * 1000.0;
-
-        // Only export stems that have at least 99 milliseconds worth of frames above the noise floor
-        if (active_ms >= 99.0 && rms > 1e-6) {
             char note_name[32];
             get_note_name(p, note_name, sizeof(note_name));
 
