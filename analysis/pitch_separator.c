@@ -577,7 +577,15 @@ int process_audio(const char *input_path) {
     // Pre-calculate bin pitch mappings and group bins per pitch
     int bin_pitch[FFT_SIZE / 2 + 1];
     int pitch_bin_count[NUM_MIDI_PITCHES] = {0};
-    int pitch_bins[NUM_MIDI_PITCHES][FFT_SIZE / 2 + 1];
+    int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_MIDI_PITCHES * (FFT_SIZE / 2 + 1) * sizeof(int));
+    if (!pitch_bins) {
+        printf("Error: Could not allocate memory for pitch_bins.\n");
+        for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
+        free(padded_input);
+        free(cola_norm);
+        free(wav);
+        return 0;
+    }
 
     for (int k = 0; k <= FFT_SIZE / 2; k++) {
         double freq = (double)k * sample_rate / FFT_SIZE;
@@ -597,6 +605,7 @@ int process_audio(const char *input_path) {
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
         free(padded_input);
         free(cola_norm);
+        free(pitch_bins);
         free(wav);
         return 0;
     }
@@ -789,6 +798,7 @@ int process_audio(const char *input_path) {
     free(stft_data);
     free(frame_pitch_active);
     free(cola_norm);
+    free(pitch_bins);
     free(wav);
 
     return 1;
