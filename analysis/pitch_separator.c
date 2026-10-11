@@ -967,6 +967,7 @@ int process_audio(const char *input_path) {
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
 
             compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
+            apply_noise_gate(stem->flux_data, total_samples, num_channels, sample_rate, noise_floor_threshold);
         } else {
             free(unpadded_data);
         }
