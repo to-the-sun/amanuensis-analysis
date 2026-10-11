@@ -75,11 +75,169 @@ const char *NOTE_NAMES[12] = {
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
 };
 
+#define FLUX_FFT_SIZE 2048
+#define FLUX_HOP_SIZE 512
+
 /* Pre-calculated FFT lookup tables */
 static Complex g_twiddle_fwd[FFT_SIZE];
 static Complex g_twiddle_inv[FFT_SIZE];
 static int g_bit_rev[FFT_SIZE];
 static int g_fft_tables_initialized = 0;
+
+static Complex g_flux_twiddle_fwd[FLUX_FFT_SIZE];
+static int g_flux_bit_rev[FLUX_FFT_SIZE];
+static int g_flux_tables_initialized = 0;
+
+void init_flux_fft_tables(void) {
+    if (g_flux_tables_initialized) return;
+
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        double angle_fwd = -2.0 * M_PI * i / FLUX_FFT_SIZE;
+        g_flux_twiddle_fwd[i].r = cos(angle_fwd);
+        g_flux_twiddle_fwd[i].i = sin(angle_fwd);
+    }
+
+    for (int i = 0, j = 0; i < FLUX_FFT_SIZE; i++) {
+        g_flux_bit_rev[i] = j;
+        int bit = FLUX_FFT_SIZE >> 1;
+        for (; j & bit; bit >>= 1) {
+            j ^= bit;
+        }
+        j ^= bit;
+    }
+
+    g_flux_tables_initialized = 1;
+}
+
+void fft_2048(Complex *x) {
+    init_flux_fft_tables();
+
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        int j = g_flux_bit_rev[i];
+        if (i < j) {
+            Complex temp = x[i];
+            x[i] = x[j];
+            x[j] = temp;
+        }
+    }
+
+    for (int len = 2; len <= FLUX_FFT_SIZE; len <<= 1) {
+        int half_len = len >> 1;
+        int step = FLUX_FFT_SIZE / len;
+        for (int i = 0; i < FLUX_FFT_SIZE; i += len) {
+            for (int j = 0; j < half_len; j++) {
+                Complex w = g_flux_twiddle_fwd[j * step];
+                Complex u = x[i + j];
+                Complex v = {
+                    x[i + j + half_len].r * w.r - x[i + j + half_len].i * w.i,
+                    x[i + j + half_len].r * w.i + x[i + j + half_len].i * w.r
+                };
+                x[i + j].r = u.r + v.r;
+                x[i + j].i = u.i + v.i;
+                x[i + j + half_len].r = u.r - v.r;
+                x[i + j + half_len].i = u.i - v.i;
+            }
+        }
+    }
+}
+
+void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out) {
+    if (!stem_data || !flux_out || total_samples == 0 || num_channels == 0) return;
+
+    memset(flux_out, 0, (size_t)total_samples * num_channels * sizeof(double));
+
+    double window[FLUX_FFT_SIZE];
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FLUX_FFT_SIZE));
+    }
+
+    uint32_t num_frames = (total_samples >= FLUX_FFT_SIZE) ? ((total_samples - FLUX_FFT_SIZE) / FLUX_HOP_SIZE + 1) : 0;
+    if (num_frames == 0) {
+        return;
+    }
+
+    double *frame_flux = (double*)malloc(num_frames * sizeof(double));
+    double *prev_mag = (double*)calloc(FLUX_FFT_SIZE / 2 + 1, sizeof(double));
+    double *curr_mag = (double*)malloc((FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+    Complex *fft_buf = (Complex*)malloc(FLUX_FFT_SIZE * sizeof(Complex));
+
+    if (!frame_flux || !prev_mag || !curr_mag || !fft_buf) {
+        if (frame_flux) free(frame_flux);
+        if (prev_mag) free(prev_mag);
+        if (curr_mag) free(curr_mag);
+        if (fft_buf) free(fft_buf);
+        return;
+    }
+
+    for (uint32_t c = 0; c < num_channels; c++) {
+        memset(prev_mag, 0, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+
+        for (uint32_t m = 0; m < num_frames; m++) {
+            uint32_t offset = m * FLUX_HOP_SIZE;
+
+            for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+                fft_buf[i].r = stem_data[(offset + i) * num_channels + c] * window[i];
+                fft_buf[i].i = 0.0;
+            }
+
+            fft_2048(fft_buf);
+
+            double flux_sum = 0.0;
+            for (int k = 0; k <= FLUX_FFT_SIZE / 2; k++) {
+                double r = fft_buf[k].r;
+                double im = fft_buf[k].i;
+                double mag = sqrt(r * r + im * im);
+                curr_mag[k] = mag;
+
+                double diff = mag - prev_mag[k];
+                if (diff > 0.0) {
+                    flux_sum += diff;
+                }
+            }
+
+            frame_flux[m] = flux_sum;
+            memcpy(prev_mag, curr_mag, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+        }
+
+        for (uint32_t i = 0; i < total_samples; i++) {
+            double f_idx = ((double)i - (double)(FLUX_FFT_SIZE / 2)) / (double)FLUX_HOP_SIZE;
+
+            double val = 0.0;
+            if (f_idx <= 0.0) {
+                val = frame_flux[0];
+            } else if (f_idx >= (double)(num_frames - 1)) {
+                val = frame_flux[num_frames - 1];
+            } else {
+                int m0 = (int)floor(f_idx);
+                int m1 = m0 + 1;
+                double alpha = f_idx - m0;
+                val = (1.0 - alpha) * frame_flux[m0] + alpha * frame_flux[m1];
+            }
+
+            flux_out[i * num_channels + c] = val;
+        }
+    }
+
+    free(frame_flux);
+    free(prev_mag);
+    free(curr_mag);
+    free(fft_buf);
+
+    double peak_flux = 0.0;
+    size_t total_samples_all_channels = (size_t)total_samples * num_channels;
+    for (size_t k = 0; k < total_samples_all_channels; k++) {
+        if (flux_out[k] > peak_flux) {
+            peak_flux = flux_out[k];
+        }
+    }
+
+    if (peak_flux > 1e-12) {
+        double scale = 1.0 / peak_flux;
+        for (size_t k = 0; k < total_samples_all_channels; k++) {
+            flux_out[k] *= scale;
+        }
+    }
+}
 
 void init_fft_tables(void) {
     if (g_fft_tables_initialized) return;
@@ -785,6 +943,18 @@ int process_audio(const char *input_path) {
                        p, note_name, midi_to_frequency(p), max_peak, rms, active_ms, basename, p, note_name);
                 exported_count++;
 
+                // Export companion transience (flux) WAV file for this pitch stem
+                char flux_filepath[4096];
+                snprintf(flux_filepath, sizeof(flux_filepath), "%s/%s_pitch_%03d_%s_flux.wav",
+                         stem_dir, basename, p, note_name);
+
+                double *flux_buf = (double*)calloc((size_t)total_samples * num_channels, sizeof(double));
+                if (flux_buf) {
+                    compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, flux_buf);
+                    write_wav_16bit(flux_filepath, sample_rate, num_channels, total_samples, flux_buf);
+                    free(flux_buf);
+                }
+
                 // Subtract exported gated tonal pitch stem audio from non-tonal buffer
                 for (size_t k = 0; k < total_channel_samples; k++) {
                     nontonal_data[k] -= unpadded_data[k];
@@ -826,7 +996,7 @@ int process_audio(const char *input_path) {
     printf("====================================================\n");
     printf("  Input File:          %s\n", basename);
     printf("  Stems Directory:     %s/\n", stem_dir);
-    printf("  Audible Stems Exported: %d pitch WAV files + 1 non-tonal WAV file\n", exported_count);
+    printf("  Audible Stems Exported: %d pitch WAV files (+ %d companion flux WAV files) + 1 non-tonal WAV file\n", exported_count, exported_count);
     printf("  Total Time Elapsed:  %.2f seconds\n", total_elapsed);
     printf("  Processing Speed:    %.1fx Real-Time\n", speed_ratio);
     printf("  Reconstruction Status: AUDIBLE RECONSTRUCTION PERFECT\n");
