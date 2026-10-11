@@ -972,7 +972,7 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Apply bounded section noise floor gating to flux envelopes relative to 19% of peak global flux across all flux envelopes
+    // Zero out flux envelope values at any sample moment that does not rise above 19% of peak global flux
     if (audible_count > 0) {
         double max_global_flux = 0.0;
         for (int idx = 0; idx < audible_count; idx++) {
@@ -986,7 +986,11 @@ int process_audio(const char *input_path) {
 
         double flux_noise_floor_threshold = max_global_flux * g_noise_floor_ratio;
         for (int idx = 0; idx < audible_count; idx++) {
-            apply_noise_gate(audible_stems[idx].flux_data, total_samples, num_channels, sample_rate, flux_noise_floor_threshold);
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                if (audible_stems[idx].flux_data[k] < flux_noise_floor_threshold) {
+                    audible_stems[idx].flux_data[k] = 0.0;
+                }
+            }
         }
     }
 
