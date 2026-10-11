@@ -1021,9 +1021,21 @@ int process_audio(const char *input_path) {
                 snprintf(flux_filepath, sizeof(flux_filepath), "%s/%s_pitch_%03d_%s_flux.wav",
                          stem_dir, basename, p, stem->note_name);
 
-                double *final_flux_buf = (double*)calloc(total_channel_samples, sizeof(double));
+                double *final_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
                 if (final_flux_buf) {
-                    compute_stem_transience_flux(stem->audio_data, total_samples, num_channels, sample_rate, final_flux_buf, 1);
+                    memcpy(final_flux_buf, stem->flux_data, total_channel_samples * sizeof(double));
+                    double peak_f = 0.0;
+                    for (size_t k = 0; k < total_channel_samples; k++) {
+                        if (final_flux_buf[k] > peak_f) {
+                            peak_f = final_flux_buf[k];
+                        }
+                    }
+                    if (peak_f > 1e-12) {
+                        double scale = 1.0 / peak_f;
+                        for (size_t k = 0; k < total_channel_samples; k++) {
+                            final_flux_buf[k] *= scale;
+                        }
+                    }
                     write_wav_16bit(flux_filepath, sample_rate, num_channels, total_samples, final_flux_buf);
                     free(final_flux_buf);
                 }
