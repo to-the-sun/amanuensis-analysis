@@ -3,12 +3,13 @@
  *
  * Fast & Efficient Transient-Based MIDI Pitch Stem Separator in C
  *
- * Utilizes analysis/offline/cumulative_transience.c (unmodified) to detect transient locations.
+ * Utilizes analysis/offline/cumulative_transience.c (unmodified, 4-band) to detect transient locations.
  * For each space between transients and each of the 128 integer MIDI pitch frequency bins:
  *   - Calculates pitch bin energy across the transient interval via an 8192-point STFT filterbank.
  *   - Retains audio from the original audio file when the energy in that duration for that pitch bin
- *     is at least 79% of the highest energy observed among all pitch bins during that duration.
- *   - Fills pure silence for that duration if energy is below 79% of the interval's peak energy.
+ *     is at least 89% of the highest energy observed among all pitch bins during that duration.
+ *   - Fills pure silence for that duration if energy is below 89% of the interval's peak energy.
+ *   - Conducts bounded section noise floor gating (19.0% peak threshold / -14.4 dB) before final export.
  *   - Exports pitch stems that have at least 99 milliseconds of total non-silent audio to WAV files.
  *
  * Highly optimized for RAM footprint (< 50MB) and processing speed (> 10x Real-Time).
@@ -52,6 +53,12 @@
 #define FFT_SIZE 8192
 #define HOP_SIZE (FFT_SIZE / 4)
 #define NUM_MIDI_PITCHES 128
+
+/* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
+static double g_noise_floor_ratio = 0.19;
+
+/* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
+static double g_silence_threshold = 0.009;
 
 typedef struct {
     double r;
@@ -211,6 +218,94 @@ static int compare_uint64(const void *a, const void *b) {
     return 0;
 }
 
+/*
+ * Sophisticated Noise Gate:
+ * For each section of audio bounded on either side by one full millisecond of all 0.0 silent samples
+ * (or audio file boundary), if that segment of audio at no point rises above the noise floor threshold,
+ * that entire segment is reduced to 0.0 silence across all channels.
+ */
+static void apply_noise_gate(float *data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double noise_floor_threshold) {
+    if (total_samples == 0 || data == NULL) return;
+
+    uint32_t ms_samples = (uint32_t)ceil((double)sample_rate / 1000.0);
+    if (ms_samples < 1) ms_samples = 1;
+
+    uint32_t section_start = 0;
+    uint32_t i = 0;
+
+    while (i < total_samples) {
+        int silent = 1;
+        for (uint32_t c = 0; c < num_channels; c++) {
+            if (fabs((double)data[i * num_channels + c]) > g_silence_threshold) {
+                silent = 0;
+                break;
+            }
+        }
+
+        if (silent) {
+            uint32_t silence_start = i;
+            while (i < total_samples) {
+                int s = 1;
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    if (fabs((double)data[i * num_channels + c]) > g_silence_threshold) {
+                        s = 0;
+                        break;
+                    }
+                }
+                if (!s) break;
+                i++;
+            }
+            uint32_t silence_len = i - silence_start;
+
+            if (silence_len >= ms_samples) {
+                for (uint32_t k = silence_start; k < i; k++) {
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        data[k * num_channels + c] = 0.0f;
+                    }
+                }
+                if (silence_start > section_start) {
+                    uint32_t sec_end = silence_start - 1;
+                    double sec_peak = 0.0;
+                    for (uint32_t k = section_start; k <= sec_end; k++) {
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            double val = fabs((double)data[k * num_channels + c]);
+                            if (val > sec_peak) sec_peak = val;
+                        }
+                    }
+                    if (sec_peak < noise_floor_threshold) {
+                        for (uint32_t k = section_start; k <= sec_end; k++) {
+                            for (uint32_t c = 0; c < num_channels; c++) {
+                                data[k * num_channels + c] = 0.0f;
+                            }
+                        }
+                    }
+                }
+                section_start = i;
+            }
+        } else {
+            i++;
+        }
+    }
+
+    if (section_start < total_samples) {
+        uint32_t sec_end = total_samples - 1;
+        double sec_peak = 0.0;
+        for (uint32_t k = section_start; k <= sec_end; k++) {
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double val = fabs((double)data[k * num_channels + c]);
+                if (val > sec_peak) sec_peak = val;
+            }
+        }
+        if (sec_peak < noise_floor_threshold) {
+            for (uint32_t k = section_start; k <= sec_end; k++) {
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    data[k * num_channels + c] = 0.0f;
+                }
+            }
+        }
+    }
+}
+
 static int process_single_file(const char *input_path) {
     clock_t start_clock = clock();
     init_fft_tables();
@@ -232,8 +327,22 @@ static int process_single_file(const char *input_path) {
     }
 
     double duration_s = (double)total_pcm_frames / sample_rate;
+
+    /* Calculate overall input signal peak & noise floor threshold */
+    double overall_peak = 0.0;
+    size_t total_channel_samples = (size_t)total_pcm_frames * channels;
+    for (size_t i = 0; i < total_channel_samples; i++) {
+        double abs_val = fabs((double)p_sample_data[i]);
+        if (abs_val > overall_peak) overall_peak = abs_val;
+    }
+    if (overall_peak < 1e-6) overall_peak = 1e-6;
+
+    double noise_floor_threshold = overall_peak * g_noise_floor_ratio;
+
     printf("Loaded audio successfully: %.2f seconds (%llu frames, %u Hz, %u ch)\n",
            duration_s, (unsigned long long)total_pcm_frames, sample_rate, channels);
+    printf("Signal Peak: %.5f | Noise Floor Threshold: %.5f (19.0%% peak / -14.4 dB)\n",
+           overall_peak, noise_floor_threshold);
 
     /* Downmix multi-channel to mono for transience analysis & STFT pitch energy calculation */
     float *mono_data = (float *)malloc(total_pcm_frames * sizeof(float));
@@ -255,7 +364,7 @@ static int process_single_file(const char *input_path) {
         }
     }
 
-    printf("\nDetecting transients using cumulative_transience engine...\n");
+    printf("\nDetecting transients using cumulative_transience engine (4-band)...\n");
     FullAnalysisResult full_res;
     memset(&full_res, 0, sizeof(FullAnalysisResult));
 
@@ -371,7 +480,7 @@ static int process_single_file(const char *input_path) {
 
     free(mono_data); // Free mono buffer as STFT frame energies are computed
 
-    /* Determine pitch bin activity for each interval between transients */
+    /* Determine pitch bin activity for each interval between transients (89% threshold) */
     uint8_t *interval_pitch_active = (uint8_t *)calloc(num_intervals * NUM_MIDI_PITCHES, sizeof(uint8_t));
     if (!interval_pitch_active) {
         printf("Error: Memory allocation failed for interval pitch activity matrix.\n");
@@ -406,7 +515,7 @@ static int process_single_file(const char *input_path) {
         }
 
         if (max_interval_energy > 1e-12) {
-            double thresh = 0.79 * max_interval_energy;
+            double thresh = 0.89 * max_interval_energy;
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
                 if (pitch_interval_energy[p] >= thresh) {
                     interval_pitch_active[m * NUM_MIDI_PITCHES + p] = 1;
@@ -424,51 +533,72 @@ static int process_single_file(const char *input_path) {
     snprintf(stem_dir, sizeof(stem_dir), "%s/%s_transient_pitch_stems", dir, basename);
     MKDIR(stem_dir);
 
-    printf("\nEvaluating pitch stems against energy threshold (>= 79%% interval peak energy, >= 99ms total duration)...\n");
+    printf("\nEvaluating pitch stems against energy threshold (>= 89%% interval peak energy, noise gate, >= 99ms total duration)...\n");
     printf("Exporting pitch stem WAV files to: %s/\n\n", stem_dir);
 
     printf("Audible Transient Pitch Stem Export Table:\n");
     printf("-----------------------------------------------------------------------------------\n");
-    printf(" MIDI | Note | Freq (Hz)  | Peak Amp | Active Duration | File Exported\n");
+    printf(" MIDI | Note | Freq (Hz)  | Peak Amp | RMS Amp  | Active Duration | File Exported\n");
     printf("-----------------------------------------------------------------------------------\n");
 
     int exported_count = 0;
 
     /* Write pitch stems sequentially to keep RAM usage minimal */
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-        uint64_t active_samples = 0;
+        uint64_t candidate_samples = 0;
         for (size_t m = 0; m < num_intervals; m++) {
             if (interval_pitch_active[m * NUM_MIDI_PITCHES + p]) {
-                active_samples += (boundaries[m + 1] - boundaries[m]);
+                candidate_samples += (boundaries[m + 1] - boundaries[m]);
             }
         }
 
-        double active_ms = ((double)active_samples / sample_rate) * 1000.0;
+        if (candidate_samples == 0) continue;
 
-        /* Export pitch stem if it has at least 99 milliseconds of total audio */
-        if (active_ms >= 99.0) {
-            float *stem_buffer = (float *)calloc(total_pcm_frames * channels, sizeof(float));
-            if (!stem_buffer) continue;
+        float *stem_buffer = (float *)calloc(total_pcm_frames * channels, sizeof(float));
+        if (!stem_buffer) continue;
 
-            double stem_peak = 0.0;
+        for (size_t m = 0; m < num_intervals; m++) {
+            if (interval_pitch_active[m * NUM_MIDI_PITCHES + p]) {
+                uint64_t start_samp = boundaries[m];
+                uint64_t end_samp = boundaries[m + 1];
 
-            for (size_t m = 0; m < num_intervals; m++) {
-                if (interval_pitch_active[m * NUM_MIDI_PITCHES + p]) {
-                    uint64_t start_samp = boundaries[m];
-                    uint64_t end_samp = boundaries[m + 1];
-
-                    for (uint64_t i = start_samp; i < end_samp; i++) {
-                        for (unsigned int c = 0; c < channels; c++) {
-                            float val = p_sample_data[i * channels + c];
-                            stem_buffer[i * channels + c] = val;
-
-                            double abs_val = fabs(val);
-                            if (abs_val > stem_peak) stem_peak = abs_val;
-                        }
+                for (uint64_t i = start_samp; i < end_samp; i++) {
+                    for (unsigned int c = 0; c < channels; c++) {
+                        stem_buffer[i * channels + c] = p_sample_data[i * channels + c];
                     }
                 }
             }
+        }
 
+        /* Apply bounded section noise gate just before final evaluation & writing */
+        apply_noise_gate(stem_buffer, (uint32_t)total_pcm_frames, channels, sample_rate, noise_floor_threshold);
+
+        double stem_peak = 0.0;
+        double sum_sq = 0.0;
+        uint32_t active_frames = 0;
+
+        for (uint32_t i = 0; i < total_pcm_frames; i++) {
+            int frame_above_threshold = 0;
+            for (unsigned int c = 0; c < channels; c++) {
+                float val = stem_buffer[i * channels + c];
+                double abs_val = fabs((double)val);
+                if (abs_val > stem_peak) stem_peak = abs_val;
+                sum_sq += (double)val * val;
+
+                if (abs_val >= noise_floor_threshold) {
+                    frame_above_threshold = 1;
+                }
+            }
+            if (frame_above_threshold) {
+                active_frames++;
+            }
+        }
+
+        double rms = sqrt(sum_sq / (total_pcm_frames * channels));
+        double active_ms = ((double)active_frames / sample_rate) * 1000.0;
+
+        /* Export pitch stem if it has at least 99 milliseconds of total active audio */
+        if (active_ms >= 99.0 && rms > 1e-6) {
             char note_name[32];
             get_note_name(p, note_name, sizeof(note_name));
 
@@ -500,13 +630,13 @@ static int process_single_file(const char *input_path) {
                 }
                 drwav_uninit(&wav_out);
 
-                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
-                       p, note_name, midi_to_frequency(p), stem_peak, active_ms, basename, p, note_name);
+                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
+                       p, note_name, midi_to_frequency(p), stem_peak, rms, active_ms, basename, p, note_name);
                 exported_count++;
             }
-
-            free(stem_buffer);
         }
+
+        free(stem_buffer);
     }
 
     printf("-----------------------------------------------------------------------------------\n\n");
@@ -523,7 +653,7 @@ static int process_single_file(const char *input_path) {
     printf("====================================================\n");
     printf("  Input File:            %s\n", basename);
     printf("  Stems Directory:       %s/\n", stem_dir);
-    printf("  Pitch Stems Exported:  %d WAV files (>= 79%% peak energy, >= 99 ms active)\n", exported_count);
+    printf("  Pitch Stems Exported:  %d WAV files (>= 89%% peak energy, noise gate, >= 99 ms active)\n", exported_count);
     printf("  Total Time Elapsed:    %.2f seconds\n", total_elapsed);
     printf("  Processing Speed:      %.1fx Real-Time\n", speed_ratio);
     printf("====================================================\n");
