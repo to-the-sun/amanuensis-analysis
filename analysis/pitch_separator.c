@@ -141,7 +141,17 @@ void fft_2048(Complex *x) {
     }
 }
 
-void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out) {
+typedef struct {
+    int pitch;
+    char note_name[32];
+    double max_peak;
+    double rms;
+    double active_ms;
+    double *audio_data;
+    double *flux_data;
+} AudibleStem;
+
+void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
     if (!stem_data || !flux_out || total_samples == 0 || num_channels == 0) return;
 
     memset(flux_out, 0, (size_t)total_samples * num_channels * sizeof(double));
@@ -223,18 +233,20 @@ void compute_stem_transience_flux(const double *stem_data, uint32_t total_sample
     free(curr_mag);
     free(fft_buf);
 
-    double peak_flux = 0.0;
-    size_t total_samples_all_channels = (size_t)total_samples * num_channels;
-    for (size_t k = 0; k < total_samples_all_channels; k++) {
-        if (flux_out[k] > peak_flux) {
-            peak_flux = flux_out[k];
-        }
-    }
-
-    if (peak_flux > 1e-12) {
-        double scale = 1.0 / peak_flux;
+    if (normalize) {
+        double peak_flux = 0.0;
+        size_t total_samples_all_channels = (size_t)total_samples * num_channels;
         for (size_t k = 0; k < total_samples_all_channels; k++) {
-            flux_out[k] *= scale;
+            if (flux_out[k] > peak_flux) {
+                peak_flux = flux_out[k];
+            }
+        }
+
+        if (peak_flux > 1e-12) {
+            double scale = 1.0 / peak_flux;
+            for (size_t k = 0; k < total_samples_all_channels; k++) {
+                flux_out[k] *= scale;
+            }
         }
     }
 }
@@ -852,6 +864,10 @@ int process_audio(const char *input_path) {
 
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
+    AudibleStem *audible_stems = NULL;
+    int audible_count = 0;
+    int audible_capacity = 0;
+
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
         if (!pitch_active[p] || pitch_bin_count[p] == 0) continue;
 
@@ -929,40 +945,95 @@ int process_audio(const char *input_path) {
         double rms = sqrt(sum_sq / (total_samples * num_channels));
         double active_ms = ((double)active_frames / sample_rate) * 1000.0;
 
-        // Only export stems that have at least 99 milliseconds worth of frames above the noise floor
+        // Only keep stems that have at least 99 milliseconds worth of frames above the noise floor
         if (active_ms >= 99.0 && rms > 1e-6) {
-            char note_name[32];
-            get_note_name(p, note_name, sizeof(note_name));
+            // Subtract exported gated tonal pitch stem audio from non-tonal buffer
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                nontonal_data[k] -= unpadded_data[k];
+            }
 
-            char out_filepath[4096];
-            snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%03d_%s.wav",
-                     stem_dir, basename, p, note_name);
+            if (audible_count >= audible_capacity) {
+                audible_capacity = (audible_capacity == 0) ? 16 : audible_capacity * 2;
+                audible_stems = (AudibleStem*)realloc(audible_stems, audible_capacity * sizeof(AudibleStem));
+            }
 
-            if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, unpadded_data)) {
-                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
-                       p, note_name, midi_to_frequency(p), max_peak, rms, active_ms, basename, p, note_name);
-                exported_count++;
+            AudibleStem *stem = &audible_stems[audible_count++];
+            stem->pitch = p;
+            get_note_name(p, stem->note_name, sizeof(stem->note_name));
+            stem->max_peak = max_peak;
+            stem->rms = rms;
+            stem->active_ms = active_ms;
+            stem->audio_data = unpadded_data;
+            stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
 
-                // Export companion transience (flux) WAV file for this pitch stem
-                char flux_filepath[4096];
-                snprintf(flux_filepath, sizeof(flux_filepath), "%s/%s_pitch_%03d_%s_flux.wav",
-                         stem_dir, basename, p, note_name);
+            compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
+        } else {
+            free(unpadded_data);
+        }
+    }
 
-                double *flux_buf = (double*)calloc((size_t)total_samples * num_channels, sizeof(double));
-                if (flux_buf) {
-                    compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, flux_buf);
-                    write_wav_16bit(flux_filepath, sample_rate, num_channels, total_samples, flux_buf);
-                    free(flux_buf);
+    // Pass 2: Momentary peak-flux evaluation across all audible pitch stems
+    if (audible_count > 0) {
+        for (size_t k = 0; k < total_channel_samples; k++) {
+            double max_moment_flux = 0.0;
+            for (int idx = 0; idx < audible_count; idx++) {
+                double f = audible_stems[idx].flux_data[k];
+                if (f > max_moment_flux) {
+                    max_moment_flux = f;
                 }
+            }
 
-                // Subtract exported gated tonal pitch stem audio from non-tonal buffer
-                for (size_t k = 0; k < total_channel_samples; k++) {
-                    nontonal_data[k] -= unpadded_data[k];
+            if (max_moment_flux > 1e-12) {
+                double thresh = 0.89 * max_moment_flux;
+                for (int idx = 0; idx < audible_count; idx++) {
+                    if (audible_stems[idx].flux_data[k] > thresh) {
+                        audible_stems[idx].audio_data[k] += nontonal_data[k];
+                    }
                 }
             }
         }
 
-        free(unpadded_data);
+        // Export pitch stems and companion flux WAV files
+        for (int idx = 0; idx < audible_count; idx++) {
+            AudibleStem *stem = &audible_stems[idx];
+            int p = stem->pitch;
+
+            double final_peak = 0.0;
+            double final_sum_sq = 0.0;
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                double val = stem->audio_data[k];
+                double abs_val = fabs(val);
+                if (abs_val > final_peak) final_peak = abs_val;
+                final_sum_sq += val * val;
+            }
+            double final_rms = sqrt(final_sum_sq / total_channel_samples);
+
+            char out_filepath[4096];
+            snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%03d_%s.wav",
+                     stem_dir, basename, p, stem->note_name);
+
+            if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, stem->audio_data)) {
+                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
+                       p, stem->note_name, midi_to_frequency(p), final_peak, final_rms, stem->active_ms, basename, p, stem->note_name);
+                exported_count++;
+
+                char flux_filepath[4096];
+                snprintf(flux_filepath, sizeof(flux_filepath), "%s/%s_pitch_%03d_%s_flux.wav",
+                         stem_dir, basename, p, stem->note_name);
+
+                double *final_flux_buf = (double*)calloc(total_channel_samples, sizeof(double));
+                if (final_flux_buf) {
+                    compute_stem_transience_flux(stem->audio_data, total_samples, num_channels, sample_rate, final_flux_buf, 1);
+                    write_wav_16bit(flux_filepath, sample_rate, num_channels, total_samples, final_flux_buf);
+                    free(final_flux_buf);
+                }
+            }
+
+            free(stem->audio_data);
+            free(stem->flux_data);
+        }
+
+        free(audible_stems);
     }
     printf("-----------------------------------------------------------------------------------\n\n");
 
