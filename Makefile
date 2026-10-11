@@ -1,29 +1,37 @@
-# Makefile for pitch_separator
+# Makefile for pitch_separator and transient_pitch_separator
 
 CC ?= gcc
-CFLAGS ?= -O3 -Wall -std=c99
-LDFLAGS ?= -lm
+CFLAGS ?= -O3 -Wall -std=c99 -Ianalysis/offline
+LDFLAGS ?= -lm -lpthread
 
 WIN_CC = x86_64-w64-mingw32-gcc
-WIN_CFLAGS = -O3 -Wall -std=c99 -static -Wl,--stack,16777216
+WIN_CFLAGS = -O3 -Wall -std=c99 -Ianalysis/offline -static -Wl,--stack,16777216
 
 TARGET = analysis/pitch_separator
 WIN_TARGET = analysis/pitch_separator.exe
 SRCS = analysis/pitch_separator.c
-OBJS = $(SRCS:.c=.o)
 
-all: $(TARGET) win
+TRANSIENT_TARGET = analysis/transient_pitch_separator
+TRANSIENT_WIN_TARGET = analysis/transient_pitch_separator.exe
+TRANSIENT_SRCS = analysis/transient_pitch_separator.c analysis/offline/cumulative_transience.c
 
-$(TARGET): $(OBJS)
-	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
+all: $(TARGET) $(TRANSIENT_TARGET) win
 
-analysis/%.o: analysis/%.c
-	$(CC) $(CFLAGS) -c $< -o $@
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) -lm
 
-win: $(SRCS)
-	$(WIN_CC) $(WIN_CFLAGS) $(SRCS) -o $(WIN_TARGET) $(LDFLAGS)
+$(TRANSIENT_TARGET): $(TRANSIENT_SRCS)
+	$(CC) $(CFLAGS) $(TRANSIENT_SRCS) -o $(TRANSIENT_TARGET) $(LDFLAGS)
+
+win: $(WIN_TARGET) $(TRANSIENT_WIN_TARGET)
+
+$(WIN_TARGET): $(SRCS)
+	$(WIN_CC) $(WIN_CFLAGS) $(SRCS) -o $(WIN_TARGET) -lm
+
+$(TRANSIENT_WIN_TARGET): $(TRANSIENT_SRCS)
+	$(WIN_CC) $(WIN_CFLAGS) $(TRANSIENT_SRCS) -o $(TRANSIENT_WIN_TARGET) $(LDFLAGS)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(WIN_TARGET)
+	rm -f $(TARGET) $(WIN_TARGET) $(TRANSIENT_TARGET) $(TRANSIENT_WIN_TARGET) analysis/*.o analysis/offline/*.o
 
 .PHONY: all win clean
