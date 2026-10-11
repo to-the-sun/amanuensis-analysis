@@ -259,7 +259,7 @@ static int process_single_file(const char *input_path) {
     FullAnalysisResult full_res;
     memset(&full_res, 0, sizeof(FullAnalysisResult));
 
-    if (!analyzer_batch_analyze(mono_data, (int)total_pcm_frames, (int)sample_rate, 15000, 1, &full_res)) {
+    if (!analyzer_batch_analyze(mono_data, (int)total_pcm_frames, (int)sample_rate, 15000, 4, &full_res)) {
         printf("Error: Transience analysis failed.\n");
         free(mono_data);
         drwav_free(p_sample_data, NULL);
