@@ -967,9 +967,26 @@ int process_audio(const char *input_path) {
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
 
             compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
-            apply_noise_gate(stem->flux_data, total_samples, num_channels, sample_rate, noise_floor_threshold);
         } else {
             free(unpadded_data);
+        }
+    }
+
+    // Apply bounded section noise floor gating to flux envelopes relative to 19% of peak global flux across all flux envelopes
+    if (audible_count > 0) {
+        double max_global_flux = 0.0;
+        for (int idx = 0; idx < audible_count; idx++) {
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                double f = audible_stems[idx].flux_data[k];
+                if (f > max_global_flux) {
+                    max_global_flux = f;
+                }
+            }
+        }
+
+        double flux_noise_floor_threshold = max_global_flux * g_noise_floor_ratio;
+        for (int idx = 0; idx < audible_count; idx++) {
+            apply_noise_gate(audible_stems[idx].flux_data, total_samples, num_channels, sample_rate, flux_noise_floor_threshold);
         }
     }
 
