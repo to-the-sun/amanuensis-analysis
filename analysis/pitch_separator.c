@@ -972,7 +972,7 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Zero out flux envelope values at any sample moment that does not rise above 19% of peak global flux
+    // Zero out flux envelope values at any sample moment that does not rise above 9% of peak global flux
     if (audible_count > 0) {
         double max_global_flux = 0.0;
         for (int idx = 0; idx < audible_count; idx++) {
@@ -984,7 +984,7 @@ int process_audio(const char *input_path) {
             }
         }
 
-        double flux_noise_floor_threshold = max_global_flux * g_noise_floor_ratio;
+        double flux_noise_floor_threshold = max_global_flux * 0.09; // 9.0% of peak global flux
         for (int idx = 0; idx < audible_count; idx++) {
             for (size_t k = 0; k < total_channel_samples; k++) {
                 if (audible_stems[idx].flux_data[k] < flux_noise_floor_threshold) {
