@@ -542,6 +542,16 @@ int process_audio(const char *input_path) {
     printf("  Signal Peak:     %.5f\n", overall_peak);
     printf("  Noise Floor Threshold: %.5f (19.0%% peak threshold / -14.4 dB, min 99ms active frames)\n\n", noise_floor_threshold);
 
+    // Buffer to hold non-tonal portion (initialized to original audio, then subtracts exported tonal stems)
+    double *nontonal_data = (double*)malloc(total_channel_samples * sizeof(double));
+    if (!nontonal_data) {
+        printf("Error: Could not allocate memory for non-tonal audio buffer.\n");
+        free(wav->data);
+        free(wav);
+        return 0;
+    }
+    memcpy(nontonal_data, wav->data, total_channel_samples * sizeof(double));
+
     uint32_t pad_samples = FFT_SIZE;
     uint32_t padded_total_samples = total_samples + 2 * pad_samples;
 
@@ -583,6 +593,7 @@ int process_audio(const char *input_path) {
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
         free(padded_input);
         free(cola_norm);
+        free(nontonal_data);
         free(wav);
         return 0;
     }
@@ -606,6 +617,7 @@ int process_audio(const char *input_path) {
         free(padded_input);
         free(cola_norm);
         free(pitch_bins);
+        free(nontonal_data);
         free(wav);
         return 0;
     }
@@ -772,12 +784,39 @@ int process_audio(const char *input_path) {
                 printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
                        p, note_name, midi_to_frequency(p), max_peak, rms, active_ms, basename, p, note_name);
                 exported_count++;
+
+                // Subtract exported gated tonal pitch stem audio from non-tonal buffer
+                for (size_t k = 0; k < total_channel_samples; k++) {
+                    nontonal_data[k] -= unpadded_data[k];
+                }
             }
         }
 
         free(unpadded_data);
     }
     printf("-----------------------------------------------------------------------------------\n\n");
+
+    // Write non-tonal stem WAV file directly as is without noise gating
+    char nontonal_filepath[4096];
+    snprintf(nontonal_filepath, sizeof(nontonal_filepath), "%s/%s_nontonal.wav", stem_dir, basename);
+
+    double nt_max_peak = 0.0;
+    double nt_sum_sq = 0.0;
+    for (size_t i = 0; i < total_channel_samples; i++) {
+        double val = nontonal_data[i];
+        double abs_val = fabs(val);
+        if (abs_val > nt_max_peak) nt_max_peak = abs_val;
+        nt_sum_sq += val * val;
+    }
+    double nt_rms = sqrt(nt_sum_sq / total_channel_samples);
+
+    int nontonal_exported = write_wav_16bit(nontonal_filepath, sample_rate, num_channels, total_samples, nontonal_data);
+    if (nontonal_exported) {
+        printf("Non-Tonal Stem Exported:\n");
+        printf("  File:               %s_nontonal.wav\n", basename);
+        printf("  Peak Amplitude:     %.5f\n", nt_max_peak);
+        printf("  RMS Amplitude:      %.5f\n\n", nt_rms);
+    }
 
     double total_elapsed = (double)(clock() - start_clock) / CLOCKS_PER_SEC;
     double speed_ratio = audio_duration / (total_elapsed > 0.001 ? total_elapsed : 0.001);
@@ -787,7 +826,7 @@ int process_audio(const char *input_path) {
     printf("====================================================\n");
     printf("  Input File:          %s\n", basename);
     printf("  Stems Directory:     %s/\n", stem_dir);
-    printf("  Audible Stems Exported: %d WAV files (Noise Floor: 19.0%% peak / -14.4 dB, >= 99 ms active)\n", exported_count);
+    printf("  Audible Stems Exported: %d pitch WAV files + 1 non-tonal WAV file\n", exported_count);
     printf("  Total Time Elapsed:  %.2f seconds\n", total_elapsed);
     printf("  Processing Speed:    %.1fx Real-Time\n", speed_ratio);
     printf("  Reconstruction Status: AUDIBLE RECONSTRUCTION PERFECT\n");
@@ -799,6 +838,7 @@ int process_audio(const char *input_path) {
     free(frame_pitch_active);
     free(cola_norm);
     free(pitch_bins);
+    free(nontonal_data);
     free(wav);
 
     return 1;
