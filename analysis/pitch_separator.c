@@ -854,13 +854,6 @@ int process_audio(const char *input_path) {
     printf("\nEvaluating stems against noise floor threshold (19.0%% peak / -14.4 dB, min 99 ms active frames)...\n");
     printf("Exporting audible pitch stem WAV files to: %s/\n\n", stem_dir);
 
-    int exported_count = 0;
-
-    printf("Audible Pitch Stem Export Table:\n");
-    printf("----------------------------------------------------------------------------\n");
-    printf(" Class | Note | Peak Amp | RMS Amp  | Active Duration | File Exported\n");
-    printf("----------------------------------------------------------------------------\n");
-
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
     AudibleStem *audible_stems = NULL;
@@ -971,27 +964,39 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Zero out flux envelope values at any sample moment that does not rise above 9% of peak global flux
+    // Zero out flux envelope values for each stem based on its OWN peak flux threshold (9% of stem peak flux)
     if (audible_count > 0) {
-        double max_global_flux = 0.0;
         for (int idx = 0; idx < audible_count; idx++) {
+            double stem_max_flux = 0.0;
             for (size_t k = 0; k < total_channel_samples; k++) {
                 double f = audible_stems[idx].flux_data[k];
-                if (f > max_global_flux) {
-                    max_global_flux = f;
+                if (f > stem_max_flux) {
+                    stem_max_flux = f;
                 }
             }
-        }
 
-        double flux_noise_floor_threshold = max_global_flux * 0.09; // 9.0% of peak global flux
-        for (int idx = 0; idx < audible_count; idx++) {
+            double flux_noise_floor_threshold = stem_max_flux * 0.09; // 9.0% of per-stem peak flux
             for (size_t k = 0; k < total_channel_samples; k++) {
                 if (audible_stems[idx].flux_data[k] < flux_noise_floor_threshold) {
                     audible_stems[idx].flux_data[k] = 0.0;
                 }
             }
+
+            if (stem_max_flux > 1e-12) {
+                double scale = 1.0 / stem_max_flux;
+                for (size_t k = 0; k < total_channel_samples; k++) {
+                    audible_stems[idx].flux_data[k] *= scale;
+                }
+            }
         }
     }
+
+    int exported_count = 0;
+
+    printf("Audible Pitch Stem Export Table:\n");
+    printf("----------------------------------------------------------------------------\n");
+    printf(" Class | Note | Peak Amp | RMS Amp  | Active Duration | File Exported\n");
+    printf("----------------------------------------------------------------------------\n");
 
     // Pass 2: Momentary peak-flux evaluation across all audible pitch stems
     if (audible_count > 0) {
