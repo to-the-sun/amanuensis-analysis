@@ -157,61 +157,46 @@ void compute_stem_transience_flux(const double *stem_data, uint32_t total_sample
 
     memset(flux_out, 0, (size_t)total_samples * num_channels * sizeof(double));
 
-    double window[FLUX_FFT_SIZE];
-    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
-        window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FLUX_FFT_SIZE));
-    }
+    // Calculate time-domain amplitude envelope using RMS over 10ms window with 2.5ms hop
+    uint32_t win_samples = (uint32_t)round(sample_rate * 0.010); // 10 ms window
+    if (win_samples < 1) win_samples = 1;
+    uint32_t hop_samples = (uint32_t)round(sample_rate * 0.0025); // 2.5 ms hop
+    if (hop_samples < 1) hop_samples = 1;
 
-    uint32_t num_frames = (total_samples >= FLUX_FFT_SIZE) ? ((total_samples - FLUX_FFT_SIZE) / FLUX_HOP_SIZE + 1) : 0;
-    if (num_frames == 0) {
-        return;
-    }
+    uint32_t num_frames = (total_samples >= win_samples) ? ((total_samples - win_samples) / hop_samples + 1) : 0;
+    if (num_frames == 0) return;
 
+    double *frame_envelope = (double*)malloc(num_frames * sizeof(double));
     double *frame_flux = (double*)malloc(num_frames * sizeof(double));
-    double *prev_mag = (double*)calloc(FLUX_FFT_SIZE / 2 + 1, sizeof(double));
-    double *curr_mag = (double*)malloc((FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
-    Complex *fft_buf = (Complex*)malloc(FLUX_FFT_SIZE * sizeof(Complex));
 
-    if (!frame_flux || !prev_mag || !curr_mag || !fft_buf) {
+    if (!frame_envelope || !frame_flux) {
+        if (frame_envelope) free(frame_envelope);
         if (frame_flux) free(frame_flux);
-        if (prev_mag) free(prev_mag);
-        if (curr_mag) free(curr_mag);
-        if (fft_buf) free(fft_buf);
         return;
     }
 
     for (uint32_t c = 0; c < num_channels; c++) {
-        memset(prev_mag, 0, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
-
+        // Step 1: Calculate RMS amplitude envelope per frame
         for (uint32_t m = 0; m < num_frames; m++) {
-            uint32_t offset = m * FLUX_HOP_SIZE;
-
-            for (int i = 0; i < FLUX_FFT_SIZE; i++) {
-                fft_buf[i].r = stem_data[(offset + i) * num_channels + c] * window[i];
-                fft_buf[i].i = 0.0;
+            uint32_t offset = m * hop_samples;
+            double sum_sq = 0.0;
+            for (uint32_t i = 0; i < win_samples; i++) {
+                double s = stem_data[(offset + i) * num_channels + c];
+                sum_sq += s * s;
             }
-
-            fft_2048(fft_buf);
-
-            double flux_sum = 0.0;
-            for (int k = 0; k <= FLUX_FFT_SIZE / 2; k++) {
-                double r = fft_buf[k].r;
-                double im = fft_buf[k].i;
-                double mag = sqrt(r * r + im * im);
-                curr_mag[k] = mag;
-
-                double diff = mag - prev_mag[k];
-                if (diff > 0.0) {
-                    flux_sum += diff;
-                }
-            }
-
-            frame_flux[m] = flux_sum;
-            memcpy(prev_mag, curr_mag, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+            frame_envelope[m] = sqrt(sum_sq / win_samples);
         }
 
+        // Step 2: Compute positive rate of change (time-domain transience)
+        frame_flux[0] = 0.0;
+        for (uint32_t m = 1; m < num_frames; m++) {
+            double diff = frame_envelope[m] - frame_envelope[m - 1];
+            frame_flux[m] = (diff > 0.0) ? diff : 0.0;
+        }
+
+        // Step 3: Interpolate frame transience back to audio samples
         for (uint32_t i = 0; i < total_samples; i++) {
-            double f_idx = ((double)i - (double)(FLUX_FFT_SIZE / 2)) / (double)FLUX_HOP_SIZE;
+            double f_idx = ((double)i - (double)(win_samples / 2)) / (double)hop_samples;
 
             double val = 0.0;
             if (f_idx <= 0.0) {
@@ -229,10 +214,8 @@ void compute_stem_transience_flux(const double *stem_data, uint32_t total_sample
         }
     }
 
+    free(frame_envelope);
     free(frame_flux);
-    free(prev_mag);
-    free(curr_mag);
-    free(fft_buf);
 
     if (normalize) {
         double peak_flux = 0.0;
