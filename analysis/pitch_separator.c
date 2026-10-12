@@ -44,6 +44,7 @@
 #define FFT_SIZE 8192
 #define HOP_SIZE (FFT_SIZE / 4)
 #define MAX_CHANNELS 2
+#define NUM_MIDI_PITCHES 128
 #define NUM_NOTE_CLASSES 12
 
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
@@ -157,46 +158,61 @@ void compute_stem_transience_flux(const double *stem_data, uint32_t total_sample
 
     memset(flux_out, 0, (size_t)total_samples * num_channels * sizeof(double));
 
-    // Calculate time-domain amplitude envelope using RMS over 10ms window with 2.5ms hop
-    uint32_t win_samples = (uint32_t)round(sample_rate * 0.010); // 10 ms window
-    if (win_samples < 1) win_samples = 1;
-    uint32_t hop_samples = (uint32_t)round(sample_rate * 0.0025); // 2.5 ms hop
-    if (hop_samples < 1) hop_samples = 1;
+    double window[FLUX_FFT_SIZE];
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FLUX_FFT_SIZE));
+    }
 
-    uint32_t num_frames = (total_samples >= win_samples) ? ((total_samples - win_samples) / hop_samples + 1) : 0;
-    if (num_frames == 0) return;
+    uint32_t num_frames = (total_samples >= FLUX_FFT_SIZE) ? ((total_samples - FLUX_FFT_SIZE) / FLUX_HOP_SIZE + 1) : 0;
+    if (num_frames == 0) {
+        return;
+    }
 
-    double *frame_envelope = (double*)malloc(num_frames * sizeof(double));
     double *frame_flux = (double*)malloc(num_frames * sizeof(double));
+    double *prev_mag = (double*)calloc(FLUX_FFT_SIZE / 2 + 1, sizeof(double));
+    double *curr_mag = (double*)malloc((FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+    Complex *fft_buf = (Complex*)malloc(FLUX_FFT_SIZE * sizeof(Complex));
 
-    if (!frame_envelope || !frame_flux) {
-        if (frame_envelope) free(frame_envelope);
+    if (!frame_flux || !prev_mag || !curr_mag || !fft_buf) {
         if (frame_flux) free(frame_flux);
+        if (prev_mag) free(prev_mag);
+        if (curr_mag) free(curr_mag);
+        if (fft_buf) free(fft_buf);
         return;
     }
 
     for (uint32_t c = 0; c < num_channels; c++) {
-        // Step 1: Calculate RMS amplitude envelope per frame
+        memset(prev_mag, 0, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+
         for (uint32_t m = 0; m < num_frames; m++) {
-            uint32_t offset = m * hop_samples;
-            double sum_sq = 0.0;
-            for (uint32_t i = 0; i < win_samples; i++) {
-                double s = stem_data[(offset + i) * num_channels + c];
-                sum_sq += s * s;
+            uint32_t offset = m * FLUX_HOP_SIZE;
+
+            for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+                fft_buf[i].r = stem_data[(offset + i) * num_channels + c] * window[i];
+                fft_buf[i].i = 0.0;
             }
-            frame_envelope[m] = sqrt(sum_sq / win_samples);
+
+            fft_2048(fft_buf);
+
+            double flux_sum = 0.0;
+            for (int k = 0; k <= FLUX_FFT_SIZE / 2; k++) {
+                double r = fft_buf[k].r;
+                double im = fft_buf[k].i;
+                double mag = sqrt(r * r + im * im);
+                curr_mag[k] = mag;
+
+                double diff = mag - prev_mag[k];
+                if (diff > 0.0) {
+                    flux_sum += diff;
+                }
+            }
+
+            frame_flux[m] = flux_sum;
+            memcpy(prev_mag, curr_mag, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
         }
 
-        // Step 2: Compute positive rate of change (time-domain transience)
-        frame_flux[0] = 0.0;
-        for (uint32_t m = 1; m < num_frames; m++) {
-            double diff = frame_envelope[m] - frame_envelope[m - 1];
-            frame_flux[m] = (diff > 0.0) ? diff : 0.0;
-        }
-
-        // Step 3: Interpolate frame transience back to audio samples
         for (uint32_t i = 0; i < total_samples; i++) {
-            double f_idx = ((double)i - (double)(win_samples / 2)) / (double)hop_samples;
+            double f_idx = ((double)i - (double)(FLUX_FFT_SIZE / 2)) / (double)FLUX_HOP_SIZE;
 
             double val = 0.0;
             if (f_idx <= 0.0) {
@@ -214,8 +230,10 @@ void compute_stem_transience_flux(const double *stem_data, uint32_t total_sample
         }
     }
 
-    free(frame_envelope);
     free(frame_flux);
+    free(prev_mag);
+    free(curr_mag);
+    free(fft_buf);
 
     if (normalize) {
         double peak_flux = 0.0;
@@ -738,10 +756,10 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Pre-calculate bin pitch mappings and group bins per note class (0-11)
-    int bin_note_class[FFT_SIZE / 2 + 1];
-    int pitch_bin_count[NUM_NOTE_CLASSES] = {0};
-    int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_NOTE_CLASSES * (FFT_SIZE / 2 + 1) * sizeof(int));
+    // Pre-calculate bin pitch mappings and group bins per MIDI pitch (0-127)
+    int bin_pitch[FFT_SIZE / 2 + 1];
+    int pitch_bin_count[NUM_MIDI_PITCHES] = {0};
+    int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_MIDI_PITCHES * (FFT_SIZE / 2 + 1) * sizeof(int));
     if (!pitch_bins) {
         printf("Error: Could not allocate memory for pitch_bins.\n");
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
@@ -755,9 +773,8 @@ int process_audio(const char *input_path) {
     for (int k = 0; k <= FFT_SIZE / 2; k++) {
         double freq = (double)k * sample_rate / FFT_SIZE;
         int p = freq_to_midi_pitch(freq);
-        int nc = p % 12;
-        bin_note_class[k] = nc;
-        pitch_bins[nc][pitch_bin_count[nc]++] = k;
+        bin_pitch[k] = p;
+        pitch_bins[p][pitch_bin_count[p]++] = k;
     }
 
     printf("Executing STFT COLA Pitch Separation (8192 FFT, 75%% Overlap)...\n");
@@ -777,10 +794,10 @@ int process_audio(const char *input_path) {
         return 0;
     }
 
-    // Pitch presence bitmask per frame: num_channels * num_frames * NUM_NOTE_CLASSES bytes
-    size_t frame_pitch_active_size = (size_t)num_channels * num_frames * NUM_NOTE_CLASSES;
+    // Pitch presence bitmask per frame: num_channels * num_frames * NUM_MIDI_PITCHES bytes
+    size_t frame_pitch_active_size = (size_t)num_channels * num_frames * NUM_MIDI_PITCHES;
     uint8_t *frame_pitch_active = (uint8_t*)calloc(frame_pitch_active_size, sizeof(uint8_t));
-    int pitch_active[NUM_NOTE_CLASSES] = {0};
+    int pitch_active[NUM_MIDI_PITCHES] = {0};
 
     Complex *fft_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
@@ -806,7 +823,7 @@ int process_audio(const char *input_path) {
             fft(fft_frame, FFT_SIZE, 0);
 
             size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
-            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_NOTE_CLASSES;
+            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
 
             for (int k = 0; k <= FFT_SIZE / 2; k++) {
                 stft_data[frame_base + k].r = (float)fft_frame[k].r;
@@ -814,9 +831,9 @@ int process_audio(const char *input_path) {
 
                 double mag_sq = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
                 if (mag_sq > 1e-18) {
-                    int nc = bin_note_class[k];
-                    pitch_active[nc] = 1;
-                    frame_pitch_active[frame_p_base + nc] = 1;
+                    int p = bin_pitch[k];
+                    pitch_active[p] = 1;
+                    frame_pitch_active[frame_p_base + p] = 1;
                 }
             }
         }
@@ -849,26 +866,36 @@ int process_audio(const char *input_path) {
 
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
-    AudibleStem *audible_stems = NULL;
-    int audible_count = 0;
-    int audible_capacity = 0;
+    AudibleStem audible_stems[NUM_NOTE_CLASSES];
+    memset(audible_stems, 0, sizeof(audible_stems));
 
     for (int nc = 0; nc < NUM_NOTE_CLASSES; nc++) {
-        if (!pitch_active[nc] || pitch_bin_count[nc] == 0) continue;
+        audible_stems[nc].note_class = nc;
+        snprintf(audible_stems[nc].note_name, sizeof(audible_stems[nc].note_name), "%s", NOTE_NAMES[nc]);
+        audible_stems[nc].audio_data = (double*)calloc(total_channel_samples, sizeof(double));
+        audible_stems[nc].flux_data = (double*)calloc(total_channel_samples, sizeof(double));
+        audible_stems[nc].raw_flux_data = (double*)calloc(total_channel_samples, sizeof(double));
+    }
+
+    // Allocate temporary per-pitch flux buffer
+    double *p_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (!pitch_active[p] || pitch_bin_count[p] == 0) continue;
 
         double *stem_buf = (double*)calloc((size_t)padded_total_samples * num_channels, sizeof(double));
         if (!stem_buf) continue;
 
         for (uint32_t c = 0; c < num_channels; c++) {
             for (uint32_t m = 0; m < num_frames; m++) {
-                size_t frame_p_idx = ((size_t)c * num_frames + m) * NUM_NOTE_CLASSES + nc;
+                size_t frame_p_idx = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES + p;
                 if (!frame_pitch_active[frame_p_idx]) continue;
 
                 size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
 
                 memset(pitch_frame, 0, FFT_SIZE * sizeof(Complex));
-                for (int b = 0; b < pitch_bin_count[nc]; b++) {
-                    int k = pitch_bins[nc][b];
+                for (int b = 0; b < pitch_bin_count[p]; b++) {
+                    int k = pitch_bins[p][b];
                     ComplexFloat val = stft_data[frame_base + k];
                     pitch_frame[k].r = (double)val.r;
                     pitch_frame[k].i = (double)val.i;
@@ -930,94 +957,105 @@ int process_audio(const char *input_path) {
         double rms = sqrt(sum_sq / (total_samples * num_channels));
         double active_ms = ((double)active_frames / sample_rate) * 1000.0;
 
-        // Only keep stems that have at least 99 milliseconds worth of frames above the noise floor
+        // Only keep pitch stems that have at least 99 milliseconds worth of frames above the noise floor
         if (active_ms >= 99.0 && rms > 1e-6) {
             // Subtract exported gated tonal pitch stem audio from non-tonal buffer
             for (size_t k = 0; k < total_channel_samples; k++) {
                 nontonal_data[k] -= unpadded_data[k];
             }
 
-            if (audible_count >= audible_capacity) {
-                audible_capacity = (audible_capacity == 0) ? 16 : audible_capacity * 2;
-                audible_stems = (AudibleStem*)realloc(audible_stems, audible_capacity * sizeof(AudibleStem));
+            // Compute STFT transience flux for this individual pitch stem p
+            compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, p_flux_buf, 0);
+
+            // Calculate pitch p's own peak flux from its own extent
+            double pitch_peak_flux = 0.0;
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                if (p_flux_buf[k] > pitch_peak_flux) {
+                    pitch_peak_flux = p_flux_buf[k];
+                }
             }
 
-            AudibleStem *stem = &audible_stems[audible_count++];
-            stem->note_class = nc;
-            snprintf(stem->note_name, sizeof(stem->note_name), "%s", NOTE_NAMES[nc]);
-            stem->max_peak = max_peak;
-            stem->rms = rms;
-            stem->active_ms = active_ms;
-            stem->audio_data = unpadded_data;
-            stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
-            stem->raw_flux_data = (double*)malloc(total_channel_samples * sizeof(double));
+            // Conduct noise gating on pitch p's flux envelope at 9% of its own peak flux
+            double pitch_flux_threshold = pitch_peak_flux * 0.09;
 
-            compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
-            if (stem->raw_flux_data && stem->flux_data) {
-                memcpy(stem->raw_flux_data, stem->flux_data, total_channel_samples * sizeof(double));
+            int nc = p % 12;
+            AudibleStem *nc_stem = &audible_stems[nc];
+
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                // Aggregate audio
+                nc_stem->audio_data[k] += unpadded_data[k];
+
+                // Aggregate raw flux
+                nc_stem->raw_flux_data[k] += p_flux_buf[k];
+
+                // Aggregate thresholded flux
+                if (p_flux_buf[k] >= pitch_flux_threshold) {
+                    nc_stem->flux_data[k] += p_flux_buf[k];
+                }
             }
-        } else {
-            free(unpadded_data);
         }
+
+        free(unpadded_data);
     }
 
-    // Zero out flux envelope values at any sample moment that does not rise above 9% of peak global flux
-    if (audible_count > 0) {
-        double max_global_flux = 0.0;
-        for (int idx = 0; idx < audible_count; idx++) {
-            for (size_t k = 0; k < total_channel_samples; k++) {
-                double f = audible_stems[idx].flux_data[k];
-                if (f > max_global_flux) {
-                    max_global_flux = f;
-                }
+    free(p_flux_buf);
+
+    // Calculate metadata metrics for note class stems after aggregation
+    for (int nc = 0; nc < NUM_NOTE_CLASSES; nc++) {
+        AudibleStem *stem = &audible_stems[nc];
+        double peak = 0.0;
+        double sum_sq = 0.0;
+        uint32_t active_frames = 0;
+
+        for (uint32_t i = 0; i < total_samples; i++) {
+            int frame_above = 0;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double val = stem->audio_data[i * num_channels + c];
+                double abs_val = fabs(val);
+                if (abs_val > peak) peak = abs_val;
+                sum_sq += val * val;
+                if (abs_val >= noise_floor_threshold) frame_above = 1;
             }
+            if (frame_above) active_frames++;
         }
 
-        double flux_noise_floor_threshold = max_global_flux * 0.09; // 9.0% of peak global flux
-        for (int idx = 0; idx < audible_count; idx++) {
-            for (size_t k = 0; k < total_channel_samples; k++) {
-                if (audible_stems[idx].flux_data[k] < flux_noise_floor_threshold) {
-                    audible_stems[idx].flux_data[k] = 0.0;
-                }
-            }
-        }
+        stem->max_peak = peak;
+        stem->rms = sqrt(sum_sq / total_channel_samples);
+        stem->active_ms = ((double)active_frames / sample_rate) * 1000.0;
     }
 
     // Pass 2: Momentary peak-flux evaluation across all audible pitch stems
-    if (audible_count > 0) {
-        for (size_t k = 0; k < total_channel_samples; k++) {
-            double max_moment_flux = 0.0;
-            for (int idx = 0; idx < audible_count; idx++) {
-                double f = audible_stems[idx].flux_data[k];
-                if (f > max_moment_flux) {
-                    max_moment_flux = f;
-                }
-            }
-
-            if (max_moment_flux > 1e-12) {
-                double thresh = 0.89 * max_moment_flux;
-                for (int idx = 0; idx < audible_count; idx++) {
-                    if (audible_stems[idx].flux_data[k] > thresh) {
-                        audible_stems[idx].audio_data[k] += nontonal_data[k];
-                    }
-                }
+    for (size_t k = 0; k < total_channel_samples; k++) {
+        double max_moment_flux = 0.0;
+        for (int nc = 0; nc < NUM_NOTE_CLASSES; nc++) {
+            double f = audible_stems[nc].flux_data[k];
+            if (f > max_moment_flux) {
+                max_moment_flux = f;
             }
         }
 
-        // Export pitch stems and companion flux WAV files
-        for (int idx = 0; idx < audible_count; idx++) {
-            AudibleStem *stem = &audible_stems[idx];
-            int nc = stem->note_class;
-
-            double final_peak = 0.0;
-            double final_sum_sq = 0.0;
-            for (size_t k = 0; k < total_channel_samples; k++) {
-                double val = stem->audio_data[k];
-                double abs_val = fabs(val);
-                if (abs_val > final_peak) final_peak = abs_val;
-                final_sum_sq += val * val;
+        if (max_moment_flux > 1e-12) {
+            double thresh = 0.89 * max_moment_flux;
+            for (int nc = 0; nc < NUM_NOTE_CLASSES; nc++) {
+                if (audible_stems[nc].flux_data[k] > thresh) {
+                    audible_stems[nc].audio_data[k] += nontonal_data[k];
+                }
             }
-            double final_rms = sqrt(final_sum_sq / total_channel_samples);
+        }
+    }
+
+        // Export pitch stems and companion flux WAV files for audible note classes
+        for (int nc = 0; nc < NUM_NOTE_CLASSES; nc++) {
+            AudibleStem *stem = &audible_stems[nc];
+            if (stem->active_ms < 99.0 || stem->rms <= 1e-6) {
+                free(stem->audio_data);
+                free(stem->flux_data);
+                if (stem->raw_flux_data) free(stem->raw_flux_data);
+                continue;
+            }
+
+            double final_peak = stem->max_peak;
+            double final_rms = stem->rms;
 
             char out_filepath[4096];
             snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%02d_%s.wav",
@@ -1081,9 +1119,6 @@ int process_audio(const char *input_path) {
             free(stem->flux_data);
             if (stem->raw_flux_data) free(stem->raw_flux_data);
         }
-
-        free(audible_stems);
-    }
     printf("-----------------------------------------------------------------------------------\n\n");
 
     // Write non-tonal stem WAV file directly as is without noise gating
