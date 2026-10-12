@@ -3,8 +3,8 @@
  *
  * Perfect Reconstruction Pitch Stem Separator with Noise Floor Thresholding in C
  *
- * Separates an audio WAV file into individual MIDI pitch stems (0-127) using an STFT COLA filter bank.
- * Bins are partitioned by their corresponding integer MIDI pitch.
+ * Separates an audio WAV file into pitch stems grouped by note letter across all octaves (0-11: C to B) using an STFT COLA filter bank.
+ * Bins are partitioned by their corresponding note class (MIDI pitch % 12).
  * Evaluates each individual pitch stem post-separation against a relative noise floor threshold (19% of peak amplitude / -14.4 dB).
  * Pitch stems with at least 99 milliseconds worth of frames above the noise floor are exported as WAV files.
  * Reconstructed stems preserve untruncated audio data without zeroing out values below the noise floor threshold.
@@ -44,7 +44,7 @@
 #define FFT_SIZE 8192
 #define HOP_SIZE (FFT_SIZE / 4)
 #define MAX_CHANNELS 2
-#define NUM_MIDI_PITCHES 128
+#define NUM_NOTE_CLASSES 12
 
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
@@ -142,13 +142,14 @@ void fft_2048(Complex *x) {
 }
 
 typedef struct {
-    int pitch;
+    int note_class;
     char note_name[32];
     double max_peak;
     double rms;
     double active_ms;
     double *audio_data;
     double *flux_data;
+    double *raw_flux_data;
 } AudibleStem;
 
 void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
@@ -754,10 +755,10 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Pre-calculate bin pitch mappings and group bins per pitch
-    int bin_pitch[FFT_SIZE / 2 + 1];
-    int pitch_bin_count[NUM_MIDI_PITCHES] = {0};
-    int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_MIDI_PITCHES * (FFT_SIZE / 2 + 1) * sizeof(int));
+    // Pre-calculate bin pitch mappings and group bins per note class (0-11)
+    int bin_note_class[FFT_SIZE / 2 + 1];
+    int pitch_bin_count[NUM_NOTE_CLASSES] = {0};
+    int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_NOTE_CLASSES * (FFT_SIZE / 2 + 1) * sizeof(int));
     if (!pitch_bins) {
         printf("Error: Could not allocate memory for pitch_bins.\n");
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
@@ -771,8 +772,9 @@ int process_audio(const char *input_path) {
     for (int k = 0; k <= FFT_SIZE / 2; k++) {
         double freq = (double)k * sample_rate / FFT_SIZE;
         int p = freq_to_midi_pitch(freq);
-        bin_pitch[k] = p;
-        pitch_bins[p][pitch_bin_count[p]++] = k;
+        int nc = p % 12;
+        bin_note_class[k] = nc;
+        pitch_bins[nc][pitch_bin_count[nc]++] = k;
     }
 
     printf("Executing STFT COLA Pitch Separation (8192 FFT, 75%% Overlap)...\n");
@@ -792,10 +794,10 @@ int process_audio(const char *input_path) {
         return 0;
     }
 
-    // Pitch presence bitmask per frame: num_channels * num_frames * NUM_MIDI_PITCHES bytes
-    size_t frame_pitch_active_size = (size_t)num_channels * num_frames * NUM_MIDI_PITCHES;
+    // Pitch presence bitmask per frame: num_channels * num_frames * NUM_NOTE_CLASSES bytes
+    size_t frame_pitch_active_size = (size_t)num_channels * num_frames * NUM_NOTE_CLASSES;
     uint8_t *frame_pitch_active = (uint8_t*)calloc(frame_pitch_active_size, sizeof(uint8_t));
-    int pitch_active[NUM_MIDI_PITCHES] = {0};
+    int pitch_active[NUM_NOTE_CLASSES] = {0};
 
     Complex *fft_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
@@ -821,7 +823,7 @@ int process_audio(const char *input_path) {
             fft(fft_frame, FFT_SIZE, 0);
 
             size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
-            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
+            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_NOTE_CLASSES;
 
             for (int k = 0; k <= FFT_SIZE / 2; k++) {
                 stft_data[frame_base + k].r = (float)fft_frame[k].r;
@@ -829,9 +831,9 @@ int process_audio(const char *input_path) {
 
                 double mag_sq = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
                 if (mag_sq > 1e-18) {
-                    int p = bin_pitch[k];
-                    pitch_active[p] = 1;
-                    frame_pitch_active[frame_p_base + p] = 1;
+                    int nc = bin_note_class[k];
+                    pitch_active[nc] = 1;
+                    frame_pitch_active[frame_p_base + nc] = 1;
                 }
             }
         }
@@ -859,7 +861,7 @@ int process_audio(const char *input_path) {
 
     printf("Audible Pitch Stem Export Table:\n");
     printf("-----------------------------------------------------------------------------------\n");
-    printf(" MIDI | Note | Freq (Hz)  | Peak Amp | RMS Amp  | Active Duration | File Exported\n");
+    printf(" Class | Note | Peak Amp | RMS Amp  | Active Duration | File Exported\n");
     printf("-----------------------------------------------------------------------------------\n");
 
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
@@ -868,22 +870,22 @@ int process_audio(const char *input_path) {
     int audible_count = 0;
     int audible_capacity = 0;
 
-    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-        if (!pitch_active[p] || pitch_bin_count[p] == 0) continue;
+    for (int nc = 0; nc < NUM_NOTE_CLASSES; nc++) {
+        if (!pitch_active[nc] || pitch_bin_count[nc] == 0) continue;
 
         double *stem_buf = (double*)calloc((size_t)padded_total_samples * num_channels, sizeof(double));
         if (!stem_buf) continue;
 
         for (uint32_t c = 0; c < num_channels; c++) {
             for (uint32_t m = 0; m < num_frames; m++) {
-                size_t frame_p_idx = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES + p;
+                size_t frame_p_idx = ((size_t)c * num_frames + m) * NUM_NOTE_CLASSES + nc;
                 if (!frame_pitch_active[frame_p_idx]) continue;
 
                 size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
 
                 memset(pitch_frame, 0, FFT_SIZE * sizeof(Complex));
-                for (int b = 0; b < pitch_bin_count[p]; b++) {
-                    int k = pitch_bins[p][b];
+                for (int b = 0; b < pitch_bin_count[nc]; b++) {
+                    int k = pitch_bins[nc][b];
                     ComplexFloat val = stft_data[frame_base + k];
                     pitch_frame[k].r = (double)val.r;
                     pitch_frame[k].i = (double)val.i;
@@ -958,15 +960,19 @@ int process_audio(const char *input_path) {
             }
 
             AudibleStem *stem = &audible_stems[audible_count++];
-            stem->pitch = p;
-            get_note_name(p, stem->note_name, sizeof(stem->note_name));
+            stem->note_class = nc;
+            snprintf(stem->note_name, sizeof(stem->note_name), "%s", NOTE_NAMES[nc]);
             stem->max_peak = max_peak;
             stem->rms = rms;
             stem->active_ms = active_ms;
             stem->audio_data = unpadded_data;
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
+            stem->raw_flux_data = (double*)malloc(total_channel_samples * sizeof(double));
 
             compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
+            if (stem->raw_flux_data && stem->flux_data) {
+                memcpy(stem->raw_flux_data, stem->flux_data, total_channel_samples * sizeof(double));
+            }
         } else {
             free(unpadded_data);
         }
@@ -1018,7 +1024,7 @@ int process_audio(const char *input_path) {
         // Export pitch stems and companion flux WAV files
         for (int idx = 0; idx < audible_count; idx++) {
             AudibleStem *stem = &audible_stems[idx];
-            int p = stem->pitch;
+            int nc = stem->note_class;
 
             double final_peak = 0.0;
             double final_sum_sq = 0.0;
@@ -1031,17 +1037,17 @@ int process_audio(const char *input_path) {
             double final_rms = sqrt(final_sum_sq / total_channel_samples);
 
             char out_filepath[4096];
-            snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%03d_%s.wav",
-                     stem_dir, basename, p, stem->note_name);
+            snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%02d_%s.wav",
+                     stem_dir, basename, nc, stem->note_name);
 
             if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, stem->audio_data)) {
-                printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
-                       p, stem->note_name, midi_to_frequency(p), final_peak, final_rms, stem->active_ms, basename, p, stem->note_name);
+                printf("  %02d   | %-4s | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%02d_%s.wav\n",
+                       nc, stem->note_name, final_peak, final_rms, stem->active_ms, basename, nc, stem->note_name);
                 exported_count++;
 
                 char flux_filepath[4096];
-                snprintf(flux_filepath, sizeof(flux_filepath), "%s/%s_pitch_%03d_%s_flux.wav",
-                         stem_dir, basename, p, stem->note_name);
+                snprintf(flux_filepath, sizeof(flux_filepath), "%s/%s_pitch_%02d_%s_flux.wav",
+                         stem_dir, basename, nc, stem->note_name);
 
                 double *final_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
                 if (final_flux_buf) {
@@ -1061,10 +1067,36 @@ int process_audio(const char *input_path) {
                     write_wav_16bit(flux_filepath, sample_rate, num_channels, total_samples, final_flux_buf);
                     free(final_flux_buf);
                 }
+
+                char raw_flux_filepath[4096];
+                snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/%s_pitch_%02d_%s_flux_unthresholded.wav",
+                         stem_dir, basename, nc, stem->note_name);
+
+                if (stem->raw_flux_data) {
+                    double *unthresh_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+                    if (unthresh_flux_buf) {
+                        memcpy(unthresh_flux_buf, stem->raw_flux_data, total_channel_samples * sizeof(double));
+                        double peak_raw = 0.0;
+                        for (size_t k = 0; k < total_channel_samples; k++) {
+                            if (unthresh_flux_buf[k] > peak_raw) {
+                                peak_raw = unthresh_flux_buf[k];
+                            }
+                        }
+                        if (peak_raw > 1e-12) {
+                            double scale = 1.0 / peak_raw;
+                            for (size_t k = 0; k < total_channel_samples; k++) {
+                                unthresh_flux_buf[k] *= scale;
+                            }
+                        }
+                        write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, unthresh_flux_buf);
+                        free(unthresh_flux_buf);
+                    }
+                }
             }
 
             free(stem->audio_data);
             free(stem->flux_data);
+            if (stem->raw_flux_data) free(stem->raw_flux_data);
         }
 
         free(audible_stems);
