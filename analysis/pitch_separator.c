@@ -149,6 +149,7 @@ typedef struct {
     double active_ms;
     double *audio_data;
     double *flux_data;
+    double *raw_flux_data;
 } AudibleStem;
 
 void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
@@ -966,8 +967,12 @@ int process_audio(const char *input_path) {
             stem->active_ms = active_ms;
             stem->audio_data = unpadded_data;
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
+            stem->raw_flux_data = (double*)malloc(total_channel_samples * sizeof(double));
 
             compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
+            if (stem->raw_flux_data && stem->flux_data) {
+                memcpy(stem->raw_flux_data, stem->flux_data, total_channel_samples * sizeof(double));
+            }
         } else {
             free(unpadded_data);
         }
@@ -1062,10 +1067,36 @@ int process_audio(const char *input_path) {
                     write_wav_16bit(flux_filepath, sample_rate, num_channels, total_samples, final_flux_buf);
                     free(final_flux_buf);
                 }
+
+                char raw_flux_filepath[4096];
+                snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/%s_pitch_%02d_%s_flux_unthresholded.wav",
+                         stem_dir, basename, nc, stem->note_name);
+
+                if (stem->raw_flux_data) {
+                    double *unthresh_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+                    if (unthresh_flux_buf) {
+                        memcpy(unthresh_flux_buf, stem->raw_flux_data, total_channel_samples * sizeof(double));
+                        double peak_raw = 0.0;
+                        for (size_t k = 0; k < total_channel_samples; k++) {
+                            if (unthresh_flux_buf[k] > peak_raw) {
+                                peak_raw = unthresh_flux_buf[k];
+                            }
+                        }
+                        if (peak_raw > 1e-12) {
+                            double scale = 1.0 / peak_raw;
+                            for (size_t k = 0; k < total_channel_samples; k++) {
+                                unthresh_flux_buf[k] *= scale;
+                            }
+                        }
+                        write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, unthresh_flux_buf);
+                        free(unthresh_flux_buf);
+                    }
+                }
             }
 
             free(stem->audio_data);
             free(stem->flux_data);
+            if (stem->raw_flux_data) free(stem->raw_flux_data);
         }
 
         free(audible_stems);
