@@ -182,6 +182,7 @@ typedef struct {
     double rms;
     double active_ms;
     double *audio_data;
+    double *raw_audio_data;
     double *flux_data;
     char filename[1024];
 } AudibleStem;
@@ -344,11 +345,12 @@ void generate_html_report(
         fprintf(fjs, "  stemsPcm: [\n");
         for (int i = 0; i < stem_count; i++) {
             const AudibleStem *st = &stems[i];
+            const double *stem_raw_buf = st->raw_audio_data ? st->raw_audio_data : st->audio_data;
             if (pcm_i16) {
                 for (uint32_t s = 0; s < total_samples; s++) {
                     double sum = 0.0;
                     for (uint32_t c = 0; c < num_channels; c++) {
-                        sum += st->audio_data[s * num_channels + c];
+                        sum += stem_raw_buf[s * num_channels + c];
                     }
                     double val = sum / num_channels;
                     if (val > 1.0) val = 1.0;
@@ -1524,6 +1526,10 @@ int process_audio(const char *input_path) {
             stem->rms = rms;
             stem->active_ms = active_ms;
             stem->audio_data = unpadded_data;
+            stem->raw_audio_data = (double*)malloc(total_channel_samples * sizeof(double));
+            if (stem->raw_audio_data) {
+                memcpy(stem->raw_audio_data, unpadded_data, total_channel_samples * sizeof(double));
+            }
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
             snprintf(stem->filename, sizeof(stem->filename), "%s_pitch_%03d_%s.wav", basename, p, stem->note_name);
             compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
@@ -1680,6 +1686,7 @@ int process_audio(const char *input_path) {
     for (int idx = 0; idx < audible_count; idx++) {
         AudibleStem *stem = &audible_stems[idx];
         free(stem->audio_data);
+        if (stem->raw_audio_data) free(stem->raw_audio_data);
         free(stem->flux_data);
     }
     if (audible_stems) {
