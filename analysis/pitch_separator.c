@@ -199,11 +199,6 @@ void apply_continuous_phase_coherence_enhancement(
 ) {
     if (!stems || stem_count <= 0 || !orig_audio || !nontonal_audio || total_samples == 0 || num_channels == 0) return;
 
-    // Window size W: ~8ms (352 samples at 44.1kHz)
-    int W = (int)(0.008 * sample_rate);
-    if (W < 3) W = 3;
-    if (W % 2 == 0) W++; // Ensure odd window size for symmetric centering
-
     // Allocate memory for weight arrays per stem (interleaved for samples * num_channels)
     size_t total_channel_samples = (size_t)total_samples * num_channels;
     double **weights = (double**)malloc(stem_count * sizeof(double*));
@@ -218,50 +213,98 @@ void apply_continuous_phase_coherence_enhancement(
         }
     }
 
-    // 1. Calculate raw correlation weights per channel and sample
+    double alpha_attack = 1.0 - exp(-1.0 / (0.002 * sample_rate));  // 2ms attack time constant
+    double alpha_release = 1.0 - exp(-1.0 / (0.025 * sample_rate)); // 25ms release time constant
+
+    // 1. Calculate pitch-aware cross-correlation weights with asymmetric attack/release follower
     for (uint32_t c = 0; c < num_channels; c++) {
         for (int k = 0; k < stem_count; k++) {
             const double *s_buf = stems[k].audio_data;
 
+            // Pitch-adaptive correlation windowing: W_k = max(12ms, min(40ms, 4 / f_k))
+            int pitch = stems[k].pitch;
+            double freq = (pitch >= 0 && pitch <= 127) ? midi_to_frequency(pitch) : 440.0;
+            double win_sec = 4.0 / freq;
+            if (win_sec < 0.012) win_sec = 0.012;
+            if (win_sec > 0.040) win_sec = 0.040;
+            int W = (int)(win_sec * sample_rate);
+            if (W < 3) W = 3;
+            if (W % 2 == 0) W++; // Ensure odd window size for symmetric centering
+            int half_w = W / 2;
+
             double smooth = 0.0;
-            double alpha = 1.0 - exp(-1.0 / (0.002 * sample_rate)); // 2ms time constant
+
+            // Fast sliding window sum variables
+            double S_s = 0.0, S_o = 0.0, S_so = 0.0, S_ss = 0.0, S_oo = 0.0;
+            int cur_start = 0;
+            int cur_end = -1;
 
             for (uint32_t t = 0; t < total_samples; t++) {
-                // Compute local zero-mean cross-correlation over window W
-                double mean_s = 0.0, mean_o = 0.0;
-                int count = 0;
-                int half_w = W / 2;
+                int target_start = ((int)t - half_w < 0) ? 0 : ((int)t - half_w);
+                int target_end = ((int)t + half_w >= (int)total_samples) ? ((int)total_samples - 1) : ((int)t + half_w);
 
-                int start_m = ((int)t - half_w < 0) ? -(int)t : -half_w;
-                int end_m = ((int)t + half_w >= (int)total_samples) ? ((int)total_samples - 1 - (int)t) : half_w;
-
-                for (int m = start_m; m <= end_m; m++) {
-                    uint32_t idx = (t + m) * num_channels + c;
-                    mean_s += s_buf[idx];
-                    mean_o += orig_audio[idx];
-                    count++;
+                // Periodic re-evaluation / initialization to eliminate floating point accumulation error
+                if (t == 0 || t % 1000 == 0) {
+                    S_s = 0.0; S_o = 0.0; S_so = 0.0; S_ss = 0.0; S_oo = 0.0;
+                    for (int m = target_start; m <= target_end; m++) {
+                        uint32_t idx = (uint32_t)m * num_channels + c;
+                        double sv = s_buf[idx];
+                        double ov = orig_audio[idx];
+                        S_s += sv;
+                        S_o += ov;
+                        S_so += sv * ov;
+                        S_ss += sv * sv;
+                        S_oo += ov * ov;
+                    }
+                    cur_start = target_start;
+                    cur_end = target_end;
+                } else {
+                    while (cur_end < target_end) {
+                        cur_end++;
+                        uint32_t idx = (uint32_t)cur_end * num_channels + c;
+                        double sv = s_buf[idx];
+                        double ov = orig_audio[idx];
+                        S_s += sv;
+                        S_o += ov;
+                        S_so += sv * ov;
+                        S_ss += sv * sv;
+                        S_oo += ov * ov;
+                    }
+                    while (cur_start < target_start) {
+                        uint32_t idx = (uint32_t)cur_start * num_channels + c;
+                        double sv = s_buf[idx];
+                        double ov = orig_audio[idx];
+                        S_s -= sv;
+                        S_o -= ov;
+                        S_so -= sv * ov;
+                        S_ss -= sv * sv;
+                        S_oo -= ov * ov;
+                        cur_start++;
+                    }
                 }
+
+                int count = cur_end - cur_start + 1;
+                double corr = 0.0;
                 if (count > 0) {
-                    mean_s /= count;
-                    mean_o /= count;
+                    double num = S_so - (S_s * S_o / count);
+                    double var_s = S_ss - (S_s * S_s / count);
+                    double var_o = S_oo - (S_o * S_o / count);
+
+                    if (var_s > 1e-12 && var_o > 1e-12) {
+                        double denom = sqrt(var_s * var_o);
+                        corr = num / denom;
+                    }
                 }
 
-                double num = 0.0, sum_s = 0.0, sum_o = 0.0;
-                for (int m = start_m; m <= end_m; m++) {
-                    uint32_t idx = (t + m) * num_channels + c;
-                    double sv = s_buf[idx] - mean_s;
-                    double ov = orig_audio[idx] - mean_o;
-                    num += sv * ov;
-                    sum_s += sv * sv;
-                    sum_o += ov * ov;
-                }
-
-                double denom = sqrt(sum_s * sum_o);
-                double corr = (denom > 1e-12) ? (num / denom) : 0.0;
                 double raw = (corr > 0.0) ? (corr * corr) : 0.0;
 
-                // Apply time smoothing
-                smooth += alpha * (raw - smooth);
+                // Apply asymmetric envelope follower (2ms attack, 25ms release)
+                if (raw > smooth) {
+                    smooth += alpha_attack * (raw - smooth);
+                } else {
+                    smooth += alpha_release * (raw - smooth);
+                }
+
                 weights[k][t * num_channels + c] = smooth;
             }
         }
