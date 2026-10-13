@@ -184,6 +184,7 @@ typedef struct {
     double *audio_data;
     double *raw_audio_data;
     double *flux_data;
+    double *coherence_data;
     char filename[1024];
 } AudibleStem;
 
@@ -278,6 +279,9 @@ void apply_continuous_phase_coherence_enhancement(
                 if (sum_w > 1.0) {
                     w /= sum_w;
                 }
+                if (stems[k].coherence_data) {
+                    stems[k].coherence_data[idx] = w;
+                }
                 stems[k].audio_data[idx] += w * nontonal_audio[idx];
             }
         }
@@ -366,6 +370,7 @@ void generate_html_report(
     fprintf(f, "    <div class=\"legend\">\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-orig\"></div> Original Peak Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-stem\"></div> Stem Waveform</div>\n");
+    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background:#ffeb3b;\"></div> Phase Coherence Envelope</div>\n");
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
@@ -487,8 +492,36 @@ void generate_html_report(
                 fprintf(fjs, "    \"\"\n");
             }
         }
-        if (pcm_i16) free(pcm_i16);
 
+        fprintf(fjs, "  ],\n");
+
+        fprintf(fjs, "  coherencePcm: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            const AudibleStem *st = &stems[i];
+            if (pcm_i16 && st->coherence_data) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double sum = 0.0;
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        sum += st->coherence_data[s * num_channels + c];
+                    }
+                    double val = sum / num_channels;
+                    if (val > 1.0) val = 1.0;
+                    if (val < -1.0) val = -1.0;
+                    pcm_i16[s] = (int16_t)round(val * 32767.0);
+                }
+                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+                if (b64) free(b64);
+            } else {
+                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+            }
+        }
+
+        if (nontonal_exported) {
+            fprintf(fjs, "    \"\"\n");
+        }
+
+        if (pcm_i16) free(pcm_i16);
         fprintf(fjs, "  ]\n");
         fprintf(fjs, "};\n");
         fclose(fjs);
@@ -549,6 +582,13 @@ void generate_html_report(
     fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "        if (window.WAVEFORM_DATA.stemsPcm[i]) {\n");
     fprintf(f, "          DATA.stems[i].pcm = base64ToFloat32(window.WAVEFORM_DATA.stemsPcm[i]);\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.coherencePcm) {\n");
+    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "        if (window.WAVEFORM_DATA.coherencePcm[i]) {\n");
+    fprintf(f, "          DATA.stems[i].coherencePcm = base64ToFloat32(window.WAVEFORM_DATA.coherencePcm[i]);\n");
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
     fprintf(f, "    }\n");
@@ -697,11 +737,48 @@ void generate_html_report(
     fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
+    fprintf(f, "  // Helper function to render an amplitude envelope overlay (e.g., coherence)\n");
+    fprintf(f, "  function drawEnvelopeOverlay(pcm, color) {\n");
+    fprintf(f, "    if (!pcm) return;\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = color;\n");
+    fprintf(f, "    ctx.lineWidth = 1.5;\n");
+    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / DATA.sampleRate;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const y = midY - Math.abs(pcm[s]) * scaleY;\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
+    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
+    fprintf(f, "          let maxV = 0;\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            const v = Math.abs(pcm[s]);\n");
+    fprintf(f, "            if (v > maxV) maxV = v;\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          const y = midY - maxV * scaleY;\n");
+    fprintf(f, "          if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "  }\n\n");
+
     fprintf(f, "  // 1. Draw Original Audio Peak Envelope / Samples (Background Overlay)\n");
     fprintf(f, "  drawSignal(origPcm, true);\n");
 
     fprintf(f, "  // 2. Draw Stem Waveform / Samples (Foreground)\n");
     fprintf(f, "  drawSignal(stem.pcm, false);\n");
+
+    fprintf(f, "  // 3. Draw Continuous Phase Coherence Envelope Overlay\n");
+    fprintf(f, "  drawEnvelopeOverlay(stem.coherencePcm, '#ffeb3b');\n");
 
     fprintf(f, "  // Center line\n");
     fprintf(f, "  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';\n");
@@ -1643,6 +1720,7 @@ int process_audio(const char *input_path) {
                 memcpy(stem->raw_audio_data, unpadded_data, total_channel_samples * sizeof(double));
             }
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
+            stem->coherence_data = (double*)calloc(total_channel_samples, sizeof(double));
             snprintf(stem->filename, sizeof(stem->filename), "%s_pitch_%03d_%s.wav", basename, p, stem->note_name);
             compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
         } else {
@@ -1730,6 +1808,13 @@ int process_audio(const char *input_path) {
                     write_wav_16bit(flux_filepath, sample_rate, num_channels, total_samples, final_flux_buf);
                     free(final_flux_buf);
                 }
+
+                if (stem->coherence_data) {
+                    char coherence_filepath[4096];
+                    snprintf(coherence_filepath, sizeof(coherence_filepath), "%s/%s_pitch_%03d_%s_coherence.wav",
+                             stem_dir, basename, p, stem->note_name);
+                    write_wav_16bit(coherence_filepath, sample_rate, num_channels, total_samples, stem->coherence_data);
+                }
             }
         }
     }
@@ -1791,6 +1876,7 @@ int process_audio(const char *input_path) {
         free(stem->audio_data);
         if (stem->raw_audio_data) free(stem->raw_audio_data);
         free(stem->flux_data);
+        if (stem->coherence_data) free(stem->coherence_data);
     }
     if (audible_stems) {
         free(audible_stems);
