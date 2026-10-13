@@ -19,7 +19,7 @@ The C pipeline operates in two passes without Python dependencies:
 
 ## Grouped Analysis & Multithreading Architecture (`--group` / `-g`)
 
-When invoked with `--group` (or `-g`), the analyzer executes multi-file grouped stem analysis across all WAV files in a target palette directory, computing shared cross-stem transience metrics while maximizing multi-core CPU and GPU utilization. An optional argument `--original <path>` (or `-o <path>`) allows specifying the absolute or relative path to the original audio file:
+When invoked with `--group` (or `-g`), the analyzer executes multi-file grouped stem analysis across all WAV files in a target palette directory, computing shared cross-stem transience metrics while maximizing multi-core CPU and GPU utilization. An optional argument `--original <path>` (or `-o <path>`) allows specifying the absolute or relative path to the original audio file. When running `ct_analyze_group.bat`, it automatically searches the parent directory (`..`) for a WAV file whose name (minus extension) matches the beginning of the current folder name (allowing an optional wildcard suffix) and invokes `ct_analyze_headless.exe` with `--original "<matching_wav>"`:
 
 1. **Parallel Stem WAV Decoding**:
    - Spawns CPU worker threads (`_beginthreadex` on Windows, `pthread_create` on POSIX) to decode PCM audio frames and perform stereo-to-mono downmixing across all stems concurrently.
@@ -31,7 +31,7 @@ When invoked with `--group` (or `-g`), the analyzer executes multi-file grouped 
    - Concurrently exports `.ctbin`, `snapshots.bin`, `snapshots.js`, `manifest.json`, `report_data.json/js`, and `<stem>_pattern_analysis.html` for all stems.
    - Slices isolated loop WAVs (`[loops]/pattern_N.wav`) and pass-aligned stem WAVs (`[stems]/pattern_N.wav`) directly using `dr_wav` in parallel across worker threads.
 5. **Combined Group Mix & Report**:
-   - Checks if an original audio file was specified via `--original <path>` or if `original.wav` / `glued.wav` exists in the parent directory. If found, it decodes and uses that original audio file for `group_<name>.wav` and group report analysis. If no original audio file is found or provided, it sums and normalizes mono stem audio into `group_<name>.wav` and exports the interactive group-level HTML report (`group_<name>_pattern_analysis.html`).
+   - Checks if an original audio file was specified via `--original <path>`, or automatically matches a WAV file in the parent directory whose stem matches the prefix of the current folder name, or falls back to checking if `original.wav` / `glued.wav` exists in the parent directory. If found, it decodes and uses that original audio file for `group_<name>.wav` and group report analysis. If no original audio file is found or provided, it sums and normalizes mono stem audio into `group_<name>.wav` and exports the interactive group-level HTML report (`group_<name>_pattern_analysis.html`).
 6. **Thread Task Delegation & Fine-Grained Console Progress Indicators**:
    - Thread task delegation logging outputs real-time console messages (`[Thread X/Y] Starting task: ...`) as worker threads pick up tasks.
    - Thread-safe console progress bar rendering (`print_progress_bar`) displays fine-grained step/frame-level percentage indicators across all pipeline stages (Decoding, Pass 1, STFT, Pass 2, Asset Export, Group Mixing, Group Report).

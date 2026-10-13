@@ -2525,6 +2525,73 @@ static void* export_worker_posix(void* arg) {
 }
 #endif
 
+static void find_parent_matching_wav(const char* parent_dir, char* out_wav_path, size_t max_len) {
+    if (!parent_dir || !out_wav_path || max_len == 0) return;
+    out_wav_path[0] = '\0';
+
+    char abs_path[4096] = "";
+#if defined(_WIN32) || defined(_WIN64)
+    if (_fullpath(abs_path, parent_dir, sizeof(abs_path)) == NULL) return;
+#else
+    if (realpath(parent_dir, abs_path) == NULL) return;
+#endif
+
+    size_t len = strlen(abs_path);
+    while (len > 1 && (abs_path[len - 1] == '/' || abs_path[len - 1] == '\\')) {
+        abs_path[len - 1] = '\0';
+        len--;
+    }
+
+    const char* last_s = strrchr(abs_path, '/');
+    const char* last_bs = strrchr(abs_path, '\\');
+    const char* folder_name = abs_path;
+    if (last_s && last_s >= folder_name) folder_name = last_s + 1;
+    if (last_bs && last_bs >= folder_name) folder_name = last_bs + 1;
+
+    if (!folder_name || folder_name[0] == '\0') return;
+
+    char parent_of_parent[4096];
+    snprintf(parent_of_parent, sizeof(parent_of_parent), "%s" PATH_SEP_STR "..", abs_path);
+
+    DIR* dir = opendir(parent_of_parent);
+    if (!dir) return;
+
+    struct dirent* entry;
+    size_t best_match_len = 0;
+
+    while ((entry = readdir(dir)) != NULL) {
+        const char* name = entry->d_name;
+        size_t n_len = strlen(name);
+        if (n_len < 4) continue;
+        const char* ext = name + n_len - 4;
+        if (!iequals_ext(ext, ".wav")) continue;
+
+        size_t wav_stem_len = n_len - 4;
+        if (wav_stem_len == 0) continue;
+
+        char wav_stem[1024];
+        if (wav_stem_len >= sizeof(wav_stem)) wav_stem_len = sizeof(wav_stem) - 1;
+        memcpy(wav_stem, name, wav_stem_len);
+        wav_stem[wav_stem_len] = '\0';
+
+        size_t fold_len = strlen(folder_name);
+        if (fold_len >= wav_stem_len) {
+            int match = 1;
+            for (size_t k = 0; k < wav_stem_len; k++) {
+                if (tolower((unsigned char)folder_name[k]) != tolower((unsigned char)wav_stem[k])) {
+                    match = 0;
+                    break;
+                }
+            }
+            if (match && wav_stem_len > best_match_len) {
+                best_match_len = wav_stem_len;
+                snprintf(out_wav_path, max_len, "%s" PATH_SEP_STR "%s", parent_of_parent, name);
+            }
+        }
+    }
+    closedir(dir);
+}
+
 int export_group_assets_and_html(
     const GroupStemInput* stems,
     int num_stems,
@@ -2968,11 +3035,17 @@ int export_group_assets_and_html(
     char loaded_orig_path[4096] = "";
 
     // Candidate search list for original audio file
-    const char* cand_paths[3] = { NULL, NULL, NULL };
+    const char* cand_paths[4] = { NULL, NULL, NULL, NULL };
     int num_cands = 0;
 
     if (original_audio_filepath && original_audio_filepath[0] != '\0') {
         cand_paths[num_cands++] = original_audio_filepath;
+    }
+
+    char auto_parent_wav[4096] = "";
+    find_parent_matching_wav(parent_dir, auto_parent_wav, sizeof(auto_parent_wav));
+    if (auto_parent_wav[0] != '\0') {
+        cand_paths[num_cands++] = auto_parent_wav;
     }
 
     char fallback_orig[4096];
