@@ -975,8 +975,8 @@ int process_audio(const char *input_path) {
                 }
             }
 
-            // Conduct noise gating on pitch p's flux envelope at 19% of its own peak flux
-            double pitch_flux_threshold = pitch_peak_flux * 0.19;
+            // Conduct noise gating on pitch p's flux envelope at 29% of its own peak flux
+            double pitch_flux_threshold = pitch_peak_flux * 0.29;
             double flux_scale = (pitch_peak_flux > 1e-12) ? (1.0 / pitch_peak_flux) : 0.0;
 
             int nc = p % 12;
