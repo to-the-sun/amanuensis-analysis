@@ -271,11 +271,6 @@ typedef struct {
 #pragma pack(pop)
 
 typedef struct {
-    double time_s;
-    double new_value_ms;
-} HPChangeEvent;
-
-typedef struct {
     double start_ms;
     double end_ms;
     double duration_ms;
@@ -534,8 +529,6 @@ static int export_single_stem_assets_from_res(
     int sr,
     int pass2_win_ms,
     double best_bar_length_ms,
-    const HPChangeEvent* hp_changes,
-    int num_hp_changes,
     const double* accumulated_contour,
     int contour_len,
     int contour_sample_count,
@@ -926,14 +919,6 @@ static int export_single_stem_assets_from_res(
             for (int i = 0; i < num_pts; i++) fprintf(fp, "%.4f%s", wf_max[i], (i < num_pts - 1) ? "," : "");
             fprintf(fp, "],\n");
 
-            // High point changes
-            fprintf(fp, "  \"hp_changes\": [\n");
-            for (int i = 0; i < num_hp_changes; i++) {
-                fprintf(fp, "    {\"time_s\": %.4f, \"new_value_ms\": %.2f}%s\n",
-                        hp_changes[i].time_s, hp_changes[i].new_value_ms, (i < num_hp_changes - 1) ? "," : "");
-            }
-            fprintf(fp, "  ],\n");
-
             // Accumulated Contour Histogram Data
             fprintf(fp, "  \"contour_histogram\": {\n");
             fprintf(fp, "    \"contour_len\": %d,\n", contour_len);
@@ -1111,10 +1096,6 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "            <div class=\"metric-label\">Segment Length (Longest High Point)</div>\n");
         fprintf(f_html, "        </div>\n");
         fprintf(f_html, "        <div class=\"metric-box\">\n");
-        fprintf(f_html, "            <div class=\"metric-value\">%d</div>\n", num_hp_changes);
-        fprintf(f_html, "            <div class=\"metric-label\">High Point Change Events</div>\n");
-        fprintf(f_html, "        </div>\n");
-        fprintf(f_html, "        <div class=\"metric-box\">\n");
         fprintf(f_html, "            <div class=\"metric-value\">%d</div>\n", num_patterns);
         fprintf(f_html, "            <div class=\"metric-label\">Patterns Identified</div>\n");
         fprintf(f_html, "        </div>\n");
@@ -1126,7 +1107,7 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "    </div>\n");
         fprintf(f_html, "    <div class=\"hint\">💡 Accumulated 15,000ms cumulative transience buffer contour recorded across the song (sampled every 99ms). The gold dashed line marks the segment length high point.</div>\n");
 
-        fprintf(f_html, "    <div class=\"section-title\">1. Interactive Audio Waveform, Pattern Map & Cumulative History High Point Changes</div>\n");
+        fprintf(f_html, "    <div class=\"section-title\">1. Interactive Audio Waveform & Pattern Map</div>\n");
         fprintf(f_html, "    <div class=\"audio-controls\">\n");
         fprintf(f_html, "        <audio id=\"audioPlayer\" controls src=\"%s.wav\"></audio>\n", encoded_stem_name);
         fprintf(f_html, "    </div>\n");
@@ -1134,7 +1115,7 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "    <div class=\"canvas-container\">\n");
         fprintf(f_html, "        <canvas id=\"waveformCanvas\" width=\"1150\" height=\"250\"></canvas>\n");
         fprintf(f_html, "    </div>\n");
-        fprintf(f_html, "    <div class=\"hint\">💡 Click anywhere on the waveform graph above to seek to that point in the song and play audio. Red markers denote points where the cumulative transience history high point changed.</div>\n");
+        fprintf(f_html, "    <div class=\"hint\">💡 Click anywhere on the waveform graph above to seek to that point in the song and play audio.</div>\n");
 
         fprintf(f_html, "    <div class=\"section-title\">2. Zoomed-In Segment Inspector (Vertically Stacked)</div>\n");
         fprintf(f_html, "    <div class=\"segment-inspector-container\">\n");
@@ -1179,7 +1160,6 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "    let bestBarLengthMs = %.2f;\n", best_bar_length_ms);
         fprintf(f_html, "    let patterns = [];\n");
         fprintf(f_html, "    let segmentsData = [];\n");
-        fprintf(f_html, "    let hpChanges = [];\n");
         fprintf(f_html, "    let globalMaxPosScore = 1.0;\n");
         fprintf(f_html, "    let globalMinNegScore = -1.0;\n");
         fprintf(f_html, "    let toleranceMs = %.4f;\n", res2->tolerance);
@@ -1221,7 +1201,6 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "        if (data.best_bar_length !== undefined) bestBarLengthMs = data.best_bar_length;\n");
         fprintf(f_html, "        if (data.patterns) patterns = data.patterns;\n");
         fprintf(f_html, "        if (data.segments_data) segmentsData = data.segments_data;\n");
-        fprintf(f_html, "        if (data.hp_changes) hpChanges = data.hp_changes;\n");
         fprintf(f_html, "        if (data.global_max_pos_score !== undefined) globalMaxPosScore = data.global_max_pos_score;\n");
         fprintf(f_html, "        if (data.global_min_neg_score !== undefined) globalMinNegScore = data.global_min_neg_score;\n");
         fprintf(f_html, "        if (data.tolerance_ms !== undefined) toleranceMs = data.tolerance_ms;\n");
@@ -1793,31 +1772,6 @@ static int export_all_assets_and_html_internal(
     (void)audio_filepath;
     if (!output_dir || !stem_name || !y || len <= 0 || sr <= 0) return 0;
 
-    // Pass 1: Headless Analysis with 15000ms window to determine high points
-    FullAnalysisResult res1;
-    if (!analyzer_batch_analyze_shared(y, len, sr, pass1_window_ms, 1, shared_buffer, &res1)) return 0;
-
-    int num_frames = res1.num_frames;
-
-    HPChangeEvent hp_changes[1024];
-    int num_hp_changes = 0;
-    double last_hp_val = -999.0;
-
-    for (int i = 0; i < num_frames; i++) {
-        double raw_hp = res1.highest_peaks_ms[i];
-        if (raw_hp == -999.0) continue;
-        double val_ms = fabs(raw_hp);
-
-        if (last_hp_val < 0.0 || fabs(val_ms - last_hp_val) > 1e-3) {
-            if (num_hp_changes < 1024) {
-                hp_changes[num_hp_changes].time_s = res1.times[i];
-                hp_changes[num_hp_changes].new_value_ms = val_ms;
-                num_hp_changes++;
-            }
-            last_hp_val = val_ms;
-        }
-    }
-
     int contour_len = pass1_window_ms + 1;
     if (contour_len > MAX_CONTOUR_LEN) contour_len = MAX_CONTOUR_LEN;
 
@@ -1900,8 +1854,6 @@ static int export_all_assets_and_html_internal(
     double best_bar_length_ms = (double)best_lag_ms;
     if (best_bar_length_ms <= 0.0) best_bar_length_ms = 1000.0;
 
-    analyzer_free_analysis(&res1);
-
     int pass2_win_ms = (int)round(best_bar_length_ms * 2.0);
     if (pass2_win_ms > 15000) pass2_win_ms = 15000;
     if (pass2_win_ms < 5000) pass2_win_ms = 5000;
@@ -1917,8 +1869,6 @@ static int export_all_assets_and_html_internal(
         sr,
         pass2_win_ms,
         best_bar_length_ms,
-        hp_changes,
-        num_hp_changes,
         accumulated_contour,
         contour_len,
         contour_sample_count,
@@ -1971,8 +1921,6 @@ typedef struct {
     int hop;
     int step;
     int total_steps;
-    double* group_hp_ms;
-    double* group_dem_lines;
     double* accumulated_contour;
     int contour_len;
     double* contour_evo;
@@ -2015,12 +1963,6 @@ static unsigned int __stdcall pass1_stem_worker_win(void* arg) {
 
             if (step_idx < t->total_steps) {
                 group_mutex_lock(t->shared_mutex);
-                if (res_chunk->metrics.highest_peak_valid && res_chunk->metrics.highest_peak_ms > t->group_hp_ms[step_idx]) {
-                    t->group_hp_ms[step_idx] = res_chunk->metrics.highest_peak_ms;
-                }
-                if (res_chunk->metrics.demarcation_line > t->group_dem_lines[step_idx]) {
-                    t->group_dem_lines[step_idx] = res_chunk->metrics.demarcation_line;
-                }
                 if (t->stem_idx == 0) {
                     if (t->accumulated_contour && t->analyzer->shared_buffer) {
                         for (int k = 0; k < t->contour_len; k++) {
@@ -2085,12 +2027,6 @@ static void* pass1_stem_worker_posix(void* arg) {
 
             if (step_idx < t->total_steps) {
                 group_mutex_lock(t->shared_mutex);
-                if (res_chunk->metrics.highest_peak_valid && res_chunk->metrics.highest_peak_ms > t->group_hp_ms[step_idx]) {
-                    t->group_hp_ms[step_idx] = res_chunk->metrics.highest_peak_ms;
-                }
-                if (res_chunk->metrics.demarcation_line > t->group_dem_lines[step_idx]) {
-                    t->group_dem_lines[step_idx] = res_chunk->metrics.demarcation_line;
-                }
                 if (t->stem_idx == 0) {
                     if (t->accumulated_contour && t->analyzer->shared_buffer) {
                         for (int k = 0; k < t->contour_len; k++) {
@@ -2481,8 +2417,6 @@ static void process_single_stem_export(
         stem->sr,
         pass2_win_ms,
         best_bar_length_ms,
-        NULL,
-        0,
         accumulated_contour,
         contour_len,
         contour_sample_count,
@@ -2581,8 +2515,6 @@ int export_group_assets_and_html(
 
     int total_p1_steps = (max_len + step - 1) / step;
     if (total_p1_steps < 1) total_p1_steps = 1;
-    double* group_hp_ms = (double*)calloc(total_p1_steps + 1, sizeof(double));
-    double* group_dem_lines = (double*)calloc(total_p1_steps + 1, sizeof(double));
 
     int max_worker_threads = get_max_worker_threads();
 
@@ -2604,8 +2536,6 @@ int export_group_assets_and_html(
         p1_tasks[i].hop = hop;
         p1_tasks[i].step = step;
         p1_tasks[i].total_steps = total_p1_steps;
-        p1_tasks[i].group_hp_ms = group_hp_ms;
-        p1_tasks[i].group_dem_lines = group_dem_lines;
         p1_tasks[i].accumulated_contour = accumulated_contour;
         p1_tasks[i].contour_len = contour_len;
         p1_tasks[i].contour_evo = contour_evo;
@@ -2686,9 +2616,6 @@ int export_group_assets_and_html(
     }
     double best_bar_length_ms = (double)best_lag_ms;
     if (best_bar_length_ms <= 0.0) best_bar_length_ms = 1000.0;
-
-    if (group_hp_ms) free(group_hp_ms);
-    if (group_dem_lines) free(group_dem_lines);
 
     int pass2_win_ms = (int)round(best_bar_length_ms * 2.0);
     if (pass2_win_ms > 15000) pass2_win_ms = 15000;
@@ -3106,8 +3033,6 @@ int export_group_assets_and_html(
                 group_audio_sr,
                 pass2_win_ms,
                 best_bar_length_ms,
-                NULL,
-                0,
                 accumulated_contour,
                 contour_len,
                 contour_sample_count,

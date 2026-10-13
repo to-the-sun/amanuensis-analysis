@@ -8,7 +8,7 @@ The C pipeline operates in two passes without Python dependencies:
 
 1. **Pass 1 (15,000ms Rolling Window)**:
    - Performs transience analysis across 4 frequency bands using a 15,000ms window (`pass1_window_ms = 15000`).
-   - Identifies high point change events and determines the longest stable high point (`best_bar_length_ms`).
+   - Determines the longest stable high point (`best_bar_length_ms`).
    - Tracks the accumulated transience contour histogram across the song to determine the segment length high point.
 
 2. **Pass 2 (Adaptive Window = `max(5000, min(15000, best_bar_length * 2))`)**:
@@ -43,7 +43,7 @@ When executing via `ct_analyze_group.bat`, the batch script automatically checks
 The interactive report (`<audio_stem>_pattern_analysis.html`) features:
 
 1. **Section 1: Interactive Waveform & Pattern Map**:
-   - Overall audio waveform, color-coded pattern spans, high point change markers, and audio seek interactions.
+   - Overall audio waveform, color-coded pattern spans, and audio seek interactions.
 
 2. **Section 2: Zoomed-In Segment Inspector**:
    - Vertically stacked segment panels (`boxPrev`, `boxCurr`, `boxNext`).
