@@ -151,10 +151,63 @@ typedef struct {
     double active_ms;
     double *audio_data;
     double *flux_data;
-    char filename[512];
-    float *envelope_min;
-    float *envelope_max;
+    char filename[1024];
 } AudibleStem;
+
+static const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+char* base64_encode(const uint8_t *data, size_t input_length, size_t *output_length) {
+    size_t out_len = 4 * ((input_length + 2) / 3);
+    char *encoded_data = (char*)malloc(out_len + 1);
+    if (!encoded_data) return NULL;
+
+    for (size_t i = 0, j = 0; i < input_length;) {
+        uint32_t octet_a = i < input_length ? data[i++] : 0;
+        uint32_t octet_b = i < input_length ? data[i++] : 0;
+        uint32_t octet_c = i < input_length ? data[i++] : 0;
+
+        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
+
+        encoded_data[j++] = base64_table[(triple >> 18) & 0x3F];
+        encoded_data[j++] = base64_table[(triple >> 12) & 0x3F];
+        encoded_data[j++] = base64_table[(triple >> 6) & 0x3F];
+        encoded_data[j++] = base64_table[triple & 0x3F];
+    }
+
+    size_t mod = input_length % 3;
+    if (mod > 0) {
+        encoded_data[out_len - 1] = '=';
+        if (mod == 1) {
+            encoded_data[out_len - 2] = '=';
+        }
+    }
+
+    encoded_data[out_len] = '\0';
+    if (output_length) *output_length = out_len;
+    return encoded_data;
+}
+
+char* audio_to_base64_pcm16(const double *audio_data, uint32_t total_samples, uint32_t num_channels) {
+    if (!audio_data || total_samples == 0) return NULL;
+    int16_t *pcm = (int16_t*)malloc(total_samples * sizeof(int16_t));
+    if (!pcm) return NULL;
+
+    for (uint32_t s = 0; s < total_samples; s++) {
+        double sum = 0.0;
+        for (uint32_t c = 0; c < num_channels; c++) {
+            sum += audio_data[s * num_channels + c];
+        }
+        double avg = sum / num_channels;
+        if (avg > 1.0) avg = 1.0;
+        if (avg < -1.0) avg = -1.0;
+        pcm[s] = (int16_t)round(avg * 32767.0);
+    }
+
+    size_t out_len = 0;
+    char *b64 = base64_encode((const uint8_t*)pcm, total_samples * sizeof(int16_t), &out_len);
+    free(pcm);
+    return b64;
+}
 
 void compute_downsampled_envelope(const double *audio_data, uint32_t total_samples, uint32_t num_channels, uint32_t num_bins, float *out_min, float *out_max) {
     if (!audio_data || total_samples == 0 || num_channels == 0 || num_bins == 0) return;
@@ -191,17 +244,15 @@ void generate_html_report(
     const char *basename,
     uint32_t sample_rate,
     uint32_t num_channels,
+    uint32_t total_samples,
     double duration,
-    uint32_t num_bins,
-    const float *orig_min,
-    const float *orig_max,
+    const double *orig_audio,
     const AudibleStem *stems,
     int stem_count,
     int nontonal_exported,
     double nt_peak,
     double nt_rms,
-    const float *nt_min,
-    const float *nt_max
+    const double *nontonal_audio
 ) {
     char html_path[4096];
     snprintf(html_path, sizeof(html_path), "%s/index.html", stem_dir);
@@ -313,60 +364,63 @@ void generate_html_report(
     fprintf(f, "</div>\n\n");
 
     fprintf(f, "<script>\n");
+
+    char *orig_b64 = audio_to_base64_pcm16(orig_audio, total_samples, num_channels);
+
     fprintf(f, "const DATA = {\n");
+    fprintf(f, "  sampleRate: %u,\n", sample_rate);
+    fprintf(f, "  totalSamples: %u,\n", total_samples);
     fprintf(f, "  duration: %.6f,\n", duration);
-    fprintf(f, "  numBins: %u,\n", num_bins);
-
-    fprintf(f, "  origMin: [");
-    for (uint32_t b = 0; b < num_bins; b++) {
-        fprintf(f, "%.4f%s", orig_min[b], (b + 1 < num_bins) ? "," : "");
-    }
-    fprintf(f, "],\n");
-
-    fprintf(f, "  origMax: [");
-    for (uint32_t b = 0; b < num_bins; b++) {
-        fprintf(f, "%.4f%s", orig_max[b], (b + 1 < num_bins) ? "," : "");
-    }
-    fprintf(f, "],\n");
+    fprintf(f, "  origB64: \"%s\",\n", orig_b64 ? orig_b64 : "");
+    if (orig_b64) free(orig_b64);
 
     fprintf(f, "  stems: [\n");
     for (int i = 0; i < stem_count; i++) {
         const AudibleStem *st = &stems[i];
+        char *stem_b64 = audio_to_base64_pcm16(st->audio_data, total_samples, num_channels);
         fprintf(f, "    {\n");
         fprintf(f, "      pitch: %d,\n", st->pitch);
         fprintf(f, "      name: \"%s\",\n", st->note_name);
-        fprintf(f, "      min: [");
-        for (uint32_t b = 0; b < num_bins; b++) {
-            fprintf(f, "%.4f%s", st->envelope_min[b], (b + 1 < num_bins) ? "," : "");
-        }
-        fprintf(f, "],\n");
-        fprintf(f, "      max: [");
-        for (uint32_t b = 0; b < num_bins; b++) {
-            fprintf(f, "%.4f%s", st->envelope_max[b], (b + 1 < num_bins) ? "," : "");
-        }
-        fprintf(f, "]\n");
+        fprintf(f, "      b64: \"%s\"\n", stem_b64 ? stem_b64 : "");
         fprintf(f, "    }%s\n", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+        if (stem_b64) free(stem_b64);
     }
 
     if (nontonal_exported) {
+        char *nt_b64 = audio_to_base64_pcm16(nontonal_audio, total_samples, num_channels);
         fprintf(f, "    {\n");
         fprintf(f, "      pitch: -1,\n");
         fprintf(f, "      name: \"Non-Tonal\",\n");
-        fprintf(f, "      min: [");
-        for (uint32_t b = 0; b < num_bins; b++) {
-            fprintf(f, "%.4f%s", nt_min[b], (b + 1 < num_bins) ? "," : "");
-        }
-        fprintf(f, "],\n");
-        fprintf(f, "      max: [");
-        for (uint32_t b = 0; b < num_bins; b++) {
-            fprintf(f, "%.4f%s", nt_max[b], (b + 1 < num_bins) ? "," : "");
-        }
-        fprintf(f, "]\n");
+        fprintf(f, "      b64: \"%s\"\n", nt_b64 ? nt_b64 : "");
         fprintf(f, "    }\n");
+        if (nt_b64) free(nt_b64);
     }
 
     fprintf(f, "  ]\n");
     fprintf(f, "};\n\n");
+
+    fprintf(f, "// Base64 decoding helper for PCM int16\n");
+    fprintf(f, "function base64ToFloat32Array(b64) {\n");
+    fprintf(f, "  const binaryString = atob(b64);\n");
+    fprintf(f, "  const len = binaryString.length;\n");
+    fprintf(f, "  const bytes = new Uint8Array(len);\n");
+    fprintf(f, "  for (let i = 0; i < len; i++) {\n");
+    fprintf(f, "    bytes[i] = binaryString.charCodeAt(i);\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  const int16 = new Int16Array(bytes.buffer);\n");
+    fprintf(f, "  const float32 = new Float32Array(int16.length);\n");
+    fprintf(f, "  for (let i = 0; i < int16.length; i++) {\n");
+    fprintf(f, "    float32[i] = int16[i] / 32767.0;\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  return float32;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "const origPcm = base64ToFloat32Array(DATA.origB64);\n");
+    fprintf(f, "DATA.stems.forEach(stem => {\n");
+    fprintf(f, "  stem.pcm = base64ToFloat32Array(stem.b64);\n");
+    fprintf(f, "  delete stem.b64;\n");
+    fprintf(f, "});\n");
+    fprintf(f, "delete DATA.origB64;\n\n");
 
     fprintf(f, "let viewStart = 0.0;\n");
     fprintf(f, "let viewEnd = DATA.duration;\n");
@@ -422,46 +476,85 @@ void generate_html_report(
     fprintf(f, "    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();\n");
     fprintf(f, "  });\n");
 
-    fprintf(f, "  const bStart = Math.max(0, Math.floor((viewStart / DATA.duration) * DATA.numBins));\n");
-    fprintf(f, "  const bEnd = Math.min(DATA.numBins - 1, Math.ceil((viewEnd / DATA.duration) * DATA.numBins));\n");
-
-    fprintf(f, "  // 1. Draw Original Audio Peak Envelope (Background Overlay)\n");
-    fprintf(f, "  ctx.fillStyle = 'rgba(180, 190, 210, 0.35)';\n");
-    fprintf(f, "  ctx.beginPath();\n");
-    fprintf(f, "  for (let b = bStart; b <= bEnd; b++) {\n");
-    fprintf(f, "    const t = (b / (DATA.numBins - 1)) * DATA.duration;\n");
-    fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const yMax = midY - DATA.origMax[b] * scaleY;\n");
-    fprintf(f, "    if (b === bStart) ctx.moveTo(x, yMax); else ctx.lineTo(x, yMax);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  for (let b = bEnd; b >= bStart; b--) {\n");
-    fprintf(f, "    const t = (b / (DATA.numBins - 1)) * DATA.duration;\n");
-    fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const yMin = midY - DATA.origMin[b] * scaleY;\n");
-    fprintf(f, "    ctx.lineTo(x, yMin);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  ctx.closePath();\n");
-    fprintf(f, "  ctx.fill();\n");
-
-    fprintf(f, "  // 2. Draw Stem Waveform (Foreground)\n");
+    fprintf(f, "  const sampleStart = Math.max(0, Math.floor((viewStart / DATA.duration) * DATA.totalSamples));\n");
+    fprintf(f, "  const sampleEnd = Math.min(DATA.totalSamples - 1, Math.ceil((viewEnd / DATA.duration) * DATA.totalSamples));\n");
+    fprintf(f, "  const visibleSamples = Math.max(1, sampleEnd - sampleStart + 1);\n");
     fprintf(f, "  const stem = DATA.stems[index];\n");
     fprintf(f, "  const stemColor = stem.pitch < 0 ? '#ef5350' : STEM_COLORS[index %% STEM_COLORS.length];\n");
-    fprintf(f, "  ctx.fillStyle = stemColor;\n");
-    fprintf(f, "  ctx.beginPath();\n");
-    fprintf(f, "  for (let b = bStart; b <= bEnd; b++) {\n");
-    fprintf(f, "    const t = (b / (DATA.numBins - 1)) * DATA.duration;\n");
-    fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const yMax = midY - stem.max[b] * scaleY;\n");
-    fprintf(f, "    if (b === bStart) ctx.moveTo(x, yMax); else ctx.lineTo(x, yMax);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  for (let b = bEnd; b >= bStart; b--) {\n");
-    fprintf(f, "    const t = (b / (DATA.numBins - 1)) * DATA.duration;\n");
-    fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const yMin = midY - stem.min[b] * scaleY;\n");
-    fprintf(f, "    ctx.lineTo(x, yMin);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  ctx.closePath();\n");
-    fprintf(f, "  ctx.fill();\n");
+
+    fprintf(f, "  // Helper function to render a signal (origPcm or stem.pcm)\n");
+    fprintf(f, "  function drawSignal(pcm, isOverlay) {\n");
+    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
+    fprintf(f, "      // Sample-by-sample detail mode: connected lines and discrete sample dots\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      ctx.strokeStyle = isOverlay ? 'rgba(180, 190, 210, 0.6)' : stemColor;\n");
+    fprintf(f, "      ctx.lineWidth = isOverlay ? 1.2 : 2.0;\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / DATA.sampleRate;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const y = midY - pcm[s] * scaleY;\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
+
+    fprintf(f, "      if (visibleSamples <= width * 0.5) {\n");
+    fprintf(f, "        // Draw discrete sample dots\n");
+    fprintf(f, "        ctx.fillStyle = isOverlay ? 'rgba(200, 210, 230, 0.9)' : '#ffffff';\n");
+    fprintf(f, "        for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "          const t = s / DATA.sampleRate;\n");
+    fprintf(f, "          const x = timeToX(t, width);\n");
+    fprintf(f, "          const y = midY - pcm[s] * scaleY;\n");
+    fprintf(f, "          ctx.beginPath();\n");
+    fprintf(f, "          ctx.arc(x, y, isOverlay ? 2.5 : 3.5, 0, 2 * Math.PI);\n");
+    fprintf(f, "          ctx.fill();\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      // Pixel-bucket peak envelope mode from raw PCM\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      const minArr = new Float32Array(pxWidth);\n");
+    fprintf(f, "      const maxArr = new Float32Array(pxWidth);\n");
+    fprintf(f, "      minArr.fill(0);\n");
+    fprintf(f, "      maxArr.fill(0);\n");
+
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
+    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
+    fprintf(f, "          let minV = pcm[s1];\n");
+    fprintf(f, "          let maxV = pcm[s1];\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            const v = pcm[s];\n");
+    fprintf(f, "            if (v < minV) minV = v;\n");
+    fprintf(f, "            if (v > maxV) maxV = v;\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          minArr[px] = minV;\n");
+    fprintf(f, "          maxArr[px] = maxV;\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+
+    fprintf(f, "      ctx.fillStyle = isOverlay ? 'rgba(180, 190, 210, 0.35)' : stemColor;\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const yMax = midY - maxArr[px] * scaleY;\n");
+    fprintf(f, "        if (px === 0) ctx.moveTo(px, yMax); else ctx.lineTo(px, yMax);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      for (let px = pxWidth - 1; px >= 0; px--) {\n");
+    fprintf(f, "        const yMin = midY - minArr[px] * scaleY;\n");
+    fprintf(f, "        ctx.lineTo(px, yMin);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.closePath();\n");
+    fprintf(f, "      ctx.fill();\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // 1. Draw Original Audio Peak Envelope / Samples (Background Overlay)\n");
+    fprintf(f, "  drawSignal(origPcm, true);\n");
+
+    fprintf(f, "  // 2. Draw Stem Waveform / Samples (Foreground)\n");
+    fprintf(f, "  drawSignal(stem.pcm, false);\n");
 
     fprintf(f, "  // Center line\n");
     fprintf(f, "  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';\n");
@@ -519,11 +612,11 @@ void generate_html_report(
     fprintf(f, "      renderCanvas(idx);\n");
 
     fprintf(f, "      const t = xToTime(x, rect.width);\n");
-    fprintf(f, "      const b = Math.min(DATA.numBins - 1, Math.max(0, Math.round((t / DATA.duration) * (DATA.numBins - 1))));\n");
-    fprintf(f, "      const origP = Math.max(Math.abs(DATA.origMin[b]), Math.abs(DATA.origMax[b]));\n");
-    fprintf(f, "      const stemP = Math.max(Math.abs(stem.min[b]), Math.abs(stem.max[b]));\n");
+    fprintf(f, "      const s = Math.min(DATA.totalSamples - 1, Math.max(0, Math.round(t * DATA.sampleRate)));\n");
+    fprintf(f, "      const origVal = origPcm[s];\n");
+    fprintf(f, "      const stemVal = stem.pcm[s];\n");
     fprintf(f, "      tooltip.style.opacity = '1';\n");
-    fprintf(f, "      tooltip.innerHTML = `Time: ${t.toFixed(3)}s | Orig Peak: ${origP.toFixed(3)} | Stem Peak: ${stemP.toFixed(3)}`;\n");
+    fprintf(f, "      tooltip.innerHTML = `Sample #${s} (${(t * 1000).toFixed(1)}ms) | Orig: ${origVal.toFixed(4)} | Stem: ${stemVal.toFixed(4)}`;\n");
     fprintf(f, "    });\n");
 
     fprintf(f, "    canvas.addEventListener('mouseleave', () => {\n");
@@ -1131,16 +1224,6 @@ int process_audio(const char *input_path) {
     // Calculate noise floor threshold (19.0% of overall peak amplitude)
     double noise_floor_threshold = overall_peak * g_noise_floor_ratio;
 
-    // Calculate downsampled peak envelope for the original audio
-    uint32_t num_bins = (uint32_t)(audio_duration * 500.0);
-    if (num_bins < 2000) num_bins = 2000;
-    if (num_bins > 10000) num_bins = 10000;
-
-    float *orig_envelope_min = (float*)malloc(num_bins * sizeof(float));
-    float *orig_envelope_max = (float*)malloc(num_bins * sizeof(float));
-    if (orig_envelope_min && orig_envelope_max) {
-        compute_downsampled_envelope(wav->data, total_samples, num_channels, num_bins, orig_envelope_min, orig_envelope_max);
-    }
 
     printf("\nAudio File Properties:\n");
     printf("  Format:          %s PCM (%u bits)\n", (wav->audio_format == 3) ? "IEEE Float" : "Integer", wav->bits_per_sample);
@@ -1150,12 +1233,17 @@ int process_audio(const char *input_path) {
     printf("  Signal Peak:     %.5f\n", overall_peak);
     printf("  Noise Floor Threshold: %.5f (19.0%% peak threshold / -14.4 dB, min 99ms active frames)\n\n", noise_floor_threshold);
 
+    // Preserve original audio copy for HTML report generation
+    double *orig_audio_buffer = (double*)malloc(total_channel_samples * sizeof(double));
+    if (orig_audio_buffer) {
+        memcpy(orig_audio_buffer, wav->data, total_channel_samples * sizeof(double));
+    }
+
     // Buffer to hold non-tonal portion (initialized to original audio, then subtracts exported tonal stems)
     double *nontonal_data = (double*)malloc(total_channel_samples * sizeof(double));
     if (!nontonal_data) {
         printf("Error: Could not allocate memory for non-tonal audio buffer.\n");
-        free(orig_envelope_min);
-        free(orig_envelope_max);
+        if (orig_audio_buffer) free(orig_audio_buffer);
         free(wav->data);
         free(wav);
         return 0;
@@ -1406,9 +1494,6 @@ int process_audio(const char *input_path) {
             stem->audio_data = unpadded_data;
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
             snprintf(stem->filename, sizeof(stem->filename), "%s_pitch_%03d_%s.wav", basename, p, stem->note_name);
-            stem->envelope_min = (float*)malloc(num_bins * sizeof(float));
-            stem->envelope_max = (float*)malloc(num_bins * sizeof(float));
-
             compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
         } else {
             free(unpadded_data);
@@ -1477,11 +1562,6 @@ int process_audio(const char *input_path) {
             snprintf(out_filepath, sizeof(out_filepath), "%s/%s_pitch_%03d_%s.wav",
                      stem_dir, basename, p, stem->note_name);
 
-            // Compute final downsampled envelope for stem waveform after all audio adjustments
-            if (stem->envelope_min && stem->envelope_max) {
-                compute_downsampled_envelope(stem->audio_data, total_samples, num_channels, num_bins, stem->envelope_min, stem->envelope_max);
-            }
-
             if (write_wav_16bit(out_filepath, sample_rate, num_channels, total_samples, stem->audio_data)) {
                 printf(" %03d  | %-4s | %8.2f Hz | %8.5f | %8.5f | %8.1f ms     | %s_pitch_%03d_%s.wav\n",
                        p, stem->note_name, midi_to_frequency(p), final_peak, final_rms, stem->active_ms, basename, p, stem->note_name);
@@ -1529,11 +1609,6 @@ int process_audio(const char *input_path) {
     double nt_rms = sqrt(nt_sum_sq / total_channel_samples);
 
     int nontonal_exported = write_wav_16bit(nontonal_filepath, sample_rate, num_channels, total_samples, nontonal_data);
-    float *nt_envelope_min = (float*)malloc(num_bins * sizeof(float));
-    float *nt_envelope_max = (float*)malloc(num_bins * sizeof(float));
-    if (nt_envelope_min && nt_envelope_max) {
-        compute_downsampled_envelope(nontonal_data, total_samples, num_channels, num_bins, nt_envelope_min, nt_envelope_max);
-    }
 
     if (nontonal_exported) {
         printf("Non-Tonal Stem Exported:\n");
@@ -1548,34 +1623,28 @@ int process_audio(const char *input_path) {
         basename,
         sample_rate,
         num_channels,
+        total_samples,
         audio_duration,
-        num_bins,
-        orig_envelope_min,
-        orig_envelope_max,
+        orig_audio_buffer,
         audible_stems,
         audible_count,
         nontonal_exported,
         nt_max_peak,
         nt_rms,
-        nt_envelope_min,
-        nt_envelope_max
+        nontonal_data
     );
 
-    // Free stem buffers and envelopes
+    free(orig_audio_buffer);
+
+    // Free stem buffers
     for (int idx = 0; idx < audible_count; idx++) {
         AudibleStem *stem = &audible_stems[idx];
         free(stem->audio_data);
         free(stem->flux_data);
-        if (stem->envelope_min) free(stem->envelope_min);
-        if (stem->envelope_max) free(stem->envelope_max);
     }
     if (audible_stems) {
         free(audible_stems);
     }
-    if (orig_envelope_min) free(orig_envelope_min);
-    if (orig_envelope_max) free(orig_envelope_max);
-    if (nt_envelope_min) free(nt_envelope_min);
-    if (nt_envelope_max) free(nt_envelope_max);
 
     double total_elapsed = (double)(clock() - start_clock) / CLOCKS_PER_SEC;
     double speed_ratio = audio_duration / (total_elapsed > 0.001 ? total_elapsed : 0.001);

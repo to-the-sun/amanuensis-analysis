@@ -28,15 +28,20 @@ The generated `index.html` report provides interactive browser-based analysis fo
   - Displays stem metadata: MIDI pitch number, note name, fundamental frequency (Hz), peak amplitude, RMS amplitude, active duration (ms), and filename.
   - Integrated `<audio controls>` player per row for direct audio listening.
 
-- **Background Original Peak Envelope Overlay**:
-  - In the background of each stem's waveform canvas, a soft translucent region (`rgba(180, 190, 210, 0.35)`) renders the downsampled peak amplitude envelope of the original audio file ($+E_{orig}(t)$ to $-E_{orig}(t)$).
-  - This allows instant visual comparison between the amplitude envelope of the full original mix and the isolated stem signal.
+- **Full-Resolution Base64 PCM Audio Data**:
+  - Rather than pre-downsampling audio into fixed envelope bins, full-resolution 16-bit PCM audio samples for the original audio mix and all produced stems are Base64-encoded and embedded directly into the self-contained `index.html` file.
+  - Upon report load, JavaScript decodes Base64 strings into `Float32Array` buffers for high-performance client-side rendering.
+
+- **Adaptive Zoom & Sample-by-Sample Rendering**:
+  - **Coarse/Medium Zoom**: Calculates exact per-pixel min/max amplitude peaks dynamically from raw PCM sample arrays without data loss.
+  - **Deep Sample Zoom**: When zooming into fine time ranges where the visible sample count is close to or less than canvas width, rendering automatically switches to sample-by-sample detail mode—drawing connected curves and discrete sample dots for every single audio sample.
+  - **Background Original Overlay**: Renders full-resolution peak envelope/samples of the original audio mix behind each stem.
 
 - **Interactive Click and Drag to Zoom**:
-  - **Horizontal Click & Drag**: Select any time range $[t_{start}, t_{end}]$ on any waveform canvas to zoom in down to millisecond-level detail.
+  - **Horizontal Click & Drag**: Select any time range $[t_{start}, t_{end}]$ on any waveform canvas to zoom in down to exact single sample detail.
   - **Synchronized Zoom**: Optional "Sync Zoom Across Rows" mode (enabled by default) ensures zooming on one stem row simultaneously updates all other stem rows, preserving precise time alignment across all frequency bands.
   - **Reset Zoom**: One-click "Reset Zoom" button (or double-clicking any graph) instantly restores the full timeline view ($0.0\text{s}$ to $T_{duration}$).
-  - **Hover Tooltip & Crosshair**: Hovering over any canvas displays a vertical crosshair cursor and tooltip readout showing exact timestamp, original peak amplitude, and stem peak amplitude.
+  - **Hover Tooltip & Crosshair**: Hovering over any canvas displays a vertical crosshair cursor and tooltip readout showing exact sample index `#s`, millisecond timestamp, original PCM value, and stem PCM value.
 
 ---
 
@@ -50,4 +55,5 @@ The generated `index.html` report provides interactive browser-based analysis fo
 | **Transience Flux Window** | 2048 FFT, 512 Hop |
 | **Flux Gating** | 9.0% peak global flux noise floor, 89.0% momentary peak threshold |
 | **Report Filename** | `<basename>_pitch_stems/index.html` |
-| **Downsampled Bins** | Adaptive 2,000–10,000 bins (500 bins/sec) embedded as JSON |
+| **Audio Representation** | Base64-encoded Int16 PCM decoded to Float32Array in client |
+| **Zoom Resolution** | Dynamic pixel-bucket peak envelope down to single-sample discrete dots |
