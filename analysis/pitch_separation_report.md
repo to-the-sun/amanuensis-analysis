@@ -40,7 +40,10 @@ The generated `index.html` report provides interactive browser-based analysis fo
 - **Interactive Click and Drag to Zoom**:
   - **Horizontal Click & Drag**: Select any time range $[t_{start}, t_{end}]$ on any waveform canvas to zoom in down to exact single sample detail.
   - **Synchronized Zoom**: Optional "Sync Zoom Across Rows" mode (enabled by default) ensures zooming on one stem row simultaneously updates all other stem rows, preserving precise time alignment across all frequency bands.
-  - **Reset Zoom**: One-click "Reset Zoom" button (or double-clicking any graph) instantly restores the full timeline view ($0.0\text{s}$ to $T_{duration}$).
+  - **Reset Zoom & Navigation**:
+    - **Click and Drag**: Select any horizontal time range $[t_{start}, t_{end}]$ to zoom in down to sample details.
+    - **Right Click**: Right-clicking on any graph zooms out one level in the zoom history stack. Single or double-clicking on graphs has no zooming effect.
+    - **Reset Zoom Button**: One-click "Reset Zoom" button instantly restores the full timeline view ($0.0\text{s}$ to $T_{duration}$).
   - **Hover Tooltip & Crosshair**: Hovering over any canvas displays a vertical crosshair cursor and tooltip readout showing exact sample index `#s`, millisecond timestamp, original PCM value, and stem PCM value.
 
 ---

@@ -265,7 +265,7 @@ void generate_html_report(
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-stem\"></div> Stem Waveform</div>\n");
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
-    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom into a region. Double-click or click 'Reset Zoom' to restore full view.</div>\n");
+    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n\n");
 
     fprintf(f, "<div id=\"stemsContainer\">\n");
@@ -455,6 +455,7 @@ void generate_html_report(
 
     fprintf(f, "let viewStart = 0.0;\n");
     fprintf(f, "let viewEnd = DATA.duration;\n");
+    fprintf(f, "let zoomHistory = [];\n");
     fprintf(f, "let activeDrag = null;\n");
     fprintf(f, "let hoverState = null;\n");
 
@@ -471,10 +472,21 @@ void generate_html_report(
     fprintf(f, "}\n");
 
     fprintf(f, "function resetZoom() {\n");
+    fprintf(f, "  zoomHistory = [];\n");
     fprintf(f, "  viewStart = 0.0;\n");
     fprintf(f, "  viewEnd = DATA.duration;\n");
     fprintf(f, "  updateViewInfo();\n");
     fprintf(f, "  renderAll();\n");
+    fprintf(f, "}\n");
+
+    fprintf(f, "function zoomOut() {\n");
+    fprintf(f, "  if (zoomHistory.length > 0) {\n");
+    fprintf(f, "    const prev = zoomHistory.pop();\n");
+    fprintf(f, "    viewStart = prev.start;\n");
+    fprintf(f, "    viewEnd = prev.end;\n");
+    fprintf(f, "    updateViewInfo();\n");
+    fprintf(f, "    renderAll();\n");
+    fprintf(f, "  }\n");
     fprintf(f, "}\n");
 
     fprintf(f, "const STEM_COLORS = ['#2196f3', '#00bcd4', '#4caf50', '#ff9800', '#e91e63', '#9c27b0', '#009688', '#ff5722'];\n");
@@ -669,23 +681,20 @@ void generate_html_report(
     fprintf(f, "        if (x2 - x1 > 4) {\n");
     fprintf(f, "          const t1 = xToTime(x1, rect.width);\n");
     fprintf(f, "          const t2 = xToTime(x2, rect.width);\n");
-    fprintf(f, "          const sync = document.getElementById('syncZoomCheck').checked;\n");
-    fprintf(f, "          if (sync) {\n");
-    fprintf(f, "            viewStart = Math.max(0, t1);\n");
-    fprintf(f, "            viewEnd = Math.min(DATA.duration, t2);\n");
-    fprintf(f, "            updateViewInfo();\n");
-    fprintf(f, "            renderAll();\n");
-    fprintf(f, "          } else {\n");
-    fprintf(f, "            renderCanvas(idx);\n");
-    fprintf(f, "          }\n");
+    fprintf(f, "          zoomHistory.push({ start: viewStart, end: viewEnd });\n");
+    fprintf(f, "          viewStart = Math.max(0, t1);\n");
+    fprintf(f, "          viewEnd = Math.min(DATA.duration, t2);\n");
+    fprintf(f, "          updateViewInfo();\n");
+    fprintf(f, "          renderAll();\n");
     fprintf(f, "        } else {\n");
     fprintf(f, "          renderCanvas(idx);\n");
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
     fprintf(f, "    });\n");
 
-    fprintf(f, "    canvas.addEventListener('dblclick', () => {\n");
-    fprintf(f, "      resetZoom();\n");
+    fprintf(f, "    canvas.addEventListener('contextmenu', (e) => {\n");
+    fprintf(f, "      e.preventDefault();\n");
+    fprintf(f, "      zoomOut();\n");
     fprintf(f, "    });\n");
     fprintf(f, "  });\n");
     fprintf(f, "}\n");
