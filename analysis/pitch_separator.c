@@ -975,8 +975,9 @@ int process_audio(const char *input_path) {
                 }
             }
 
-            // Conduct noise gating on pitch p's flux envelope at 9% of its own peak flux
-            double pitch_flux_threshold = pitch_peak_flux * 0.09;
+            // Conduct noise gating on pitch p's flux envelope at 19% of its own peak flux
+            double pitch_flux_threshold = pitch_peak_flux * 0.19;
+            double flux_scale = (pitch_peak_flux > 1e-12) ? (1.0 / pitch_peak_flux) : 0.0;
 
             int nc = p % 12;
             AudibleStem *nc_stem = &audible_stems[nc];
@@ -985,12 +986,12 @@ int process_audio(const char *input_path) {
                 // Aggregate audio
                 nc_stem->audio_data[k] += unpadded_data[k];
 
-                // Aggregate raw flux
-                nc_stem->raw_flux_data[k] += p_flux_buf[k];
+                // Aggregate raw flux normalized to 1.0 before aggregation
+                nc_stem->raw_flux_data[k] += p_flux_buf[k] * flux_scale;
 
-                // Aggregate thresholded flux
+                // Aggregate thresholded flux normalized to 1.0 before aggregation
                 if (p_flux_buf[k] >= pitch_flux_threshold) {
-                    nc_stem->flux_data[k] += p_flux_buf[k];
+                    nc_stem->flux_data[k] += p_flux_buf[k] * flux_scale;
                 }
             }
         }
