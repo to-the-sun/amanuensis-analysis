@@ -187,6 +187,109 @@ typedef struct {
     char filename[1024];
 } AudibleStem;
 
+void apply_continuous_phase_coherence_enhancement(
+    AudibleStem *stems,
+    int stem_count,
+    const double *orig_audio,
+    const double *nontonal_audio,
+    uint32_t total_samples,
+    uint32_t num_channels,
+    uint32_t sample_rate
+) {
+    if (!stems || stem_count <= 0 || !orig_audio || !nontonal_audio || total_samples == 0 || num_channels == 0) return;
+
+    // Window size W: ~8ms (352 samples at 44.1kHz)
+    int W = (int)(0.008 * sample_rate);
+    if (W < 3) W = 3;
+    if (W % 2 == 0) W++; // Ensure odd window size for symmetric centering
+
+    // Allocate memory for weight arrays per stem (interleaved for samples * num_channels)
+    size_t total_channel_samples = (size_t)total_samples * num_channels;
+    double **weights = (double**)malloc(stem_count * sizeof(double*));
+    if (!weights) return;
+
+    for (int k = 0; k < stem_count; k++) {
+        weights[k] = (double*)calloc(total_channel_samples, sizeof(double));
+        if (!weights[k]) {
+            for (int i = 0; i < k; i++) free(weights[i]);
+            free(weights);
+            return;
+        }
+    }
+
+    // 1. Calculate raw correlation weights per channel and sample
+    for (uint32_t c = 0; c < num_channels; c++) {
+        for (int k = 0; k < stem_count; k++) {
+            const double *s_buf = stems[k].audio_data;
+
+            double smooth = 0.0;
+            double alpha = 1.0 - exp(-1.0 / (0.002 * sample_rate)); // 2ms time constant
+
+            for (uint32_t t = 0; t < total_samples; t++) {
+                // Compute local zero-mean cross-correlation over window W
+                double mean_s = 0.0, mean_o = 0.0;
+                int count = 0;
+                int half_w = W / 2;
+
+                int start_m = ((int)t - half_w < 0) ? -(int)t : -half_w;
+                int end_m = ((int)t + half_w >= (int)total_samples) ? ((int)total_samples - 1 - (int)t) : half_w;
+
+                for (int m = start_m; m <= end_m; m++) {
+                    uint32_t idx = (t + m) * num_channels + c;
+                    mean_s += s_buf[idx];
+                    mean_o += orig_audio[idx];
+                    count++;
+                }
+                if (count > 0) {
+                    mean_s /= count;
+                    mean_o /= count;
+                }
+
+                double num = 0.0, sum_s = 0.0, sum_o = 0.0;
+                for (int m = start_m; m <= end_m; m++) {
+                    uint32_t idx = (t + m) * num_channels + c;
+                    double sv = s_buf[idx] - mean_s;
+                    double ov = orig_audio[idx] - mean_o;
+                    num += sv * ov;
+                    sum_s += sv * sv;
+                    sum_o += ov * ov;
+                }
+
+                double denom = sqrt(sum_s * sum_o);
+                double corr = (denom > 1e-12) ? (num / denom) : 0.0;
+                double raw = (corr > 0.0) ? (corr * corr) : 0.0;
+
+                // Apply time smoothing
+                smooth += alpha * (raw - smooth);
+                weights[k][t * num_channels + c] = smooth;
+            }
+        }
+
+        // 2. Normalize across stems and inject non-tonal residual
+        for (uint32_t t = 0; t < total_samples; t++) {
+            uint32_t idx = t * num_channels + c;
+            double sum_w = 0.0;
+            for (int k = 0; k < stem_count; k++) {
+                sum_w += weights[k][idx];
+            }
+
+            for (int k = 0; k < stem_count; k++) {
+                double w = weights[k][idx];
+                if (sum_w > 1.0) {
+                    w /= sum_w;
+                }
+                stems[k].audio_data[idx] += w * nontonal_audio[idx];
+            }
+        }
+    }
+
+    // Cleanup memory
+    for (int k = 0; k < stem_count; k++) {
+        free(weights[k]);
+    }
+    free(weights);
+}
+
 
 
 void generate_html_report(
@@ -1569,26 +1672,17 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Pass 2: Momentary peak-flux evaluation across all audible pitch stems
+    // Pass 2: Continuous Phase-Coherence Transient Injection across all audible pitch stems
     if (audible_count > 0) {
-        for (size_t k = 0; k < total_channel_samples; k++) {
-            double max_moment_flux = 0.0;
-            for (int idx = 0; idx < audible_count; idx++) {
-                double f = audible_stems[idx].flux_data[k];
-                if (f > max_moment_flux) {
-                    max_moment_flux = f;
-                }
-            }
-
-            if (max_moment_flux > 1e-12) {
-                double thresh = 0.89 * max_moment_flux;
-                for (int idx = 0; idx < audible_count; idx++) {
-                    if (audible_stems[idx].flux_data[k] > thresh) {
-                        audible_stems[idx].audio_data[k] += nontonal_data[k];
-                    }
-                }
-            }
-        }
+        apply_continuous_phase_coherence_enhancement(
+            audible_stems,
+            audible_count,
+            orig_audio_buffer,
+            nontonal_data,
+            total_samples,
+            num_channels,
+            sample_rate
+        );
 
         // Export pitch stems and companion flux WAV files
         for (int idx = 0; idx < audible_count; idx++) {
