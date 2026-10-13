@@ -213,10 +213,9 @@ void apply_continuous_phase_coherence_enhancement(
         }
     }
 
-    double alpha_attack = 1.0 - exp(-1.0 / (0.002 * sample_rate));  // 2ms attack time constant
-    double alpha_release = 1.0 - exp(-1.0 / (0.025 * sample_rate)); // 25ms release time constant
+    double alpha = 1.0 - exp(-1.0 / (0.002 * sample_rate)); // 2ms time constant for symmetric EMA smoothing
 
-    // 1. Calculate pitch-aware cross-correlation weights with asymmetric attack/release follower
+    // 1. Calculate pitch-aware cross-correlation weights per channel and sample
     for (uint32_t c = 0; c < num_channels; c++) {
         for (int k = 0; k < stem_count; k++) {
             const double *s_buf = stems[k].audio_data;
@@ -298,13 +297,8 @@ void apply_continuous_phase_coherence_enhancement(
 
                 double raw = (corr > 0.0) ? (corr * corr) : 0.0;
 
-                // Apply asymmetric envelope follower (2ms attack, 25ms release)
-                if (raw > smooth) {
-                    smooth += alpha_attack * (raw - smooth);
-                } else {
-                    smooth += alpha_release * (raw - smooth);
-                }
-
+                // Apply symmetric 2ms EMA time smoothing
+                smooth += alpha * (raw - smooth);
                 weights[k][t * num_channels + c] = smooth;
             }
         }
@@ -535,7 +529,6 @@ void generate_html_report(
                 fprintf(fjs, "    \"\"\n");
             }
         }
-
         fprintf(fjs, "  ],\n");
 
         fprintf(fjs, "  coherencePcm: [\n");

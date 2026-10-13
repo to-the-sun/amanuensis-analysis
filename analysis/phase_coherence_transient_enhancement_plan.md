@@ -65,25 +65,19 @@ double correlation = (denom > 1e-12) ? (numerator / denom) : 0.0;
 double raw_weight = (correlation > 0.0) ? (correlation * correlation) : 0.0;
 ```
 
-* **Asymmetric Attack/Release Envelope Follower & Pitch-Adaptive Windowing:**
-  To prevent fundamental cycle-by-cycle oscillations (intra-cycle correlation beating occurring at fundamental pitch rates) while preserving sharp transient attacks, two key refinements are applied:
-  1. **Pitch-Adaptive Windowing ($W_k$):** The correlation window size scales adaptively with the pitch frequency $f_k$:
-     $$W_k = \max(12\text{ms}, \min(40\text{ms}, 4 / f_k))$$
-     This guarantees that at least 4 full cycles of the pitch's fundamental frequency are covered within the correlation window, smoothing out intra-cycle phase variations.
-  2. **Asymmetric Envelope Follower:** An asymmetric lowpass follower is applied to the squared correlation weight `raw`:
-     * **Attack Constant ($\tau_{\text{attack}} = 2\text{ms}$):** Fast attack captures onset transients instantly without smearing.
-     * **Release Constant ($\tau_{\text{release}} = 25\text{ms}$):** Slower release eliminates pitch-rate ripple during sustained tonal notes.
+* **Pitch-Adaptive Correlation Windowing ($W_k$):**
+  To prevent fundamental cycle-by-cycle oscillations (intra-cycle correlation beating occurring at fundamental pitch rates) while preserving symmetrical responsiveness to rapid transient onset and offset events, the correlation window size $W_k$ scales dynamically per stem based on its fundamental pitch frequency $f_k$:
+
+  $$W_k = \max(12\text{ms}, \min(40\text{ms}, 4 / f_k))$$
+
+  This guarantees that at least 4 full wave cycles of the pitch's fundamental frequency are covered within the correlation window (e.g. $W \approx 14.4\text{ms}$ for C#4 at 277 Hz), canceling out intra-cycle phase modulation at the calculation source without introducing directional bias or lagging tails.
+
+* **Symmetric Smoothing Filter:** A fast 2ms single-pole lowpass filter is applied to the squared correlation weight `raw` to eliminate residual micro-flicker:
 
 ```c
-// Asymmetric time smoothing (2ms attack, 25ms release)
-double alpha_attack = 1.0 - exp(-1.0 / (0.002 * sample_rate));
-double alpha_release = 1.0 - exp(-1.0 / (0.025 * sample_rate));
-
-if (raw > smooth) {
-    smooth += alpha_attack * (raw - smooth);
-} else {
-    smooth += alpha_release * (raw - smooth);
-}
+// Exponential moving average filter with 2ms time constant (symmetric response)
+double alpha = 1.0 - exp(-1.0 / (0.002 * sample_rate));
+smooth_weight[k][t] = smooth_weight[k][t - 1] + alpha * (raw_weight - smooth_weight[k][t - 1]);
 ```
 
 ### 4. Multi-Stem Weight Normalization
