@@ -76,6 +76,38 @@ const char *NOTE_NAMES[12] = {
 };
 
 double midi_to_frequency(int midi_pitch);
+static const char b64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+char* encode_base64_bytes(const uint8_t *data, size_t input_len) {
+    size_t output_len = 4 * ((input_len + 2) / 3);
+    char *encoded = (char*)malloc(output_len + 1);
+    if (!encoded) return NULL;
+
+    size_t i = 0, j = 0;
+    for (i = 0; i < input_len; ) {
+        uint32_t octet_a = i < input_len ? data[i++] : 0;
+        uint32_t octet_b = i < input_len ? data[i++] : 0;
+        uint32_t octet_c = i < input_len ? data[i++] : 0;
+
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+
+        encoded[j++] = b64_chars[(triple >> 18) & 0x3F];
+        encoded[j++] = b64_chars[(triple >> 12) & 0x3F];
+
+        if (i == input_len && (input_len % 3 == 1)) {
+            encoded[j++] = '=';
+            encoded[j++] = '=';
+        } else if (i == input_len && (input_len % 3 == 2)) {
+            encoded[j++] = b64_chars[(triple >> 6) & 0x3F];
+            encoded[j++] = '=';
+        } else {
+            encoded[j++] = b64_chars[(triple >> 6) & 0x3F];
+            encoded[j++] = b64_chars[triple & 0x3F];
+        }
+    }
+    encoded[j] = '\0';
+    return encoded;
+}
 
 #define FLUX_FFT_SIZE 2048
 #define FLUX_HOP_SIZE 512
@@ -164,6 +196,8 @@ void generate_html_report(
     uint32_t total_samples,
     double duration,
     const char *orig_filename,
+    const double *orig_audio_buffer,
+    const double *nontonal_data,
     const AudibleStem *stems,
     int stem_count,
     int nontonal_exported,
@@ -279,13 +313,92 @@ void generate_html_report(
 
     fprintf(f, "</div>\n\n");
 
+    char js_data_filename[1024];
+    snprintf(js_data_filename, sizeof(js_data_filename), "%s_waveform_data.js", basename);
+    char js_data_path[4096];
+    snprintf(js_data_path, sizeof(js_data_path), "%s/%s", stem_dir, js_data_filename);
+
+    FILE *fjs = fopen(js_data_path, "w");
+    if (fjs) {
+        fprintf(fjs, "window.WAVEFORM_DATA = {\n");
+
+        int16_t *pcm_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+        if (pcm_i16) {
+            for (uint32_t s = 0; s < total_samples; s++) {
+                double sum = 0.0;
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    sum += orig_audio_buffer[s * num_channels + c];
+                }
+                double val = sum / num_channels;
+                if (val > 1.0) val = 1.0;
+                if (val < -1.0) val = -1.0;
+                pcm_i16[s] = (int16_t)round(val * 32767.0);
+            }
+            char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+            fprintf(fjs, "  origPcm: \"%s\",\n", b64 ? b64 : "");
+            if (b64) free(b64);
+        } else {
+            fprintf(fjs, "  origPcm: \"\",\n");
+        }
+
+        fprintf(fjs, "  stemsPcm: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            const AudibleStem *st = &stems[i];
+            if (pcm_i16) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double sum = 0.0;
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        sum += st->audio_data[s * num_channels + c];
+                    }
+                    double val = sum / num_channels;
+                    if (val > 1.0) val = 1.0;
+                    if (val < -1.0) val = -1.0;
+                    pcm_i16[s] = (int16_t)round(val * 32767.0);
+                }
+                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+                if (b64) free(b64);
+            } else {
+                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+            }
+        }
+
+        if (nontonal_exported) {
+            if (pcm_i16) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double sum = 0.0;
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        sum += nontonal_data[s * num_channels + c];
+                    }
+                    double val = sum / num_channels;
+                    if (val > 1.0) val = 1.0;
+                    if (val < -1.0) val = -1.0;
+                    pcm_i16[s] = (int16_t)round(val * 32767.0);
+                }
+                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+                fprintf(fjs, "    \"%s\"\n", b64 ? b64 : "");
+                if (b64) free(b64);
+            } else {
+                fprintf(fjs, "    \"\"\n");
+            }
+        }
+        if (pcm_i16) free(pcm_i16);
+
+        fprintf(fjs, "  ]\n");
+        fprintf(fjs, "};\n");
+        fclose(fjs);
+    }
+
+    fprintf(f, "<script src=\"%s\"></script>\n", js_data_filename);
     fprintf(f, "<script>\n");
     fprintf(f, "const DATA = {\n");
     fprintf(f, "  sampleRate: %u,\n", sample_rate);
+    fprintf(f, "  numChannels: %u,\n", num_channels);
     fprintf(f, "  totalSamples: %u,\n", total_samples);
     fprintf(f, "  duration: %.6f,\n", duration);
     fprintf(f, "  origFile: \"%s\",\n", orig_filename);
     fprintf(f, "  stems: [\n");
+
     for (int i = 0; i < stem_count; i++) {
         const AudibleStem *st = &stems[i];
         fprintf(f, "    {\n");
@@ -308,46 +421,32 @@ void generate_html_report(
     fprintf(f, "  ]\n");
     fprintf(f, "};\n\n");
 
-    fprintf(f, "let origPcm = new Float32Array(DATA.totalSamples);\n");
-    fprintf(f, "let loadedCount = 0;\n\n");
+    fprintf(f, "let origPcm = new Float32Array(DATA.totalSamples);\n\n");
 
-    fprintf(f, "async function loadWavPcm(file) {\n");
-    fprintf(f, "  try {\n");
-    fprintf(f, "    const resp = await fetch(file);\n");
-    fprintf(f, "    const buf = await resp.arrayBuffer();\n");
-    fprintf(f, "    const dv = new DataView(buf);\n");
-    fprintf(f, "    let pos = 12;\n");
-    fprintf(f, "    let numChannels = DATA.numChannels || 1;\n");
-    fprintf(f, "    while (pos < buf.byteLength - 8) {\n");
-    fprintf(f, "      const id = String.fromCharCode(dv.getUint8(pos), dv.getUint8(pos+1), dv.getUint8(pos+2), dv.getUint8(pos+3));\n");
-    fprintf(f, "      const size = dv.getUint32(pos + 4, true);\n");
-    fprintf(f, "      if (id === 'fmt ') {\n");
-    fprintf(f, "        numChannels = dv.getUint16(pos + 10, true);\n");
-    fprintf(f, "      } else if (id === 'data') {\n");
-    fprintf(f, "        const totalFrames = size / (numChannels * 2);\n");
-    fprintf(f, "        const pcm = new Float32Array(totalFrames);\n");
-    fprintf(f, "        let offset = pos + 8;\n");
-    fprintf(f, "        for (let i = 0; i < totalFrames; i++) {\n");
-    fprintf(f, "          let sum = 0;\n");
-    fprintf(f, "          for (let c = 0; c < numChannels; c++) {\n");
-    fprintf(f, "            sum += dv.getInt16(offset + (i * numChannels + c) * 2, true) / 32767.0;\n");
-    fprintf(f, "          }\n");
-    fprintf(f, "          pcm[i] = sum / numChannels;\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "        return pcm;\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      pos += 8 + size;\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  } catch(e) {\n");
-    fprintf(f, "    console.error('Failed to load WAV:', file, e);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  return new Float32Array(DATA.totalSamples);\n");
+    fprintf(f, "function base64ToFloat32(b64) {\n");
+    fprintf(f, "  if (!b64) return new Float32Array(DATA.totalSamples);\n");
+    fprintf(f, "  const binaryString = atob(b64);\n");
+    fprintf(f, "  const len = binaryString.length;\n");
+    fprintf(f, "  const bytes = new Uint8Array(len);\n");
+    fprintf(f, "  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);\n");
+    fprintf(f, "  const i16 = new Int16Array(bytes.buffer, 0, Math.floor(len / 2));\n");
+    fprintf(f, "  const f32 = new Float32Array(i16.length);\n");
+    fprintf(f, "  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32767.0;\n");
+    fprintf(f, "  return f32;\n");
     fprintf(f, "}\n\n");
 
-    fprintf(f, "async function initAudioData() {\n");
-    fprintf(f, "  origPcm = await loadWavPcm(DATA.origFile);\n");
-    fprintf(f, "  for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "    DATA.stems[i].pcm = await loadWavPcm(DATA.stems[i].file);\n");
+    fprintf(f, "function initAudioData() {\n");
+    fprintf(f, "  if (window.WAVEFORM_DATA) {\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.origPcm) {\n");
+    fprintf(f, "      origPcm = base64ToFloat32(window.WAVEFORM_DATA.origPcm);\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.stemsPcm) {\n");
+    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "        if (window.WAVEFORM_DATA.stemsPcm[i]) {\n");
+    fprintf(f, "          DATA.stems[i].pcm = base64ToFloat32(window.WAVEFORM_DATA.stemsPcm[i]);\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
     fprintf(f, "  }\n");
     fprintf(f, "  renderAll();\n");
     fprintf(f, "}\n\n");
@@ -1005,6 +1104,7 @@ int write_wav_16bit(const char *filepath, uint32_t sample_rate, uint16_t num_cha
     return 1;
 }
 
+
 /* Helper to map frequency to MIDI pitch */
 int freq_to_midi_pitch(double freq) {
     if (freq <= 0.0 || freq < 8.175798915643707) {
@@ -1532,7 +1632,6 @@ int process_audio(const char *input_path) {
     char orig_filepath[4096];
     snprintf(orig_filepath, sizeof(orig_filepath), "%s/%s", stem_dir, orig_filename);
     write_wav_16bit(orig_filepath, sample_rate, num_channels, total_samples, orig_audio_buffer);
-    free(orig_audio_buffer);
 
     // Write non-tonal stem WAV file directly as is without noise gating
     char nontonal_filepath[4096];
@@ -1566,12 +1665,16 @@ int process_audio(const char *input_path) {
         total_samples,
         audio_duration,
         orig_filename,
+        orig_audio_buffer,
+        nontonal_data,
         audible_stems,
         audible_count,
         nontonal_exported,
         nt_max_peak,
         nt_rms
     );
+
+    free(orig_audio_buffer);
 
     // Free stem buffers
     for (int idx = 0; idx < audible_count; idx++) {
