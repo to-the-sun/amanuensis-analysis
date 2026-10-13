@@ -65,11 +65,18 @@ double correlation = (denom > 1e-12) ? (numerator / denom) : 0.0;
 double raw_weight = (correlation > 0.0) ? (correlation * correlation) : 0.0;
 ```
 
-* **Smoothing Filter:** To prevent micro-flicker or zero-crossing chatter (where correlation fluctuates rapidly over 1–2 samples), `raw_weight` is smoothed across time using a fast 2 ms moving average or single-pole lowpass filter:
+* **Pitch-Adaptive Correlation Windowing ($W_k$):**
+  To prevent fundamental cycle-by-cycle oscillations (intra-cycle correlation beating occurring at fundamental pitch rates) while preserving symmetrical responsiveness to rapid transient onset and offset events, the correlation window size $W_k$ scales dynamically per stem based on its fundamental pitch frequency $f_k$:
+
+  $$W_k = \max(12\text{ms}, \min(40\text{ms}, 4 / f_k))$$
+
+  This guarantees that at least 4 full wave cycles of the pitch's fundamental frequency are covered within the correlation window (e.g. $W \approx 14.4\text{ms}$ for C#4 at 277 Hz), canceling out intra-cycle phase modulation at the calculation source without introducing directional bias or lagging tails.
+
+* **Symmetric Smoothing Filter:** A fast 2ms single-pole lowpass filter is applied to the squared correlation weight `raw` to eliminate residual micro-flicker:
 
 ```c
-// Exponential moving average filter with alpha corresponding to ~2ms time constant
-double alpha = 0.05; // adjusted for sample rate
+// Exponential moving average filter with 2ms time constant (symmetric response)
+double alpha = 1.0 - exp(-1.0 / (0.002 * sample_rate));
 smooth_weight[k][t] = smooth_weight[k][t - 1] + alpha * (raw_weight - smooth_weight[k][t - 1]);
 ```
 
