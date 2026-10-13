@@ -19,7 +19,9 @@ The C pipeline operates in two passes without Python dependencies:
 
 ## Grouped Analysis & Multithreading Architecture (`--group` / `-g`)
 
-When invoked with `--group` (or `-g`), the analyzer executes multi-file grouped stem analysis across all WAV files in a target palette directory, computing shared cross-stem transience metrics while maximizing multi-core CPU and GPU utilization. An optional argument `--original <path>` (or `-o <path>`) allows specifying the absolute or relative path to the original audio file:
+When invoked with `--group` (or `-g`), the analyzer executes multi-file grouped stem analysis across all WAV files in a target palette directory, computing shared cross-stem transience metrics while maximizing multi-core CPU and GPU utilization. An optional argument `--original <path>` (or `-o <path>`) allows specifying the absolute or relative path to the original audio file.
+
+When executing via `ct_analyze_group.bat`, the batch script automatically checks the parent directory for a `.wav` file whose name (minus extension) matches the beginning of the current directory name (allowing wildcard/suffix text after the matching prefix), automatically invoking `--original <path>` with the matching WAV file.
 
 1. **Parallel Stem WAV Decoding**:
    - Spawns CPU worker threads (`_beginthreadex` on Windows, `pthread_create` on POSIX) to decode PCM audio frames and perform stereo-to-mono downmixing across all stems concurrently.
