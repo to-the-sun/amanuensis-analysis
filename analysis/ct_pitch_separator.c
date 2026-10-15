@@ -366,6 +366,7 @@ void generate_html_report(
     fprintf(f, "    <div class=\"legend\">\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-orig\"></div> Original Peak Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-stem\"></div> Stem Waveform</div>\n");
+    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ff5722;\"></div> Spectral Flux Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: rgba(255, 235, 59, 0.95);\"></div> Non-Tonal Injection Envelope (0-100%%)</div>\n");
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
@@ -394,27 +395,6 @@ void generate_html_report(
         fprintf(f, "  </div>\n");
     }
 
-    if (nontonal_exported) {
-        int i = stem_count;
-        char nt_filename[512];
-        snprintf(nt_filename, sizeof(nt_filename), "%s_nontonal.wav", basename);
-        fprintf(f, "  <div class=\"stem-card\">\n");
-        fprintf(f, "    <div class=\"stem-header\">\n");
-        fprintf(f, "      <div class=\"stem-title\">\n");
-        fprintf(f, "        <span class=\"pitch-tag\" style=\"background:#553333; color:#ff8888;\">Non-Tonal</span> Residual Signal\n");
-        fprintf(f, "      </div>\n");
-        fprintf(f, "      <div class=\"stem-metrics\">\n");
-        fprintf(f, "        <span>Peak: %.4f</span>\n", nt_peak);
-        fprintf(f, "        <span>RMS: %.4f</span>\n", nt_rms);
-        fprintf(f, "      </div>\n");
-        fprintf(f, "      <audio controls src=\"%s\" preload=\"metadata\"></audio>\n", nt_filename);
-        fprintf(f, "    </div>\n");
-        fprintf(f, "    <div class=\"canvas-container\">\n");
-        fprintf(f, "      <canvas id=\"canvas-%d\" data-index=\"%d\"></canvas>\n", i, i);
-        fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", i);
-        fprintf(f, "    </div>\n");
-        fprintf(f, "  </div>\n");
-    }
 
     fprintf(f, "</div>\n\n");
 
@@ -462,30 +442,45 @@ void generate_html_report(
                     pcm_i16[s] = (int16_t)round(val * 32767.0);
                 }
                 char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
                 if (b64) free(b64);
             } else {
-                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
             }
         }
 
-        if (nontonal_exported) {
-            if (pcm_i16) {
+
+        fprintf(fjs, "  ],\n");
+        fprintf(fjs, "  fluxPcm: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            const AudibleStem *st = &stems[i];
+            if (pcm_i16 && st->flux_data) {
+                double peak_f = 0.0;
                 for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum = 0.0;
+                    double sum_f = 0.0;
                     for (uint32_t c = 0; c < num_channels; c++) {
-                        sum += nontonal_data[s * num_channels + c];
+                        sum_f += st->flux_data[s * num_channels + c];
                     }
-                    double val = sum / num_channels;
+                    double val = sum_f / num_channels;
+                    if (val > peak_f) peak_f = val;
+                }
+                double scale = (peak_f > 1e-12) ? (1.0 / peak_f) : 0.0;
+
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double sum_f = 0.0;
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        sum_f += st->flux_data[s * num_channels + c];
+                    }
+                    double val = (sum_f / num_channels) * scale;
                     if (val > 1.0) val = 1.0;
-                    if (val < -1.0) val = -1.0;
+                    if (val < 0.0) val = 0.0;
                     pcm_i16[s] = (int16_t)round(val * 32767.0);
                 }
                 char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"\n", b64 ? b64 : "");
+                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
                 if (b64) free(b64);
             } else {
-                fprintf(fjs, "    \"\"\n");
+                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
             }
         }
 
@@ -535,18 +530,9 @@ void generate_html_report(
         fprintf(f, "      pitch: %d,\n", st->pitch);
         fprintf(f, "      name: \"%s\",\n", st->note_name);
         fprintf(f, "      file: \"%s\"\n", st->filename);
-        fprintf(f, "    }%s\n", (i + 1 < stem_count || nontonal_exported) ? "," : "");
+        fprintf(f, "    }%s\n", (i + 1 < stem_count) ? "," : "");
     }
 
-    if (nontonal_exported) {
-        char nt_filename[512];
-        snprintf(nt_filename, sizeof(nt_filename), "%s_nontonal.wav", basename);
-        fprintf(f, "    {\n");
-        fprintf(f, "      pitch: -1,\n");
-        fprintf(f, "      name: \"Non-Tonal\",\n");
-        fprintf(f, "      file: \"%s\"\n", nt_filename);
-        fprintf(f, "    }\n");
-    }
 
     fprintf(f, "  ]\n");
     fprintf(f, "};\n\n");
@@ -591,6 +577,13 @@ void generate_html_report(
     fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "        if (window.WAVEFORM_DATA.stemsPcm[i]) {\n");
     fprintf(f, "          DATA.stems[i].pcm = base64ToFloat32(window.WAVEFORM_DATA.stemsPcm[i]);\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.fluxPcm) {\n");
+    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "        if (window.WAVEFORM_DATA.fluxPcm[i]) {\n");
+    fprintf(f, "          DATA.stems[i].fluxPcm = base64ToFloat32(window.WAVEFORM_DATA.fluxPcm[i]);\n");
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
     fprintf(f, "    }\n");
@@ -751,7 +744,57 @@ void generate_html_report(
     fprintf(f, "  // 2. Draw Stem Waveform / Samples\n");
     fprintf(f, "  drawSignal(stem.pcm, false);\n");
 
-    fprintf(f, "  // 3. Draw Non-Tonal Injection Envelope (0 to 100%%)\n");
+    fprintf(f, "  // 3. Draw Spectral Flux Envelope\n");
+    fprintf(f, "  if (stem.fluxPcm) {\n");
+    fprintf(f, "    const pcmFlux = stem.fluxPcm;\n");
+    fprintf(f, "    const graphBottom = height - 18;\n");
+    fprintf(f, "    const graphTop = 8;\n");
+    fprintf(f, "    const graphHeight = graphBottom - graphTop;\n");
+
+    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      ctx.strokeStyle = '#ff5722';\n");
+    fprintf(f, "      ctx.lineWidth = 1.8;\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / DATA.sampleRate;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const flVal = Math.max(0, Math.min(1, pcmFlux[s]));\n");
+    fprintf(f, "        const y = graphBottom - flVal * graphHeight;\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      const maxFluxArr = new Float32Array(pxWidth);\n");
+    fprintf(f, "      maxFluxArr.fill(0);\n");
+
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
+    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
+    fprintf(f, "          let maxV = pcmFlux[s1];\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            const v = pcmFlux[s];\n");
+    fprintf(f, "            if (v > maxV) maxV = v;\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          maxFluxArr[px] = Math.max(0, Math.min(1, maxV));\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+
+    fprintf(f, "      ctx.strokeStyle = '#ff5722';\n");
+    fprintf(f, "      ctx.lineWidth = 1.8;\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const y = graphBottom - maxFluxArr[px] * graphHeight;\n");
+    fprintf(f, "        if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // 4. Draw Non-Tonal Injection Envelope (0 to 100%%)\n");
     fprintf(f, "  if (stem.injectionPcm) {\n");
     fprintf(f, "    const pcmInj = stem.injectionPcm;\n");
     fprintf(f, "    const graphBottom = height - 18;\n");
@@ -893,8 +936,9 @@ void generate_html_report(
     fprintf(f, "      const origVal = (origPcm && origPcm.length > s) ? origPcm[s] : 0;\n");
     fprintf(f, "      const stemVal = (stem.pcm && stem.pcm.length > s) ? stem.pcm[s] : 0;\n");
       fprintf(f, "      tooltip.style.opacity = '1';\n");
+      fprintf(f, "      const flVal = (stem.fluxPcm && stem.fluxPcm.length > s) ? stem.fluxPcm[s] : 0;\n");
       fprintf(f, "      const injVal = (stem.injectionPcm && stem.injectionPcm.length > s) ? (stem.injectionPcm[s] * 100.0) : 0;\n");
-      fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Stem: ${stemVal.toFixed(4)} | Injection: ${injVal.toFixed(1)}%%`;\n");
+      fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Stem: ${stemVal.toFixed(4)} | Flux: ${flVal.toFixed(4)} | Injection: ${injVal.toFixed(1)}%%`;\n");
     fprintf(f, "    });\n");
 
     fprintf(f, "    canvas.addEventListener('mouseleave', () => {\n");
@@ -1866,16 +1910,8 @@ int process_audio(const char *input_path) {
     }
     printf("-----------------------------------------------------------------------------------\n\n");
 
-    // Export original audio mix WAV file into stem directory for HTML report waveform overlay
     char orig_filename[1024];
     snprintf(orig_filename, sizeof(orig_filename), "%s_original.wav", basename);
-    char orig_filepath[4096];
-    snprintf(orig_filepath, sizeof(orig_filepath), "%s/%s", stem_dir, orig_filename);
-    write_wav_16bit(orig_filepath, sample_rate, num_channels, total_samples, orig_audio_buffer);
-
-    // Write non-tonal stem WAV file
-    char nontonal_filepath[4096];
-    snprintf(nontonal_filepath, sizeof(nontonal_filepath), "%s/%s_nontonal.wav", stem_dir, basename);
 
     double nt_max_peak = 0.0;
     double nt_sum_sq = 0.0;
@@ -1887,14 +1923,7 @@ int process_audio(const char *input_path) {
     }
     double nt_rms = sqrt(nt_sum_sq / total_channel_samples);
 
-    int nontonal_exported = write_wav_16bit(nontonal_filepath, sample_rate, num_channels, total_samples, nontonal_data);
-
-    if (nontonal_exported) {
-        printf("Non-Tonal Stem Exported:\n");
-        printf("  File:               %s_nontonal.wav\n", basename);
-        printf("  Peak Amplitude:     %.5f\n", nt_max_peak);
-        printf("  RMS Amplitude:      %.5f\n\n", nt_rms);
-    }
+    int nontonal_exported = 0;
 
     // Construct HTML report in stem directory
     generate_html_report(
