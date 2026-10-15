@@ -190,6 +190,106 @@ typedef struct {
     char filename[1024];
 } AudibleStem;
 
+void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
+    if (!stem_data || !flux_out || total_samples == 0 || num_channels == 0) return;
+
+    memset(flux_out, 0, (size_t)total_samples * num_channels * sizeof(double));
+
+    double window[FLUX_FFT_SIZE];
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FLUX_FFT_SIZE));
+    }
+
+    uint32_t num_frames = (total_samples >= FLUX_FFT_SIZE) ? ((total_samples - FLUX_FFT_SIZE) / FLUX_HOP_SIZE + 1) : 0;
+    if (num_frames == 0) {
+        return;
+    }
+
+    double *frame_flux = (double*)malloc(num_frames * sizeof(double));
+    double *prev_mag = (double*)calloc(FLUX_FFT_SIZE / 2 + 1, sizeof(double));
+    double *curr_mag = (double*)malloc((FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+    Complex *fft_buf = (Complex*)malloc(FLUX_FFT_SIZE * sizeof(Complex));
+
+    if (!frame_flux || !prev_mag || !curr_mag || !fft_buf) {
+        if (frame_flux) free(frame_flux);
+        if (prev_mag) free(prev_mag);
+        if (curr_mag) free(curr_mag);
+        if (fft_buf) free(fft_buf);
+        return;
+    }
+
+    for (uint32_t c = 0; c < num_channels; c++) {
+        memset(prev_mag, 0, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+
+        for (uint32_t m = 0; m < num_frames; m++) {
+            uint32_t offset = m * FLUX_HOP_SIZE;
+
+            for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+                fft_buf[i].r = stem_data[(offset + i) * num_channels + c] * window[i];
+                fft_buf[i].i = 0.0;
+            }
+
+            fft_2048(fft_buf);
+
+            double flux_sum = 0.0;
+            for (int k = 0; k <= FLUX_FFT_SIZE / 2; k++) {
+                double r = fft_buf[k].r;
+                double im = fft_buf[k].i;
+                double energy = r * r + im * im;
+                curr_mag[k] = energy;
+
+                double diff = energy - prev_mag[k];
+                if (diff > 0.0) {
+                    flux_sum += diff;
+                }
+            }
+
+            frame_flux[m] = flux_sum;
+            memcpy(prev_mag, curr_mag, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+        }
+
+        for (uint32_t i = 0; i < total_samples; i++) {
+            double f_idx = ((double)i - (double)(FLUX_FFT_SIZE / 2)) / (double)FLUX_HOP_SIZE;
+
+            double val = 0.0;
+            if (f_idx <= 0.0) {
+                val = frame_flux[0];
+            } else if (f_idx >= (double)(num_frames - 1)) {
+                val = frame_flux[num_frames - 1];
+            } else {
+                int m0 = (int)floor(f_idx);
+                int m1 = m0 + 1;
+                double alpha = f_idx - m0;
+                val = (1.0 - alpha) * frame_flux[m0] + alpha * frame_flux[m1];
+            }
+
+            flux_out[i * num_channels + c] = val;
+        }
+    }
+
+    free(frame_flux);
+    free(prev_mag);
+    free(curr_mag);
+    free(fft_buf);
+
+    if (normalize) {
+        double peak_flux = 0.0;
+        size_t total_samples_all_channels = (size_t)total_samples * num_channels;
+        for (size_t k = 0; k < total_samples_all_channels; k++) {
+            if (flux_out[k] > peak_flux) {
+                peak_flux = flux_out[k];
+            }
+        }
+
+        if (peak_flux > 1e-12) {
+            double scale = 1.0 / peak_flux;
+            for (size_t k = 0; k < total_samples_all_channels; k++) {
+                flux_out[k] *= scale;
+            }
+        }
+    }
+}
+
 void generate_html_report(
     const char *stem_dir,
     const char *basename,
@@ -1651,6 +1751,7 @@ int process_audio(const char *input_path) {
             stem->injection_envelope = (double*)calloc(total_samples, sizeof(double));
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
             snprintf(stem->filename, sizeof(stem->filename), "%s_pitch_%03d_%s.wav", basename, p, stem->note_name);
+            compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
         } else {
             free(unpadded_data);
         }
@@ -1660,17 +1761,16 @@ int process_audio(const char *input_path) {
      * Non-Tonal Audio Injection using Cumulative Transience Transient Markers
      *
      * For each interval between adjacent transient markers [T_k, T_{k+1}]:
-     * 1. Calculate total energy E_{p,k} = sum_{s in interval, c} (stem_p[s,c])^2 for each audible pitch stem.
-     * 2. Find max energy E_{max,k} across all stems in that interval.
-     * 3. Evaluate 89th percentile threshold = 0.89 * E_{max,k}.
-     * 4. Stems with E_{p,k} >= threshold qualify.
-     * 5. Calculate proportional weight W_p = E_{p,k} / sum_{q in qualifying} E_{q,k}
+     * 1. Calculate total positive energy flux F_{p,k} = sum_{s in interval, c} flux_p[s,c] for each audible pitch stem.
+     * 2. Find max flux F_{max,k} across all stems in that interval.
+     * 3. Evaluate 89th percentile threshold = 0.89 * F_{max,k}.
+     * 4. Stems with F_{p,k} >= threshold qualify.
+     * 5. Calculate proportional weight W_p = F_{p,k} / sum_{q in qualifying} F_{q,k}
      *    so that total added non-tonal audio across all stems does not exceed 100%.
-     * 6. Add non-tonal audio scaled linearly from 100% (interval start) to 0% (interval end),
-     *    with a very short attack ramp (1ms = attack_samples) at interval start to prevent clicks.
+     * 6. Add non-tonal audio scaled linearly from 100% (interval start) to 0% (interval end).
      */
     if (audible_count > 0 && transient_count >= 2) {
-        double *stem_energies = (double*)malloc((size_t)audible_count * sizeof(double));
+        double *stem_fluxes = (double*)malloc((size_t)audible_count * sizeof(double));
         int *qualifying_indices = (int*)malloc((size_t)audible_count * sizeof(int));
 
         for (uint32_t t_idx = 0; t_idx + 1 < transient_count; t_idx++) {
@@ -1680,40 +1780,41 @@ int process_audio(const char *input_path) {
 
             uint32_t interval_length = interval_end - interval_start;
 
-            double max_interval_energy = 0.0;
+            double max_interval_flux = 0.0;
             for (int idx = 0; idx < audible_count; idx++) {
-                double energy = 0.0;
-                const double *st_pcm = audible_stems[idx].raw_audio_data ? audible_stems[idx].raw_audio_data : audible_stems[idx].audio_data;
-                for (uint32_t s = interval_start; s < interval_end; s++) {
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        double sample_val = st_pcm[s * num_channels + c];
-                        energy += sample_val * sample_val;
+                double total_flux = 0.0;
+                const double *fl_pcm = audible_stems[idx].flux_data;
+                if (fl_pcm) {
+                    for (uint32_t s = interval_start; s < interval_end; s++) {
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            total_flux += fl_pcm[s * num_channels + c];
+                        }
                     }
                 }
-                stem_energies[idx] = energy;
-                if (energy > max_interval_energy) {
-                    max_interval_energy = energy;
+                stem_fluxes[idx] = total_flux;
+                if (total_flux > max_interval_flux) {
+                    max_interval_flux = total_flux;
                 }
             }
 
-            if (max_interval_energy <= 1e-12) continue;
+            if (max_interval_flux <= 1e-12) continue;
 
-            double energy_threshold = 0.89 * max_interval_energy;
+            double flux_threshold = 0.89 * max_interval_flux;
             int qual_count = 0;
-            double qual_energy_sum = 0.0;
+            double qual_flux_sum = 0.0;
 
             for (int idx = 0; idx < audible_count; idx++) {
-                if (stem_energies[idx] >= energy_threshold) {
+                if (stem_fluxes[idx] >= flux_threshold) {
                     qualifying_indices[qual_count++] = idx;
-                    qual_energy_sum += stem_energies[idx];
+                    qual_flux_sum += stem_fluxes[idx];
                 }
             }
 
-            if (qual_count == 0 || qual_energy_sum <= 1e-12) continue;
+            if (qual_count == 0 || qual_flux_sum <= 1e-12) continue;
 
             for (int q = 0; q < qual_count; q++) {
                 int idx = qualifying_indices[q];
-                double weight = stem_energies[idx] / qual_energy_sum;
+                double weight = stem_fluxes[idx] / qual_flux_sum;
 
                 for (uint32_t i = 0; i < interval_length; i++) {
                     uint32_t s = interval_start + i;
@@ -1732,7 +1833,7 @@ int process_audio(const char *input_path) {
             }
         }
 
-        free(stem_energies);
+        free(stem_fluxes);
         free(qualifying_indices);
     }
 
