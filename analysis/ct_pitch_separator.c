@@ -203,7 +203,9 @@ void generate_html_report(
     int stem_count,
     int nontonal_exported,
     double nt_peak,
-    double nt_rms
+    double nt_rms,
+    const uint32_t *transients,
+    uint32_t transient_count
 ) {
     char html_path[4096];
     snprintf(html_path, sizeof(html_path), "%s/index.html", stem_dir);
@@ -263,6 +265,7 @@ void generate_html_report(
     fprintf(f, "    <div class=\"legend\">\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-orig\"></div> Original Peak Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-stem\"></div> Stem Waveform</div>\n");
+    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ffeb3b;\"></div> Transient Marker</div>\n");
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
@@ -399,6 +402,11 @@ void generate_html_report(
     fprintf(f, "  totalSamples: %u,\n", total_samples);
     fprintf(f, "  duration: %.6f,\n", duration);
     fprintf(f, "  origFile: \"%s\",\n", orig_filename);
+    fprintf(f, "  transients: [");
+    for (uint32_t t = 0; t < transient_count; t++) {
+        fprintf(f, "%.6f%s", (double)transients[t] / sample_rate, (t + 1 < transient_count) ? ", " : "");
+    }
+    fprintf(f, "],\n");
     fprintf(f, "  stems: [\n");
 
     for (int i = 0; i < stem_count; i++) {
@@ -598,6 +606,20 @@ void generate_html_report(
 
     fprintf(f, "  // 2. Draw Stem Waveform / Samples\n");
     fprintf(f, "  drawSignal(stem.pcm, false);\n");
+
+    fprintf(f, "  // 3. Draw Transient Markers\n");
+    fprintf(f, "  if (DATA.transients && DATA.transients.length > 0) {\n");
+    fprintf(f, "    ctx.strokeStyle = 'rgba(255, 235, 59, 0.75)';\n");
+    fprintf(f, "    ctx.lineWidth = 1.5;\n");
+    fprintf(f, "    ctx.setLineDash([3, 3]);\n");
+    fprintf(f, "    DATA.transients.forEach(t => {\n");
+    fprintf(f, "      if (t >= viewStart && t <= viewEnd) {\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    });\n");
+    fprintf(f, "    ctx.setLineDash([]);\n");
+    fprintf(f, "  }\n\n");
 
     fprintf(f, "  // Center line\n");
     fprintf(f, "  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';\n");
@@ -1678,7 +1700,9 @@ int process_audio(const char *input_path) {
         audible_count,
         nontonal_exported,
         nt_max_peak,
-        nt_rms
+        nt_rms,
+        transients,
+        transient_count
     );
 
     free(orig_audio_buffer);
