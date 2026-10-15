@@ -369,25 +369,6 @@ void generate_html_report(
             }
         }
 
-        fprintf(fjs, "  ],\n");
-        fprintf(fjs, "  injectionPcm: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const AudibleStem *st = &stems[i];
-            if (pcm_i16) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double val = st->injection_envelope ? st->injection_envelope[s] : 0.0;
-                    if (val > 1.0) val = 1.0;
-                    if (val < 0.0) val = 0.0;
-                    pcm_i16[s] = (int16_t)round(val * 32767.0);
-                }
-                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
-                if (b64) free(b64);
-            } else {
-                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
-            }
-        }
-
         if (nontonal_exported) {
             if (pcm_i16) {
                 for (uint32_t s = 0; s < total_samples; s++) {
@@ -405,6 +386,25 @@ void generate_html_report(
                 if (b64) free(b64);
             } else {
                 fprintf(fjs, "    \"\"\n");
+            }
+        }
+
+        fprintf(fjs, "  ],\n");
+        fprintf(fjs, "  injectionPcm: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            const AudibleStem *st = &stems[i];
+            if (pcm_i16) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double val = st->injection_envelope ? st->injection_envelope[s] : 0.0;
+                    if (val > 1.0) val = 1.0;
+                    if (val < 0.0) val = 0.0;
+                    pcm_i16[s] = (int16_t)round(val * 32767.0);
+                }
+                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
+                if (b64) free(b64);
+            } else {
+                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
             }
         }
         if (pcm_i16) free(pcm_i16);
@@ -1670,9 +1670,6 @@ int process_audio(const char *input_path) {
      *    with a very short attack ramp (1ms = attack_samples) at interval start to prevent clicks.
      */
     if (audible_count > 0 && transient_count >= 2) {
-        uint32_t attack_samples = (uint32_t)ceil(0.001 * sample_rate);
-        if (attack_samples < 1) attack_samples = 1;
-
         double *stem_energies = (double*)malloc((size_t)audible_count * sizeof(double));
         int *qualifying_indices = (int*)malloc((size_t)audible_count * sizeof(int));
 
@@ -1722,12 +1719,7 @@ int process_audio(const char *input_path) {
                     uint32_t s = interval_start + i;
                     double decay = 1.0 - ((double)i / (double)interval_length);
 
-                    double attack = 1.0;
-                    if (i < attack_samples) {
-                        attack = (double)(i + 1) / (double)attack_samples;
-                    }
-
-                    double nt_factor = weight * attack * decay;
+                    double nt_factor = weight * decay;
 
                     if (audible_stems[idx].injection_envelope && s < total_samples) {
                         audible_stems[idx].injection_envelope[s] += nt_factor;
