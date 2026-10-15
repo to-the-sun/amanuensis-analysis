@@ -186,6 +186,7 @@ typedef struct {
     double *audio_data;
     double *raw_audio_data;
     double *flux_data;
+    double *injection_envelope;
     char filename[1024];
 } AudibleStem;
 
@@ -265,7 +266,7 @@ void generate_html_report(
     fprintf(f, "    <div class=\"legend\">\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-orig\"></div> Original Peak Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box legend-stem\"></div> Stem Waveform</div>\n");
-    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ffeb3b;\"></div> Transient Marker</div>\n");
+    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: rgba(255, 235, 59, 0.95);\"></div> Non-Tonal Injection Envelope (0-100%%)</div>\n");
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
@@ -368,6 +369,25 @@ void generate_html_report(
             }
         }
 
+        fprintf(fjs, "  ],\n");
+        fprintf(fjs, "  injectionPcm: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            const AudibleStem *st = &stems[i];
+            if (pcm_i16) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double val = st->injection_envelope ? st->injection_envelope[s] : 0.0;
+                    if (val > 1.0) val = 1.0;
+                    if (val < 0.0) val = 0.0;
+                    pcm_i16[s] = (int16_t)round(val * 32767.0);
+                }
+                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
+                if (b64) free(b64);
+            } else {
+                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
+            }
+        }
+
         if (nontonal_exported) {
             if (pcm_i16) {
                 for (uint32_t s = 0; s < total_samples; s++) {
@@ -445,6 +465,23 @@ void generate_html_report(
     fprintf(f, "  return f32;\n");
     fprintf(f, "}\n\n");
 
+    fprintf(f, "function formatMSS(sec) {\n");
+    fprintf(f, "  if (isNaN(sec) || sec < 0) sec = 0;\n");
+    fprintf(f, "  const m = Math.floor(sec / 60);\n");
+    fprintf(f, "  const s = sec %% 60;\n");
+    fprintf(f, "  const sInt = Math.floor(s);\n");
+    fprintf(f, "  const sStr = sInt < 10 ? '0' + sInt : '' + sInt;\n");
+    fprintf(f, "  return `${m}:${sStr}`;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function formatMSSPrecise(sec) {\n");
+    fprintf(f, "  if (isNaN(sec) || sec < 0) sec = 0;\n");
+    fprintf(f, "  const m = Math.floor(sec / 60);\n");
+    fprintf(f, "  const s = sec %% 60;\n");
+    fprintf(f, "  const sStr = s < 10 ? '0' + s.toFixed(2) : s.toFixed(2);\n");
+    fprintf(f, "  return `${m}:${sStr}`;\n");
+    fprintf(f, "}\n\n");
+
     fprintf(f, "function initAudioData() {\n");
     fprintf(f, "  if (window.WAVEFORM_DATA) {\n");
     fprintf(f, "    if (window.WAVEFORM_DATA.origPcm) {\n");
@@ -454,6 +491,13 @@ void generate_html_report(
     fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "        if (window.WAVEFORM_DATA.stemsPcm[i]) {\n");
     fprintf(f, "          DATA.stems[i].pcm = base64ToFloat32(window.WAVEFORM_DATA.stemsPcm[i]);\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.injectionPcm) {\n");
+    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "        if (window.WAVEFORM_DATA.injectionPcm[i]) {\n");
+    fprintf(f, "          DATA.stems[i].injectionPcm = base64ToFloat32(window.WAVEFORM_DATA.injectionPcm[i]);\n");
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
     fprintf(f, "    }\n");
@@ -476,7 +520,7 @@ void generate_html_report(
 
     fprintf(f, "function updateViewInfo() {\n");
     fprintf(f, "  const dur = viewEnd - viewStart;\n");
-    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${viewStart.toFixed(3)}s &ndash; ${viewEnd.toFixed(3)}s (Duration: ${dur.toFixed(3)}s)`;\n");
+    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${formatMSSPrecise(viewStart)} &ndash; ${formatMSSPrecise(viewEnd)} (Duration: ${formatMSSPrecise(dur)})`;\n");
     fprintf(f, "}\n");
 
     fprintf(f, "function resetZoom() {\n");
@@ -607,24 +651,92 @@ void generate_html_report(
     fprintf(f, "  // 2. Draw Stem Waveform / Samples\n");
     fprintf(f, "  drawSignal(stem.pcm, false);\n");
 
-    fprintf(f, "  // 3. Draw Transient Markers\n");
-    fprintf(f, "  if (DATA.transients && DATA.transients.length > 0) {\n");
-    fprintf(f, "    ctx.strokeStyle = 'rgba(255, 235, 59, 0.75)';\n");
-    fprintf(f, "    ctx.lineWidth = 1.5;\n");
-    fprintf(f, "    ctx.setLineDash([3, 3]);\n");
-    fprintf(f, "    DATA.transients.forEach(t => {\n");
-    fprintf(f, "      if (t >= viewStart && t <= viewEnd) {\n");
+    fprintf(f, "  // 3. Draw Non-Tonal Injection Envelope (0 to 100%%)\n");
+    fprintf(f, "  if (stem.injectionPcm) {\n");
+    fprintf(f, "    const pcmInj = stem.injectionPcm;\n");
+    fprintf(f, "    const graphBottom = height - 18;\n");
+    fprintf(f, "    const graphTop = 8;\n");
+    fprintf(f, "    const graphHeight = graphBottom - graphTop;\n");
+
+    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      ctx.strokeStyle = 'rgba(255, 235, 59, 0.95)';\n");
+    fprintf(f, "      ctx.lineWidth = 2.0;\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / DATA.sampleRate;\n");
     fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();\n");
+    fprintf(f, "        const injVal = Math.max(0, Math.min(1, pcmInj[s]));\n");
+    fprintf(f, "        const y = graphBottom - injVal * graphHeight;\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
     fprintf(f, "      }\n");
-    fprintf(f, "    });\n");
-    fprintf(f, "    ctx.setLineDash([]);\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      const maxInjArr = new Float32Array(pxWidth);\n");
+    fprintf(f, "      maxInjArr.fill(0);\n");
+
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
+    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
+    fprintf(f, "          let maxV = pcmInj[s1];\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            const v = pcmInj[s];\n");
+    fprintf(f, "            if (v > maxV) maxV = v;\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          maxInjArr[px] = Math.max(0, Math.min(1, maxV));\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+
+    fprintf(f, "      ctx.fillStyle = 'rgba(255, 235, 59, 0.20)';\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      ctx.moveTo(0, graphBottom);\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const y = graphBottom - maxInjArr[px] * graphHeight;\n");
+    fprintf(f, "        ctx.lineTo(px, y);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.lineTo(width, graphBottom);\n");
+    fprintf(f, "      ctx.closePath();\n");
+    fprintf(f, "      ctx.fill();\n");
+
+    fprintf(f, "      ctx.strokeStyle = 'rgba(255, 235, 59, 0.95)';\n");
+    fprintf(f, "      ctx.lineWidth = 1.8;\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const y = graphBottom - maxInjArr[px] * graphHeight;\n");
+    fprintf(f, "        if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
     fprintf(f, "  // Center line\n");
     fprintf(f, "  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';\n");
     fprintf(f, "  ctx.lineWidth = 1;\n");
     fprintf(f, "  ctx.beginPath(); ctx.moveTo(0, midY); ctx.lineTo(width, midY); ctx.stroke();\n");
+
+    fprintf(f, "  // Time Axis Legend Along Bottom\n");
+    fprintf(f, "  const legendY = height - 16;\n");
+    fprintf(f, "  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';\n");
+    fprintf(f, "  ctx.lineWidth = 1;\n");
+    fprintf(f, "  ctx.beginPath(); ctx.moveTo(0, legendY); ctx.lineTo(width, legendY); ctx.stroke();\n");
+
+    fprintf(f, "  ctx.fillStyle = '#a0a0b0';\n");
+    fprintf(f, "  ctx.font = '10px monospace';\n");
+    fprintf(f, "  const numTicks = 8;\n");
+    fprintf(f, "  const durWindow = viewEnd - viewStart;\n");
+    fprintf(f, "  for (let i = 0; i <= numTicks; i++) {\n");
+    fprintf(f, "    const frac = i / numTicks;\n");
+    fprintf(f, "    const x = frac * width;\n");
+    fprintf(f, "    const timeVal = viewStart + frac * durWindow;\n");
+    fprintf(f, "    ctx.beginPath(); ctx.moveTo(x, legendY); ctx.lineTo(x, legendY + 4); ctx.stroke();\n");
+    fprintf(f, "    if (i === 0) ctx.textAlign = 'left';\n");
+    fprintf(f, "    else if (i === numTicks) ctx.textAlign = 'right';\n");
+    fprintf(f, "    else ctx.textAlign = 'center';\n");
+    fprintf(f, "    ctx.fillText(formatMSS(timeVal), x, height - 2);\n");
+    fprintf(f, "  }\n\n");
 
     fprintf(f, "  // Drag selection highlight\n");
     fprintf(f, "  if (activeDrag && activeDrag.index === index) {\n");
@@ -680,8 +792,9 @@ void generate_html_report(
     fprintf(f, "      const s = Math.min(DATA.totalSamples - 1, Math.max(0, Math.round(t * DATA.sampleRate)));\n");
     fprintf(f, "      const origVal = (origPcm && origPcm.length > s) ? origPcm[s] : 0;\n");
     fprintf(f, "      const stemVal = (stem.pcm && stem.pcm.length > s) ? stem.pcm[s] : 0;\n");
-    fprintf(f, "      tooltip.style.opacity = '1';\n");
-    fprintf(f, "      tooltip.innerHTML = `Sample #${s} (${(t * 1000).toFixed(1)}ms) | Orig: ${origVal.toFixed(4)} | Stem: ${stemVal.toFixed(4)}`;\n");
+      fprintf(f, "      tooltip.style.opacity = '1';\n");
+      fprintf(f, "      const injVal = (stem.injectionPcm && stem.injectionPcm.length > s) ? (stem.injectionPcm[s] * 100.0) : 0;\n");
+      fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Stem: ${stemVal.toFixed(4)} | Injection: ${injVal.toFixed(1)}%%`;\n");
     fprintf(f, "    });\n");
 
     fprintf(f, "    canvas.addEventListener('mouseleave', () => {\n");
@@ -1535,6 +1648,7 @@ int process_audio(const char *input_path) {
             if (stem->raw_audio_data) {
                 memcpy(stem->raw_audio_data, unpadded_data, total_channel_samples * sizeof(double));
             }
+            stem->injection_envelope = (double*)calloc(total_samples, sizeof(double));
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
             snprintf(stem->filename, sizeof(stem->filename), "%s_pitch_%03d_%s.wav", basename, p, stem->note_name);
         } else {
@@ -1614,6 +1728,10 @@ int process_audio(const char *input_path) {
                     }
 
                     double nt_factor = weight * attack * decay;
+
+                    if (audible_stems[idx].injection_envelope && s < total_samples) {
+                        audible_stems[idx].injection_envelope[s] += nt_factor;
+                    }
 
                     for (uint32_t c = 0; c < num_channels; c++) {
                         audible_stems[idx].audio_data[s * num_channels + c] += nt_factor * nontonal_data[s * num_channels + c];
@@ -1713,6 +1831,7 @@ int process_audio(const char *input_path) {
         free(stem->audio_data);
         if (stem->raw_audio_data) free(stem->raw_audio_data);
         if (stem->flux_data) free(stem->flux_data);
+        if (stem->injection_envelope) free(stem->injection_envelope);
     }
     if (audible_stems) {
         free(audible_stems);
