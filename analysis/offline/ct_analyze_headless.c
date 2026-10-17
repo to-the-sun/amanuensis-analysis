@@ -581,6 +581,8 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
     if (original_audio_filepath && original_audio_filepath[0] != '\0') {
         printf("Original audio file specified: %s\n", original_audio_filepath);
     }
+    printf("[DEBUG] Calling export_group_assets_and_html with %d stems, base_dir='%s', group_name='%s'\n",
+           num_stems, base_dir, group_name);
 
     int success = export_group_assets_and_html(
         stems,
@@ -590,6 +592,7 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
         window_ms,
         original_audio_filepath
     );
+    printf("[DEBUG] export_group_assets_and_html returned success=%d\n", success);
 
     for (int i = 0; i < num_stems; i++) {
         free((void*)stems[i].audio_filepath);

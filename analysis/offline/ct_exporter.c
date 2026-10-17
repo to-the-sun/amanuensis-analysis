@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <float.h>
+#include <errno.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <direct.h>
@@ -537,11 +538,15 @@ static int export_single_stem_assets_from_res(
     int evo_pts,
     const FullAnalysisResult* res2
 ) {
+    printf("[DEBUG] export_single_stem_assets_from_res starting for stem '%s'\n", stem_name ? stem_name : "(null)");
+    printf("[DEBUG]   Target Output Dir: %s\n", output_dir ? output_dir : "(null)");
+    printf("[DEBUG]   Params: len=%d, sr=%d, pass2_win_ms=%d, best_bar_length_ms=%.2f\n", len, sr, pass2_win_ms, best_bar_length_ms);
 
     // Export .ctbin binary file for Pass 2 directly from existing res2
     char ctbin_path[4096];
     snprintf(ctbin_path, sizeof(ctbin_path), "%s" PATH_SEP_STR "%s.ctbin", output_dir, stem_name);
-    export_ctbin_from_res(ctbin_path, res2, sr, pass2_win_ms);
+    int ctbin_ok = export_ctbin_from_res(ctbin_path, res2, sr, pass2_win_ms);
+    printf("[DEBUG] Export .ctbin file '%s': %s\n", ctbin_path, ctbin_ok ? "SUCCESS" : "FAILED");
 
     // Segment transience grouping & scoring
     double total_duration_ms = ((double)len / (double)sr) * 1000.0;
@@ -655,11 +660,14 @@ static int export_single_stem_assets_from_res(
     // Ensure [loops] and [stems] subdirectories exist inside output_dir
     char loops_dir[4096];
     snprintf(loops_dir, sizeof(loops_dir), "%s" PATH_SEP_STR "[loops]", output_dir);
-    mkdir_p(loops_dir);
+    int loops_dir_res = mkdir_p(loops_dir);
 
     char stems_dir[4096];
     snprintf(stems_dir, sizeof(stems_dir), "%s" PATH_SEP_STR "[stems]", output_dir);
-    mkdir_p(stems_dir);
+    int stems_dir_res = mkdir_p(stems_dir);
+
+    printf("[DEBUG] Subdirectory creation for stem '%s': [loops] res=%d, [stems] res=%d\n", stem_name, loops_dir_res, stems_dir_res);
+    printf("[DEBUG] Patterns identified for stem '%s': %d, num_segments=%d\n", stem_name, num_patterns, num_segments);
 
     // Parse passes text file if present
     PassInfo passes[257];
@@ -759,6 +767,11 @@ static int export_single_stem_assets_from_res(
     char snap_bin_path[4096];
     snprintf(snap_bin_path, sizeof(snap_bin_path), "%s" PATH_SEP_STR "snapshots.bin", output_dir);
     FILE* f_snap = fopen(snap_bin_path, "wb");
+    if (!f_snap) {
+        printf("[DEBUG] Error opening snapshots.bin file '%s': %s\n", snap_bin_path, strerror(errno));
+    } else {
+        printf("[DEBUG] Successfully opened snapshots.bin for writing: %s\n", snap_bin_path);
+    }
 
     int snap_len = pass2_win_ms + 1;
     size_t float32_bytes_per_snap = snap_len * sizeof(float);
@@ -784,6 +797,11 @@ static int export_single_stem_assets_from_res(
     char snap_js_path[4096];
     snprintf(snap_js_path, sizeof(snap_js_path), "%s" PATH_SEP_STR "snapshots.js", output_dir);
     FILE* f_snap_js = fopen(snap_js_path, "w");
+    if (!f_snap_js) {
+        printf("[DEBUG] Error opening snapshots.js file '%s': %s\n", snap_js_path, strerror(errno));
+    } else {
+        printf("[DEBUG] Successfully opened snapshots.js for writing: %s\n", snap_js_path);
+    }
     if (f_snap_js && all_snap_buf) {
         size_t b64_len = 4 * ((total_snap_bytes + 2) / 3);
         char* b64_str = (char*)malloc(b64_len + 1);
@@ -800,6 +818,11 @@ static int export_single_stem_assets_from_res(
     char manifest_path[4096];
     snprintf(manifest_path, sizeof(manifest_path), "%s" PATH_SEP_STR "manifest.json", output_dir);
     FILE* f_mf = fopen(manifest_path, "w");
+    if (!f_mf) {
+        printf("[DEBUG] Error opening manifest.json file '%s': %s\n", manifest_path, strerror(errno));
+    } else {
+        printf("[DEBUG] Successfully opened manifest.json for writing: %s\n", manifest_path);
+    }
     if (f_mf) {
         fprintf(f_mf, "{\n");
         fprintf(f_mf, "  \"version\": 1,\n");
@@ -855,10 +878,20 @@ static int export_single_stem_assets_from_res(
     char r_data_json_path[4096];
     snprintf(r_data_json_path, sizeof(r_data_json_path), "%s" PATH_SEP_STR "report_data.json", output_dir);
     FILE* f_rd = fopen(r_data_json_path, "w");
+    if (!f_rd) {
+        printf("[DEBUG] Error opening report_data.json file '%s': %s\n", r_data_json_path, strerror(errno));
+    } else {
+        printf("[DEBUG] Successfully opened report_data.json for writing: %s\n", r_data_json_path);
+    }
 
     char r_data_js_path[4096];
     snprintf(r_data_js_path, sizeof(r_data_js_path), "%s" PATH_SEP_STR "report_data.js", output_dir);
     FILE* f_rd_js = fopen(r_data_js_path, "w");
+    if (!f_rd_js) {
+        printf("[DEBUG] Error opening report_data.js file '%s': %s\n", r_data_js_path, strerror(errno));
+    } else {
+        printf("[DEBUG] Successfully opened report_data.js for writing: %s\n", r_data_js_path);
+    }
 
     if (f_rd || f_rd_js) {
         int num_pts = 1500;
@@ -1050,6 +1083,11 @@ static int export_single_stem_assets_from_res(
     char html_filepath[4096];
     snprintf(html_filepath, sizeof(html_filepath), "%s" PATH_SEP_STR "%s_pattern_analysis.html", output_dir, stem_name);
     FILE* f_html = fopen(html_filepath, "w");
+    if (!f_html) {
+        printf("[DEBUG] ERROR: Failed to open HTML report file '%s' for writing: %s\n", html_filepath, strerror(errno));
+    } else {
+        printf("[DEBUG] Successfully opened HTML report file for writing: %s\n", html_filepath);
+    }
     if (f_html) {
         fprintf(f_html, "<!DOCTYPE html>\n");
         fprintf(f_html, "<html lang=\"en\">\n");
@@ -1754,8 +1792,10 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "</body>\n");
         fprintf(f_html, "</html>\n");
         fclose(f_html);
+        printf("[DEBUG] Successfully wrote HTML report for stem '%s' -> %s\n", stem_name, html_filepath);
     }
 
+    printf("[DEBUG] export_single_stem_assets_from_res completed for stem '%s'\n", stem_name);
     return 1;
 }
 
@@ -2344,24 +2384,34 @@ static void process_single_stem_export(
     int evo_pts,
     FullAnalysisResult* res2_stem
 ) {
+    printf("[DEBUG] process_single_stem_export starting for stem_name='%s', audio_filepath='%s'\n",
+           (stem && stem->stem_name) ? stem->stem_name : "(null)",
+           (stem && stem->audio_filepath) ? stem->audio_filepath : "(null)");
+
     char stem_output_dir[4096];
     snprintf(stem_output_dir, sizeof(stem_output_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "%s", parent_dir, stem->stem_name);
-    mkdir_p(stem_output_dir);
+    int mkdir_res = mkdir_p(stem_output_dir);
+    printf("[DEBUG] Stem output directory '%s' (mkdir_p status: %d)\n", stem_output_dir, mkdir_res);
 
     // Copy audio WAV file into stem palette output directory as <stem_name>.wav
     char dst_stem_audio_path[4096];
     snprintf(dst_stem_audio_path, sizeof(dst_stem_audio_path), "%s" PATH_SEP_STR "%s.wav", stem_output_dir, stem->stem_name);
 
     FILE* src_f = fopen(stem->audio_filepath, "rb");
-    if (src_f) {
+    if (!src_f) {
+        printf("[DEBUG] Error opening src stem audio file '%s': %s\n", stem->audio_filepath, strerror(errno));
+    } else {
         FILE* dst_f = fopen(dst_stem_audio_path, "wb");
-        if (dst_f) {
+        if (!dst_f) {
+            printf("[DEBUG] Error opening dst stem audio file '%s': %s\n", dst_stem_audio_path, strerror(errno));
+        } else {
             char buf[65536];
             size_t bytes_read;
             while ((bytes_read = fread(buf, 1, sizeof(buf), src_f)) > 0) {
                 fwrite(buf, 1, bytes_read, dst_f);
             }
             fclose(dst_f);
+            printf("[DEBUG] Successfully copied stem audio to '%s'\n", dst_stem_audio_path);
         }
         fclose(src_f);
     }
@@ -2430,6 +2480,8 @@ static void process_single_stem_export(
 #if defined(_WIN32) || defined(_WIN64)
 static unsigned int __stdcall export_worker_win(void* arg) {
     GroupExportTask* t = (GroupExportTask*)arg;
+    printf("[DEBUG] [Worker Thread Win stem_idx=%d/%d] Starting export for stem '%s'\n",
+           t->stem_idx + 1, t->total_stems, t->stem->stem_name);
     process_single_stem_export(
         t->stem, t->parent_dir, t->pass2_win_ms,
         t->best_bar_length_ms, t->accumulated_contour, t->contour_len,
@@ -2440,11 +2492,15 @@ static unsigned int __stdcall export_worker_win(void* arg) {
     int cnt = *(t->export_counter);
     print_progress_bar(cnt, t->total_stems, "Exporting Stem Assets & Slicing Pattern WAVs");
     group_mutex_unlock(t->counter_mutex);
+    printf("[DEBUG] [Worker Thread Win stem_idx=%d/%d] Completed export for stem '%s'\n",
+           t->stem_idx + 1, t->total_stems, t->stem->stem_name);
     return 0;
 }
 #else
 static void* export_worker_posix(void* arg) {
     GroupExportTask* t = (GroupExportTask*)arg;
+    printf("[DEBUG] [Worker Thread POSIX stem_idx=%d/%d] Starting export for stem '%s'\n",
+           t->stem_idx + 1, t->total_stems, t->stem->stem_name);
     process_single_stem_export(
         t->stem, t->parent_dir, t->pass2_win_ms,
         t->best_bar_length_ms, t->accumulated_contour, t->contour_len,
@@ -2455,6 +2511,8 @@ static void* export_worker_posix(void* arg) {
     int cnt = *(t->export_counter);
     print_progress_bar(cnt, t->total_stems, "Exporting Stem Assets & Slicing Pattern WAVs");
     group_mutex_unlock(t->counter_mutex);
+    printf("[DEBUG] [Worker Thread POSIX stem_idx=%d/%d] Completed export for stem '%s'\n",
+           t->stem_idx + 1, t->total_stems, t->stem->stem_name);
     return NULL;
 }
 #endif
