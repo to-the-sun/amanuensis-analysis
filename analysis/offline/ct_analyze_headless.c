@@ -327,7 +327,7 @@ static int process_single_file(const char* audio_filepath, int window_ms) {
     printf("                  report_data.json, report_data.js,\n");
     printf("                  [loops]" PATH_SEP_STR " pattern WAVs,\n");
     printf("                  [stems]" PATH_SEP_STR " aligned pattern WAVs,\n");
-    printf("                  %s_pattern_analysis.html\n", stem_name);
+    printf("                  %s.html\n", stem_name);
     printf("============================================================\n");
 
     return 1;
@@ -581,6 +581,8 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
     if (original_audio_filepath && original_audio_filepath[0] != '\0') {
         printf("Original audio file specified: %s\n", original_audio_filepath);
     }
+    printf("[DEBUG] Calling export_group_assets_and_html with %d stems, base_dir='%s', group_name='%s'\n",
+           num_stems, base_dir, group_name);
 
     int success = export_group_assets_and_html(
         stems,
@@ -590,6 +592,7 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
         window_ms,
         original_audio_filepath
     );
+    printf("[DEBUG] export_group_assets_and_html returned success=%d\n", success);
 
     for (int i = 0; i < num_stems; i++) {
         free((void*)stems[i].audio_filepath);
