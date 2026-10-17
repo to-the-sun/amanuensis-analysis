@@ -327,7 +327,7 @@ static int process_single_file(const char* audio_filepath, int window_ms) {
     printf("                  report_data.json, report_data.js,\n");
     printf("                  [loops]" PATH_SEP_STR " pattern WAVs,\n");
     printf("                  [stems]" PATH_SEP_STR " aligned pattern WAVs,\n");
-    printf("                  %s_pattern_analysis.html\n", stem_name);
+    printf("                  %s.html\n", stem_name);
     printf("============================================================\n");
 
     return 1;

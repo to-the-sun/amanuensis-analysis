@@ -15,7 +15,7 @@ The C pipeline operates in two passes without Python dependencies:
    - Re-analyzes the audio with the optimized window size for peak detection, pattern identification, and segment scoring.
    - Copies the target audio file into the destination folder so the interactive HTML report plays the local copied instance.
    - Scans for and copies any matching text files (located in the audio file folder) whose names match the audio file except starting with "passes" instead of "palette" into the destination folder.
-   - Exports binary assets (`.ctbin`, `snapshots.bin`), Base64 snapshot fallbacks (`snapshots.js`), structured JSON data (`manifest.json`, `report_data.json`, `report_data.js`), pattern WAV slices, and an interactive HTML report (`<stem>_pattern_analysis.html`).
+   - Exports binary assets (`.ctbin`, `snapshots.bin`), Base64 snapshot fallbacks (`snapshots.js`), structured JSON data (`manifest.json`, `report_data.json`, `report_data.js`), pattern WAV slices, and an interactive HTML report (`<stem>.html`).
 
 ## Grouped Analysis & Multithreading Architecture (`--group` / `-g`)
 
@@ -30,7 +30,7 @@ When executing via `ct_analyze_group.bat`, the batch script automatically checks
 3. **Thread-Safe Lockstep Chunk Processing**:
    - Pass 1 and Pass 2 time-step chunk loops execute concurrently across stems, with thread synchronization (`GroupMutex`: `CRITICAL_SECTION` / `pthread_mutex_t`) protecting shared accumulated transience updates (`SharedTransientBuffer`).
 4. **Parallel Per-Stem Asset Export & WAV Slicing**:
-   - Concurrently exports `.ctbin`, `snapshots.bin`, `snapshots.js`, `manifest.json`, `report_data.json/js`, and `<stem>_pattern_analysis.html` for all stems.
+   - Concurrently exports `.ctbin`, `snapshots.bin`, `snapshots.js`, `manifest.json`, `report_data.json/js`, and `<stem>.html` for all stems (omitting common stem name prefixes from created stem output directories to keep path lengths short).
    - Slices isolated loop WAVs (`[loops]/pattern_N.wav`) and pass-aligned stem WAVs (`[stems]/pattern_N.wav`) directly using `dr_wav` in parallel across worker threads.
 5. **Combined Group Mix & Report**:
    - Checks if an original audio file was specified via `--original <path>` or if `original.wav` / `glued.wav` exists in the parent directory. If found, it decodes and uses that original audio file for `group_<name>.wav` and group report analysis. If no original audio file is found or provided, it sums and normalizes mono stem audio into `group_<name>.wav` and exports the interactive group-level HTML report (`group_<name>_pattern_analysis.html`).
@@ -40,7 +40,7 @@ When executing via `ct_analyze_group.bat`, the batch script automatically checks
 
 ## Generated HTML Report Layout
 
-The interactive report (`<audio_stem>_pattern_analysis.html`) features:
+The interactive report (`<audio_stem>.html`) features:
 
 1. **Section 1: Interactive Waveform & Pattern Map**:
    - Overall audio waveform, color-coded pattern spans, and audio seek interactions.

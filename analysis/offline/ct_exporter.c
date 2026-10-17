@@ -1081,7 +1081,7 @@ static int export_single_stem_assets_from_res(
     url_encode_filename(stem_name, encoded_stem_name, sizeof(encoded_stem_name));
 
     char html_filepath[4096];
-    snprintf(html_filepath, sizeof(html_filepath), "%s" PATH_SEP_STR "%s_pattern_analysis.html", output_dir, stem_name);
+    snprintf(html_filepath, sizeof(html_filepath), "%s" PATH_SEP_STR "%s.html", output_dir, stem_name);
     FILE* f_html = fopen(html_filepath, "w");
     if (!f_html) {
         printf("[DEBUG] ERROR: Failed to open HTML report file '%s' for writing: %s\n", html_filepath, strerror(errno));
@@ -2517,6 +2517,23 @@ static void* export_worker_posix(void* arg) {
 }
 #endif
 
+static size_t get_common_stem_prefix_length(const GroupStemInput* stems, int num_stems) {
+    if (!stems || num_stems <= 1) return 0;
+    const char* first = stems[0].stem_name;
+    if (!first) return 0;
+    size_t prefix_len = 0;
+    while (first[prefix_len] != '\0') {
+        char c = first[prefix_len];
+        for (int i = 1; i < num_stems; i++) {
+            if (!stems[i].stem_name || stems[i].stem_name[prefix_len] != c) {
+                return prefix_len;
+            }
+        }
+        prefix_len++;
+    }
+    return prefix_len;
+}
+
 int export_group_assets_and_html(
     const GroupStemInput* stems,
     int num_stems,
@@ -2892,9 +2909,17 @@ int export_group_assets_and_html(
     GroupMutex export_mutex;
     group_mutex_init(&export_mutex);
 
+    size_t common_prefix_len = get_common_stem_prefix_length(stems, num_stems);
+    GroupStemInput* trimmed_stems = (GroupStemInput*)calloc(num_stems, sizeof(GroupStemInput));
+
     for (int i = 0; i < num_stems; i++) {
+        trimmed_stems[i] = stems[i];
+        if (common_prefix_len > 0 && stems[i].stem_name && strlen(stems[i].stem_name) > common_prefix_len) {
+            trimmed_stems[i].stem_name = stems[i].stem_name + common_prefix_len;
+        }
+
         export_tasks[i].stem_idx = i;
-        export_tasks[i].stem = &stems[i];
+        export_tasks[i].stem = &trimmed_stems[i];
         export_tasks[i].parent_dir = parent_dir;
         export_tasks[i].pass2_win_ms = pass2_win_ms;
         export_tasks[i].best_bar_length_ms = best_bar_length_ms;
@@ -2942,6 +2967,7 @@ int export_group_assets_and_html(
     for (int i = 0; i < num_stems; i++) {
         analyzer_free_analysis(&res2_stems[i]);
     }
+    free(trimmed_stems);
     free(res2_stems);
     free(export_tasks);
     group_mutex_destroy(&export_mutex);
