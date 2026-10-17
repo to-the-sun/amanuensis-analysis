@@ -33,7 +33,7 @@ When executing via `ct_analyze_group.bat`, the batch script automatically checks
    - Concurrently exports `.ctbin`, `snapshots.bin`, `snapshots.js`, `manifest.json`, `report_data.json/js`, and `<stem>.html` for all stems (omitting common stem name prefixes from created stem output directories to keep path lengths short).
    - Slices isolated loop WAVs (`[loops]/pattern_N.wav`) and pass-aligned stem WAVs (`[stems]/pattern_N.wav`) directly using `dr_wav` in parallel across worker threads.
 5. **Combined Group Mix & Report**:
-   - Checks if an original audio file was specified via `--original <path>` or if `original.wav` / `glued.wav` exists in the parent directory. If found, it decodes and uses that original audio file for `group_<name>.wav` and group report analysis. If no original audio file is found or provided, it sums and normalizes mono stem audio into `group_<name>.wav` and exports the interactive group-level HTML report (`group_<name>_pattern_analysis.html`).
+   - Requires an original audio file specified via `--original <path>` or `original.wav` / `glued.wav` in the parent directory. It decodes and uses this original audio file for `group_<name>.wav` and group report analysis (`group_<name>_pattern_analysis.html`). Stem audio reconstruction is strictly avoided.
 6. **Thread Task Delegation & Fine-Grained Console Progress Indicators**:
    - Thread task delegation logging outputs real-time console messages (`[Thread X/Y] Starting task: ...`) as worker threads pick up tasks.
    - Thread-safe console progress bar rendering (`print_progress_bar`) displays fine-grained step/frame-level percentage indicators across all pipeline stages (Decoding, Pass 1, STFT, Pass 2, Asset Export, Group Mixing, Group Report).
