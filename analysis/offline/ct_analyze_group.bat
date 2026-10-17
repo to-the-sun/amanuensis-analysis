@@ -14,6 +14,15 @@ if exist "..\*.wav" (
     )
 )
 
+:: If not found in parent directory, check two levels up
+if not defined MATCHED_WAV (
+    if exist "..\..\*.wav" (
+        for %%F in ("..\..\*.wav") do (
+            call :check_wav "..\..\%%~nxF" "%%~nF"
+        )
+    )
+)
+
 if defined MATCHED_WAV (
     "%~dp0ct_analyze_headless.exe" --group --original "!MATCHED_WAV!" %*
 ) else (
