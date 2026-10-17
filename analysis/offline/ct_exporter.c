@@ -536,7 +536,8 @@ static int export_single_stem_assets_from_res(
     const double* contour_evo,
     int evo_frames,
     int evo_pts,
-    const FullAnalysisResult* res2
+    const FullAnalysisResult* res2,
+    int export_pattern_wavs
 ) {
     printf("[DEBUG] export_single_stem_assets_from_res starting for stem '%s'\n", stem_name ? stem_name : "(null)");
     printf("[DEBUG]   Target Output Dir: %s\n", output_dir ? output_dir : "(null)");
@@ -657,106 +658,108 @@ static int export_single_stem_assets_from_res(
         }
     }
 
-    // Ensure [loops] and [stems] subdirectories exist inside output_dir
-    char loops_dir[4096];
-    snprintf(loops_dir, sizeof(loops_dir), "%s" PATH_SEP_STR "[loops]", output_dir);
-    int loops_dir_res = mkdir_p(loops_dir);
+    if (export_pattern_wavs) {
+        // Ensure [loops] and [stems] subdirectories exist inside output_dir
+        char loops_dir[4096];
+        snprintf(loops_dir, sizeof(loops_dir), "%s" PATH_SEP_STR "[loops]", output_dir);
+        int loops_dir_res = mkdir_p(loops_dir);
 
-    char stems_dir[4096];
-    snprintf(stems_dir, sizeof(stems_dir), "%s" PATH_SEP_STR "[stems]", output_dir);
-    int stems_dir_res = mkdir_p(stems_dir);
+        char stems_dir[4096];
+        snprintf(stems_dir, sizeof(stems_dir), "%s" PATH_SEP_STR "[stems]", output_dir);
+        int stems_dir_res = mkdir_p(stems_dir);
 
-    printf("[DEBUG] Subdirectory creation for stem '%s': [loops] res=%d, [stems] res=%d\n", stem_name, loops_dir_res, stems_dir_res);
-    printf("[DEBUG] Patterns identified for stem '%s': %d, num_segments=%d\n", stem_name, num_patterns, num_segments);
+        printf("[DEBUG] Subdirectory creation for stem '%s': [loops] res=%d, [stems] res=%d\n", stem_name, loops_dir_res, stems_dir_res);
+        printf("[DEBUG] Patterns identified for stem '%s': %d, num_segments=%d\n", stem_name, num_patterns, num_segments);
 
-    // Parse passes text file if present
-    PassInfo passes[257];
-    int total_passes = 0;
-    parse_passes_in_dir(output_dir, passes, &total_passes);
+        // Parse passes text file if present
+        PassInfo passes[257];
+        int total_passes = 0;
+        parse_passes_in_dir(output_dir, passes, &total_passes);
 
-    // Cut & Save identified pattern WAV files directly using dr_wav
-    for (int p = 0; p < num_patterns; p++) {
-        // 1. Loopable WAV file in [loops]
-        char pat_wav_path[4096];
-        snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "[loops]" PATH_SEP_STR "pattern_%d.wav", output_dir, p + 1);
+        // Cut & Save identified pattern WAV files directly using dr_wav
+        for (int p = 0; p < num_patterns; p++) {
+            // 1. Loopable WAV file in [loops]
+            char pat_wav_path[4096];
+            snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "[loops]" PATH_SEP_STR "pattern_%d.wav", output_dir, p + 1);
 
-        uint64_t start_smp = (uint64_t)round((patterns[p].start_ms / 1000.0) * sr);
-        uint64_t end_smp = (uint64_t)round((patterns[p].end_ms / 1000.0) * sr);
-        if (start_smp >= (uint64_t)len) start_smp = len - 1;
-        if (end_smp > (uint64_t)len) end_smp = len;
-        uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+            uint64_t start_smp = (uint64_t)round((patterns[p].start_ms / 1000.0) * sr);
+            uint64_t end_smp = (uint64_t)round((patterns[p].end_ms / 1000.0) * sr);
+            if (start_smp >= (uint64_t)len) start_smp = len - 1;
+            if (end_smp > (uint64_t)len) end_smp = len;
+            uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
 
-        drwav_data_format format;
-        format.container = drwav_container_riff;
-        format.format = DR_WAVE_FORMAT_PCM;
-        format.channels = 1;
-        format.sampleRate = sr;
-        format.bitsPerSample = 16;
+            drwav_data_format format;
+            format.container = drwav_container_riff;
+            format.format = DR_WAVE_FORMAT_PCM;
+            format.channels = 1;
+            format.sampleRate = sr;
+            format.bitsPerSample = 16;
 
-        drwav wav_out;
-        if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
-            int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
-            if (pcm16) {
-                for (uint64_t i = 0; i < frame_count; i++) {
-                    float smp = y[start_smp + i];
-                    if (smp > 1.0f) smp = 1.0f;
-                    if (smp < -1.0f) smp = -1.0f;
-                    pcm16[i] = (int16_t)(smp * 32767.0f);
+            drwav wav_out;
+            if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
+                int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
+                if (pcm16) {
+                    for (uint64_t i = 0; i < frame_count; i++) {
+                        float smp = y[start_smp + i];
+                        if (smp > 1.0f) smp = 1.0f;
+                        if (smp < -1.0f) smp = -1.0f;
+                        pcm16[i] = (int16_t)(smp * 32767.0f);
+                    }
+                    drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
+                    free(pcm16);
                 }
-                drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
-                free(pcm16);
-            }
-            drwav_uninit(&wav_out);
-        }
-
-        // 2. Stems WAV file (aligned with pass loop point and arbitrary pad)
-        int assigned_pass_idx = 0;
-        for (int i = total_passes - 1; i >= 0; i--) {
-            if (patterns[p].start_ms >= passes[i].loop_point_ms) {
-                assigned_pass_idx = i;
-                break;
-            }
-        }
-
-        double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
-        double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
-        double blank_space_ms = (patterns[p].start_ms - pass_lp_ms) + pass_pad_ms;
-        if (blank_space_ms < 0.0) blank_space_ms = 0.0;
-
-        uint64_t blank_frames = (uint64_t)round((blank_space_ms / 1000.0) * sr);
-
-        char stem_wav_path[4096];
-        snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "[stems]" PATH_SEP_STR "pattern_%d.wav", output_dir, p + 1);
-
-        drwav wav_stem_out;
-        if (drwav_init_file_write(&wav_stem_out, stem_wav_path, &format, NULL)) {
-            int16_t chunk[8192];
-            memset(chunk, 0, sizeof(chunk));
-
-            // Write blank frames (silence)
-            uint64_t remaining_blank = blank_frames;
-            while (remaining_blank > 0) {
-                uint64_t write_cnt = (remaining_blank < 8192) ? remaining_blank : 8192;
-                drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
-                remaining_blank -= write_cnt;
+                drwav_uninit(&wav_out);
             }
 
-            // Write pattern audio frames
-            uint64_t remaining_audio = frame_count;
-            uint64_t curr_smp = start_smp;
-            while (remaining_audio > 0) {
-                uint64_t write_cnt = (remaining_audio < 8192) ? remaining_audio : 8192;
-                for (uint64_t i = 0; i < write_cnt; i++) {
-                    float smp = y[curr_smp + i];
-                    if (smp > 1.0f) smp = 1.0f;
-                    if (smp < -1.0f) smp = -1.0f;
-                    chunk[i] = (int16_t)(smp * 32767.0f);
+            // 2. Stems WAV file (aligned with pass loop point and arbitrary pad)
+            int assigned_pass_idx = 0;
+            for (int i = total_passes - 1; i >= 0; i--) {
+                if (patterns[p].start_ms >= passes[i].loop_point_ms) {
+                    assigned_pass_idx = i;
+                    break;
                 }
-                drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
-                curr_smp += write_cnt;
-                remaining_audio -= write_cnt;
             }
-            drwav_uninit(&wav_stem_out);
+
+            double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
+            double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
+            double blank_space_ms = (patterns[p].start_ms - pass_lp_ms) + pass_pad_ms;
+            if (blank_space_ms < 0.0) blank_space_ms = 0.0;
+
+            uint64_t blank_frames = (uint64_t)round((blank_space_ms / 1000.0) * sr);
+
+            char stem_wav_path[4096];
+            snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "[stems]" PATH_SEP_STR "pattern_%d.wav", output_dir, p + 1);
+
+            drwav wav_stem_out;
+            if (drwav_init_file_write(&wav_stem_out, stem_wav_path, &format, NULL)) {
+                int16_t chunk[8192];
+                memset(chunk, 0, sizeof(chunk));
+
+                // Write blank frames (silence)
+                uint64_t remaining_blank = blank_frames;
+                while (remaining_blank > 0) {
+                    uint64_t write_cnt = (remaining_blank < 8192) ? remaining_blank : 8192;
+                    drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                    remaining_blank -= write_cnt;
+                }
+
+                // Write pattern audio frames
+                uint64_t remaining_audio = frame_count;
+                uint64_t curr_smp = start_smp;
+                while (remaining_audio > 0) {
+                    uint64_t write_cnt = (remaining_audio < 8192) ? remaining_audio : 8192;
+                    for (uint64_t i = 0; i < write_cnt; i++) {
+                        float smp = y[curr_smp + i];
+                        if (smp > 1.0f) smp = 1.0f;
+                        if (smp < -1.0f) smp = -1.0f;
+                        chunk[i] = (int16_t)(smp * 32767.0f);
+                    }
+                    drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                    curr_smp += write_cnt;
+                    remaining_audio -= write_cnt;
+                }
+                drwav_uninit(&wav_stem_out);
+            }
         }
     }
 
@@ -1915,7 +1918,8 @@ static int export_all_assets_and_html_internal(
         contour_evo,
         CONTOUR_EVO_FRAMES,
         CONTOUR_EVO_PTS,
-        &res2
+        &res2,
+        1
     );
 
     if (accumulated_contour) free(accumulated_contour);
@@ -2473,7 +2477,8 @@ static void process_single_stem_export(
         contour_evo,
         evo_frames,
         evo_pts,
-        res2_stem
+        res2_stem,
+        0
     );
 }
 
@@ -2902,7 +2907,7 @@ int export_group_assets_and_html(
     group_mutex_destroy(&group_shared_mutex);
 
     // 4. Export individual stem assets & HTML using res2_stems results
-    print_progress_bar(0, num_stems, "Exporting Stem Assets & Slicing Pattern WAVs");
+    print_progress_bar(0, num_stems, "Exporting Stem Assets");
 
     GroupExportTask* export_tasks = (GroupExportTask*)calloc(num_stems, sizeof(GroupExportTask));
     volatile int export_counter = 0;
@@ -3100,7 +3105,8 @@ int export_group_assets_and_html(
                 contour_evo,
                 CONTOUR_EVO_FRAMES,
                 CONTOUR_EVO_PTS,
-                &res2_group
+                &res2_group,
+                1
             );
             analyzer_free_analysis(&res2_group);
         }

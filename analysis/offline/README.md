@@ -29,11 +29,12 @@ When executing via `ct_analyze_group.bat`, the batch script automatically checks
    - Dispatches STFT spectral flux envelope calculation for all stems in parallel across CPU worker threads and OpenCL GPU compute queues (`gpu_stft_process`).
 3. **Thread-Safe Lockstep Chunk Processing**:
    - Pass 1 and Pass 2 time-step chunk loops execute concurrently across stems, with thread synchronization (`GroupMutex`: `CRITICAL_SECTION` / `pthread_mutex_t`) protecting shared accumulated transience updates (`SharedTransientBuffer`).
-4. **Parallel Per-Stem Asset Export & WAV Slicing**:
+4. **Parallel Per-Stem Asset Export**:
    - Concurrently exports `.ctbin`, `snapshots.bin`, `snapshots.js`, `manifest.json`, `report_data.json/js`, and `<stem>.html` for all stems (omitting common stem name prefixes from created stem output directories to keep path lengths short).
-   - Slices isolated loop WAVs (`[loops]/pattern_N.wav`) and pass-aligned stem WAVs (`[stems]/pattern_N.wav`) directly using `dr_wav` in parallel across worker threads.
+   - Pattern WAV slicing (`[loops]` and `[stems]` subdirectories) is omitted for individual analyzed files in group mode.
 5. **Combined Group Mix & Report**:
    - Requires an original audio file specified via `--original <path>` or `original.wav` / `glued.wav` in the parent directory. It decodes and uses this original audio file for `group_<name>.wav` and group report analysis (`group_<name>_pattern_analysis.html`). Stem audio reconstruction is strictly avoided.
+   - Slices isolated loop WAVs (`[loops]/pattern_N.wav`) and pass-aligned stem WAVs (`[stems]/pattern_N.wav`) for the combined group in the main `[palettes]` directory.
 6. **Thread Task Delegation & Fine-Grained Console Progress Indicators**:
    - Thread task delegation logging outputs real-time console messages (`[Thread X/Y] Starting task: ...`) as worker threads pick up tasks.
    - Thread-safe console progress bar rendering (`print_progress_bar`) displays fine-grained step/frame-level percentage indicators across all pipeline stages (Decoding, Pass 1, STFT, Pass 2, Asset Export, Group Mixing, Group Report).
