@@ -1742,6 +1742,12 @@ int process_audio(const char *input_path) {
         }
         free(stem_buf);
 
+        // Preserve raw ungated pitch stem audio BEFORE noise gating
+        double *raw_pitch_stem_data = (double*)malloc(total_channel_samples * sizeof(double));
+        if (raw_pitch_stem_data) {
+            memcpy(raw_pitch_stem_data, unpadded_data, total_channel_samples * sizeof(double));
+        }
+
         // Apply noise gate
         apply_noise_gate(unpadded_data, total_samples, num_channels, sample_rate, noise_floor_threshold);
 
@@ -1788,16 +1794,14 @@ int process_audio(const char *input_path) {
             stem->rms = rms;
             stem->active_ms = active_ms;
             stem->audio_data = unpadded_data;
-            stem->raw_audio_data = (double*)malloc(total_channel_samples * sizeof(double));
-            if (stem->raw_audio_data) {
-                memcpy(stem->raw_audio_data, unpadded_data, total_channel_samples * sizeof(double));
-            }
+            stem->raw_audio_data = raw_pitch_stem_data;
             stem->injection_envelope = (double*)calloc(total_samples, sizeof(double));
             stem->flux_data = (double*)malloc(total_channel_samples * sizeof(double));
             snprintf(stem->filename, sizeof(stem->filename), "%s_pitch_%03d_%s.wav", basename, p, stem->note_name);
-            compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
+            compute_stem_transience_flux(raw_pitch_stem_data ? raw_pitch_stem_data : unpadded_data, total_samples, num_channels, sample_rate, stem->flux_data, 0);
         } else {
             free(unpadded_data);
+            if (raw_pitch_stem_data) free(raw_pitch_stem_data);
         }
     }
 
@@ -1920,22 +1924,10 @@ int process_audio(const char *input_path) {
                 }
 
                 // Export gated flux WAV file after noise gating
-                if (stem->flux_data) {
+                if (stem->audio_data) {
                     double *gated_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
                     if (gated_flux_buf) {
-                        memcpy(gated_flux_buf, stem->flux_data, total_channel_samples * sizeof(double));
-                        double peak_f = 0.0;
-                        for (size_t k = 0; k < total_channel_samples; k++) {
-                            if (gated_flux_buf[k] > peak_f) {
-                                peak_f = gated_flux_buf[k];
-                            }
-                        }
-                        if (peak_f > 1e-12) {
-                            double scale = 1.0 / peak_f;
-                            for (size_t k = 0; k < total_channel_samples; k++) {
-                                gated_flux_buf[k] *= scale;
-                            }
-                        }
+                        compute_stem_transience_flux(stem->audio_data, total_samples, num_channels, sample_rate, gated_flux_buf, 1);
                         char gated_flux_filepath[4096];
                         snprintf(gated_flux_filepath, sizeof(gated_flux_filepath), "%s/%s_pitch_%03d_%s_gated_flux.wav",
                                  stem_dir, basename, p, stem->note_name);
