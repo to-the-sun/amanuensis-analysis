@@ -1673,9 +1673,13 @@ int process_audio(const char *input_path) {
     char dir[1024], basename[512];
     get_filepath_components(input_path, dir, basename, sizeof(basename));
 
-    char stem_dir[2048];
+    char stem_dir[4096];
     snprintf(stem_dir, sizeof(stem_dir), "%s/%s_pitch_stems", dir, basename);
     MKDIR(stem_dir);
+
+    char flux_dir[4096];
+    snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
+    MKDIR(flux_dir);
 
     printf("\nEvaluating stems against noise floor threshold (19.0%% peak / -14.4 dB, min 99 ms active frames)...\n");
     printf("Exporting audible pitch stem WAV files to: %s/\n\n", stem_dir);
@@ -1910,29 +1914,16 @@ int process_audio(const char *input_path) {
                        p, stem->note_name, midi_to_frequency(p), final_peak, final_rms, stem->active_ms, basename, p, stem->note_name);
                 exported_count++;
 
-                // Export raw flux WAV file before noise gating
+                // Export raw flux WAV file in [flux] subdirectory
                 if (stem->raw_audio_data) {
                     double *raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
                     if (raw_flux_buf) {
                         compute_stem_transience_flux(stem->raw_audio_data, total_samples, num_channels, sample_rate, raw_flux_buf, 1);
                         char raw_flux_filepath[4096];
-                        snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/%s_pitch_%03d_%s_raw_flux.wav",
+                        snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
                                  stem_dir, basename, p, stem->note_name);
                         write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
                         free(raw_flux_buf);
-                    }
-                }
-
-                // Export gated flux WAV file after noise gating
-                if (stem->audio_data) {
-                    double *gated_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
-                    if (gated_flux_buf) {
-                        compute_stem_transience_flux(stem->audio_data, total_samples, num_channels, sample_rate, gated_flux_buf, 1);
-                        char gated_flux_filepath[4096];
-                        snprintf(gated_flux_filepath, sizeof(gated_flux_filepath), "%s/%s_pitch_%03d_%s_gated_flux.wav",
-                                 stem_dir, basename, p, stem->note_name);
-                        write_wav_16bit(gated_flux_filepath, sample_rate, num_channels, total_samples, gated_flux_buf);
-                        free(gated_flux_buf);
                     }
                 }
             }
