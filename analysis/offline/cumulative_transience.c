@@ -735,7 +735,7 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
                 double pv = 0, tv = 0, lv = 0, rv = 0, prv = 0;
                 for (int k = 0; k < bpeak_counts[b]; k++) if (bpeaks[b][k] == p_idx) { pv = envs[b][p_idx]; tv = bth[b][k]; lv = bl[b][k]; rv = br[b][k]; prv = bp[b][k]; break; }
                 PeakResult pr; double time = (double)gp * self->frame_duration_ms / 1000.0;
-                if (analyzer_process_peak(self, p_idx, (int)gp, b, time, envs[b], nf, aind, tot, pv, tv, lv, rv, prv, &pr)) {
+                if (analyzer_process_peak(self, p_idx, (int)gp, b, time, sm_envs[b], nf, aind, tot, pv, tv, lv, rv, prv, &pr)) {
                     if (result_out->peak_list.num_peaks < MAX_PEAKS_PER_CHUNK) {
                         pr.p_idx = (int)gp;
                         result_out->peak_list.peaks[result_out->peak_list.num_peaks++] = pr;
