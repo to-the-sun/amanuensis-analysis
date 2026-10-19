@@ -190,6 +190,135 @@ typedef struct {
     char filename[1024];
 } AudibleStem;
 
+typedef struct {
+    int x;
+    double y;
+} PeakInfo;
+
+static int is_trough(const double *env, uint32_t n, int i) {
+    if (i <= 0 || i >= (int)n - 1) return 0;
+    if (env[i] >= env[i + 1]) return 0;
+    int j = i - 1;
+    while (j >= 0 && env[j] == env[i]) {
+        j--;
+    }
+    if (j >= 0 && env[j] > env[i]) {
+        return 1;
+    }
+    return 0;
+}
+
+static int find_trough_left(const double *env, uint32_t n, int x) {
+    for (int i = x - 1; i >= 1; i--) {
+        if (is_trough(env, n, i)) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+static int find_trough_right(const double *env, uint32_t n, int x) {
+    for (int i = x + 1; i < (int)n - 1; i++) {
+        if (is_trough(env, n, i)) {
+            return i;
+        }
+    }
+    return (int)n - 1;
+}
+
+void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
+    if (total_samples < 3) return;
+
+    PeakInfo *peaks = (PeakInfo*)malloc(total_samples * sizeof(PeakInfo));
+    if (!peaks) return;
+    int num_peaks = 0;
+
+    for (int i = 1; i < (int)total_samples - 1; i++) {
+        if (env[i] > env[i + 1]) {
+            int j = i - 1;
+            while (j >= 0 && env[j] == env[i]) {
+                j--;
+            }
+            if (j >= 0 && env[j] < env[i]) {
+                peaks[num_peaks].x = i;
+                peaks[num_peaks].y = env[i];
+                num_peaks++;
+            }
+        }
+    }
+
+    if (num_peaks == 0) {
+        free(peaks);
+        return;
+    }
+
+    for (int i = num_peaks - 1; i >= 0; i--) {
+        int x_P = peaks[i].x;
+        double y_P = env[x_P];
+
+        for (int j = i - 1; j >= 0; j--) {
+            int x_C = peaks[j].x;
+            double y_C = env[x_C];
+
+            if (j == i - 1) {
+                if (y_C > y_P) {
+                    double dx = (double)(x_P - x_C);
+                    if (dx > 0) {
+                        for (int x = x_C; x <= x_P; x++) {
+                            double alpha = (double)(x - x_C) / dx;
+                            env[x] = y_C + alpha * (y_P - y_C);
+                        }
+                    }
+                    break;
+                }
+            } else {
+                if (y_C < y_P) {
+                    double dx = (double)(x_P - x_C);
+                    if (dx <= 0) continue;
+
+                    int intermediary_peak_count = 0;
+                    int intermediary_hill_reduced = 0;
+
+                    for (int k = j + 1; k < i; k++) {
+                        int x_K = peaks[k].x;
+                        intermediary_peak_count++;
+
+                        double alpha_K = (double)(x_K - x_C) / dx;
+                        double line_y_K = y_C + alpha_K * (y_P - y_C);
+
+                        if (env[x_K] > line_y_K) {
+                            int t_L = find_trough_left(env, total_samples, x_K);
+                            int t_R = find_trough_right(env, total_samples, x_K);
+
+                            double y_TL = env[t_L];
+                            double y_TR = env[t_R];
+                            double hill_dx = (double)(t_R - t_L);
+
+                            if (hill_dx > 0) {
+                                for (int x = t_L; x <= t_R; x++) {
+                                    double hill_alpha = (double)(x - t_L) / hill_dx;
+                                    env[x] = y_TL + hill_alpha * (y_TR - y_TL);
+                                }
+                            } else {
+                                env[t_L] = y_TL;
+                            }
+                            intermediary_hill_reduced = 1;
+                        }
+                    }
+
+                    if (intermediary_hill_reduced) {
+                        continue;
+                    } else if (intermediary_peak_count > 0) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    free(peaks);
+}
+
 void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
     if (!stem_data || !flux_out || total_samples == 0 || num_channels == 0) return;
 
@@ -1923,6 +2052,27 @@ int process_audio(const char *input_path) {
                         snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
                                  stem_dir, basename, p, stem->note_name);
                         write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
+
+                        // Process modified flux envelope for each channel and write modified flux WAV file
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            double *channel_flux = (double*)malloc(total_samples * sizeof(double));
+                            if (channel_flux) {
+                                for (uint32_t s = 0; s < total_samples; s++) {
+                                    channel_flux[s] = raw_flux_buf[s * num_channels + c];
+                                }
+                                modify_flux_envelope_channel(channel_flux, total_samples);
+                                for (uint32_t s = 0; s < total_samples; s++) {
+                                    raw_flux_buf[s * num_channels + c] = channel_flux[s];
+                                }
+                                free(channel_flux);
+                            }
+                        }
+
+                        char mod_flux_filepath[4096];
+                        snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_modified_flux.wav",
+                                 stem_dir, basename, p, stem->note_name);
+                        write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
+
                         free(raw_flux_buf);
                     }
                 }
