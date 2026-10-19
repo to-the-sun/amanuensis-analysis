@@ -2697,7 +2697,7 @@ int process_audio(const char *input_path) {
                     double *raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
                     double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
                     if (raw_flux_buf && mod_flux_buf) {
-                        compute_stem_transience_flux(stem->raw_audio_data, total_samples, num_channels, sample_rate, raw_flux_buf, 1);
+                        compute_stem_transience_flux(stem->raw_audio_data, total_samples, num_channels, sample_rate, raw_flux_buf, 0);
                         char raw_flux_filepath[4096];
                         snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
                                  stem_dir, basename, p, stem->note_name);
