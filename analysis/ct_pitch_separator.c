@@ -621,23 +621,12 @@ void generate_flux_html_report(
         for (int i = 0; i < stem_count; i++) {
             const FluxStemData *fst = &flux_stems[i];
             if (pcm_i16 && fst->raw_flux) {
-                double peak_f = 0.0;
                 for (uint32_t s = 0; s < total_samples; s++) {
                     double sum_f = 0.0;
                     for (uint32_t c = 0; c < num_channels; c++) {
                         sum_f += fst->raw_flux[s * num_channels + c];
                     }
                     double val = sum_f / num_channels;
-                    if (val > peak_f) peak_f = val;
-                }
-                double scale = (peak_f > 1e-12) ? (1.0 / peak_f) : 0.0;
-
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += fst->raw_flux[s * num_channels + c];
-                    }
-                    double val = (sum_f / num_channels) * scale;
                     if (val > 1.0) val = 1.0;
                     if (val < 0.0) val = 0.0;
                     pcm_i16[s] = (int16_t)round(val * 32767.0);
@@ -655,23 +644,12 @@ void generate_flux_html_report(
         for (int i = 0; i < stem_count; i++) {
             const FluxStemData *fst = &flux_stems[i];
             if (pcm_i16 && fst->mod_flux) {
-                double peak_f = 0.0;
                 for (uint32_t s = 0; s < total_samples; s++) {
                     double sum_f = 0.0;
                     for (uint32_t c = 0; c < num_channels; c++) {
                         sum_f += fst->mod_flux[s * num_channels + c];
                     }
                     double val = sum_f / num_channels;
-                    if (val > peak_f) peak_f = val;
-                }
-                double scale = (peak_f > 1e-12) ? (1.0 / peak_f) : 0.0;
-
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += fst->mod_flux[s * num_channels + c];
-                    }
-                    double val = (sum_f / num_channels) * scale;
                     if (val > 1.0) val = 1.0;
                     if (val < 0.0) val = 0.0;
                     pcm_i16[s] = (int16_t)round(val * 32767.0);
@@ -2668,7 +2646,37 @@ int process_audio(const char *input_path) {
     // Export pitch stems
     FluxStemData *flux_stems_array = (audible_count > 0) ? (FluxStemData*)calloc(audible_count, sizeof(FluxStemData)) : NULL;
 
-    if (audible_count > 0) {
+    if (audible_count > 0 && flux_stems_array) {
+        // Step 1: Pre-calculate raw flux buffers for all audible stems and find global maximum flux peak across all stems
+        double global_max_flux_peak = 0.0;
+        for (int idx = 0; idx < audible_count; idx++) {
+            AudibleStem *stem = &audible_stems[idx];
+            if (stem->raw_audio_data) {
+                double *raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+                if (raw_flux_buf) {
+                    compute_stem_transience_flux(stem->raw_audio_data, total_samples, num_channels, sample_rate, raw_flux_buf, 0);
+                    flux_stems_array[idx].raw_flux = raw_flux_buf;
+                    for (size_t k = 0; k < total_channel_samples; k++) {
+                        if (raw_flux_buf[k] > global_max_flux_peak) {
+                            global_max_flux_peak = raw_flux_buf[k];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: Normalize all stem flux envelopes based on global_max_flux_peak across all stems
+        double flux_scale_factor = (global_max_flux_peak > 1e-12) ? (1.0 / global_max_flux_peak) : 0.0;
+        for (int idx = 0; idx < audible_count; idx++) {
+            double *raw_flux_buf = flux_stems_array[idx].raw_flux;
+            if (raw_flux_buf) {
+                for (size_t k = 0; k < total_channel_samples; k++) {
+                    raw_flux_buf[k] *= flux_scale_factor;
+                }
+            }
+        }
+
+        // Step 3: Process WAV exports, noise gating, peak/trough detection, and modified flux envelope computation
         for (int idx = 0; idx < audible_count; idx++) {
             AudibleStem *stem = &audible_stems[idx];
             int p = stem->pitch;
@@ -2692,17 +2700,16 @@ int process_audio(const char *input_path) {
                        p, stem->note_name, midi_to_frequency(p), final_peak, final_rms, stem->active_ms, basename, p, stem->note_name);
                 exported_count++;
 
-                // Export raw flux WAV file in [flux] subdirectory
-                if (stem->raw_audio_data && flux_stems_array) {
-                    double *raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
-                    double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
-                    if (raw_flux_buf && mod_flux_buf) {
-                        compute_stem_transience_flux(stem->raw_audio_data, total_samples, num_channels, sample_rate, raw_flux_buf, 0);
-                        char raw_flux_filepath[4096];
-                        snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
-                                 stem_dir, basename, p, stem->note_name);
-                        write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
+                // Export globally normalized raw flux WAV file in [flux] subdirectory
+                double *raw_flux_buf = flux_stems_array[idx].raw_flux;
+                if (raw_flux_buf) {
+                    char raw_flux_filepath[4096];
+                    snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
+                             stem_dir, basename, p, stem->note_name);
+                    write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
 
+                    double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+                    if (mod_flux_buf) {
                         memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
 
                         // Apply noise gate (threshold = 0.009) to raw_flux_buf across all channels
@@ -2748,7 +2755,6 @@ int process_audio(const char *input_path) {
                                  stem_dir, mod_flux_filename);
                         write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
 
-                        flux_stems_array[idx].raw_flux = raw_flux_buf;
                         flux_stems_array[idx].mod_flux = mod_flux_buf;
                     }
                 }
