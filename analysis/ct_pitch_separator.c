@@ -282,7 +282,9 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
                     break;
                 }
             } else {
-                if (y_C < y_P) {
+                if (y_C >= y_P) {
+                    break;
+                } else {
                     double dx = (double)(P_x - C_x);
                     if (dx <= 0) {
                         C_x = find_prev_peak(env, total_samples, C_x - 1);
