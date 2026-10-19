@@ -2647,36 +2647,18 @@ int process_audio(const char *input_path) {
     FluxStemData *flux_stems_array = (audible_count > 0) ? (FluxStemData*)calloc(audible_count, sizeof(FluxStemData)) : NULL;
 
     if (audible_count > 0 && flux_stems_array) {
-        // Step 1: Pre-calculate raw flux buffers for all audible stems and find global maximum flux peak across all stems
-        double global_max_flux_peak = 0.0;
         for (int idx = 0; idx < audible_count; idx++) {
             AudibleStem *stem = &audible_stems[idx];
             if (stem->raw_audio_data) {
                 double *raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
                 if (raw_flux_buf) {
-                    compute_stem_transience_flux(stem->raw_audio_data, total_samples, num_channels, sample_rate, raw_flux_buf, 0);
+                    compute_stem_transience_flux(stem->raw_audio_data, total_samples, num_channels, sample_rate, raw_flux_buf, 1);
                     flux_stems_array[idx].raw_flux = raw_flux_buf;
-                    for (size_t k = 0; k < total_channel_samples; k++) {
-                        if (raw_flux_buf[k] > global_max_flux_peak) {
-                            global_max_flux_peak = raw_flux_buf[k];
-                        }
-                    }
                 }
             }
         }
 
-        // Step 2: Normalize all stem flux envelopes based on global_max_flux_peak across all stems
-        double flux_scale_factor = (global_max_flux_peak > 1e-12) ? (1.0 / global_max_flux_peak) : 0.0;
-        for (int idx = 0; idx < audible_count; idx++) {
-            double *raw_flux_buf = flux_stems_array[idx].raw_flux;
-            if (raw_flux_buf) {
-                for (size_t k = 0; k < total_channel_samples; k++) {
-                    raw_flux_buf[k] *= flux_scale_factor;
-                }
-            }
-        }
-
-        // Step 3: Process WAV exports, noise gating, peak/trough detection, and modified flux envelope computation
+        // Process WAV exports, noise gating, peak/trough detection, and modified flux envelope computation
         for (int idx = 0; idx < audible_count; idx++) {
             AudibleStem *stem = &audible_stems[idx];
             int p = stem->pitch;
