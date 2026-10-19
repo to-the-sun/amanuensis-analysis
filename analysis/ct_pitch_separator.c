@@ -190,28 +190,38 @@ typedef struct {
     char filename[1024];
 } AudibleStem;
 
-typedef struct {
-    int x;
-    double y;
-} PeakInfo;
-
-static int is_trough(const double *env, uint32_t n, int i) {
-    if (i <= 0 || i >= (int)n - 1) return 0;
-    if (env[i] >= env[i + 1]) return 0;
-    int j = i - 1;
-    while (j >= 0 && env[j] == env[i]) {
-        j--;
+static int find_prev_peak(const double *env, uint32_t n, int start_x) {
+    if (start_x >= (int)n - 1) {
+        start_x = (int)n - 2;
     }
-    if (j >= 0 && env[j] > env[i]) {
-        return 1;
+    for (int i = start_x; i >= 1; i--) {
+        if (env[i] > env[i + 1]) {
+            int L = i;
+            while (L > 0 && env[L - 1] == env[i]) {
+                L--;
+            }
+            if (L > 0 && env[L - 1] < env[i]) {
+                int R = i;
+                return (L + R) / 2;
+            }
+            i = L;
+        }
     }
-    return 0;
+    return -1;
 }
 
 static int find_trough_left(const double *env, uint32_t n, int x) {
     for (int i = x - 1; i >= 1; i--) {
-        if (is_trough(env, n, i)) {
-            return i;
+        if (env[i] < env[i + 1]) {
+            int L = i;
+            while (L > 0 && env[L - 1] == env[i]) {
+                L--;
+            }
+            if (L > 0 && env[L - 1] > env[i]) {
+                int R = i;
+                return R;
+            }
+            i = L;
         }
     }
     return 0;
@@ -219,8 +229,16 @@ static int find_trough_left(const double *env, uint32_t n, int x) {
 
 static int find_trough_right(const double *env, uint32_t n, int x) {
     for (int i = x + 1; i < (int)n - 1; i++) {
-        if (is_trough(env, n, i)) {
-            return i;
+        if (env[i] < env[i - 1]) {
+            int R = i;
+            while (R < (int)n - 1 && env[R + 1] == env[i]) {
+                R++;
+            }
+            if (R < (int)n - 1 && env[R + 1] > env[i]) {
+                int L = i;
+                return L;
+            }
+            i = R;
         }
     }
     return (int)n - 1;
@@ -229,43 +247,25 @@ static int find_trough_right(const double *env, uint32_t n, int x) {
 void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     if (total_samples < 3) return;
 
-    PeakInfo *peaks = (PeakInfo*)malloc(total_samples * sizeof(PeakInfo));
-    if (!peaks) return;
-    int num_peaks = 0;
+    int curr_x = (int)total_samples - 1;
+    int P_x = find_prev_peak(env, total_samples, curr_x);
 
-    for (int i = 1; i < (int)total_samples - 1; i++) {
-        if (env[i] > env[i + 1]) {
-            int j = i - 1;
-            while (j >= 0 && env[j] == env[i]) {
-                j--;
-            }
-            if (j >= 0 && env[j] < env[i]) {
-                peaks[num_peaks].x = i;
-                peaks[num_peaks].y = env[i];
-                num_peaks++;
-            }
-        }
-    }
+    while (P_x >= 0) {
+        double y_P = env[P_x];
 
-    if (num_peaks == 0) {
-        free(peaks);
-        return;
-    }
+        int C_x = find_prev_peak(env, total_samples, P_x - 1);
+        int comp_idx = 0;
 
-    for (int i = num_peaks - 1; i >= 0; i--) {
-        int x_P = peaks[i].x;
-        double y_P = env[x_P];
+        while (C_x >= 0) {
+            comp_idx++;
+            double y_C = env[C_x];
 
-        for (int j = i - 1; j >= 0; j--) {
-            int x_C = peaks[j].x;
-            double y_C = env[x_C];
-
-            if (j == i - 1) {
+            if (comp_idx == 1) {
                 if (y_C > y_P) {
-                    double dx = (double)(x_P - x_C);
+                    double dx = (double)(P_x - C_x);
                     if (dx > 0) {
-                        for (int x = x_C; x <= x_P; x++) {
-                            double alpha = (double)(x - x_C) / dx;
+                        for (int x = C_x; x <= P_x; x++) {
+                            double alpha = (double)(x - C_x) / dx;
                             env[x] = y_C + alpha * (y_P - y_C);
                         }
                     }
@@ -273,22 +273,24 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
                 }
             } else {
                 if (y_C < y_P) {
-                    double dx = (double)(x_P - x_C);
-                    if (dx <= 0) continue;
+                    double dx = (double)(P_x - C_x);
+                    if (dx <= 0) {
+                        C_x = find_prev_peak(env, total_samples, C_x - 1);
+                        continue;
+                    }
 
                     int intermediary_peak_count = 0;
                     int intermediary_hill_reduced = 0;
 
-                    for (int k = j + 1; k < i; k++) {
-                        int x_K = peaks[k].x;
+                    int K_x = find_prev_peak(env, total_samples, P_x - 1);
+                    while (K_x > C_x) {
                         intermediary_peak_count++;
-
-                        double alpha_K = (double)(x_K - x_C) / dx;
+                        double alpha_K = (double)(K_x - C_x) / dx;
                         double line_y_K = y_C + alpha_K * (y_P - y_C);
 
-                        if (env[x_K] > line_y_K) {
-                            int t_L = find_trough_left(env, total_samples, x_K);
-                            int t_R = find_trough_right(env, total_samples, x_K);
+                        if (env[K_x] > line_y_K) {
+                            int t_L = find_trough_left(env, total_samples, K_x);
+                            int t_R = find_trough_right(env, total_samples, K_x);
 
                             double y_TL = env[t_L];
                             double y_TR = env[t_R];
@@ -304,19 +306,24 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
                             }
                             intermediary_hill_reduced = 1;
                         }
+                        K_x = find_prev_peak(env, total_samples, K_x - 1);
                     }
 
                     if (intermediary_hill_reduced) {
+                        C_x = find_prev_peak(env, total_samples, C_x - 1);
                         continue;
                     } else if (intermediary_peak_count > 0) {
                         break;
                     }
                 }
             }
-        }
-    }
 
-    free(peaks);
+            C_x = find_prev_peak(env, total_samples, C_x - 1);
+        }
+
+        curr_x = P_x - 1;
+        P_x = find_prev_peak(env, total_samples, curr_x);
+    }
 }
 
 void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
