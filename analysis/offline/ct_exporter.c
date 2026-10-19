@@ -2983,6 +2983,10 @@ int export_group_assets_and_html(
     int group_audio_sr = common_sr;
     char loaded_orig_path[4096] = "";
 
+    printf("[DEBUG] Searching for original audio file...\n");
+    printf("[DEBUG] Input original_audio_filepath: '%s'\n", original_audio_filepath ? original_audio_filepath : "(null)");
+    printf("[DEBUG] Input parent_dir: '%s'\n", parent_dir ? parent_dir : "(null)");
+
     // Candidate search list for original audio file
     const char* cand_paths[3] = { NULL, NULL, NULL };
     int num_cands = 0;
@@ -3003,52 +3007,82 @@ int export_group_assets_and_html(
         const char* path_to_try = cand_paths[c];
         if (!path_to_try || path_to_try[0] == '\0') continue;
 
+        printf("[DEBUG] Candidate [%d/%d]: '%s'\n", c + 1, num_cands, path_to_try);
+
+        FILE* test_f = fopen(path_to_try, "rb");
+        if (!test_f) {
+            printf("[DEBUG]   -> Could not open file (fopen failed: %s)\n", strerror(errno));
+            continue;
+        }
+        fclose(test_f);
+
         unsigned int orig_ch = 0, orig_sr = 0;
         drwav_uint64 orig_frames = 0;
         float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(path_to_try, &orig_ch, &orig_sr, &orig_frames, NULL);
 
-        if (orig_pcm && orig_frames > 0 && orig_sr > 0) {
-            mono_combined = (float*)malloc(orig_frames * sizeof(float));
-            if (mono_combined) {
-                group_audio_len = (int)orig_frames;
-                group_audio_sr = (int)orig_sr;
-                strncpy(loaded_orig_path, path_to_try, sizeof(loaded_orig_path) - 1);
-
-                if (orig_ch == 1) {
-                    memcpy(mono_combined, orig_pcm, orig_frames * sizeof(float));
-                } else {
-                    for (drwav_uint64 f = 0; f < orig_frames; f++) {
-                        double sum = 0.0;
-                        for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
-                            sum += orig_pcm[f * orig_ch + ch_i];
-                        }
-                        mono_combined[f] = (float)(sum / orig_ch);
-                    }
-                }
-                drwav_free(orig_pcm, NULL);
-
-                float max_abs_val = 0.0f;
-                for (int s = 0; s < group_audio_len; s++) {
-                    float abs_smp = fabsf(mono_combined[s]);
-                    if (abs_smp > max_abs_val) max_abs_val = abs_smp;
-                }
-
-                if (max_abs_val > 0.0f) {
-                    float norm_factor = 1.0f / max_abs_val;
-                    for (int s = 0; s < group_audio_len; s++) {
-                        mono_combined[s] *= norm_factor;
-                    }
-                }
-
-                printf("\nUsing original audio file for group report: %s\n", loaded_orig_path);
-                break;
-            }
-            drwav_free(orig_pcm, NULL);
+        if (!orig_pcm) {
+            printf("[DEBUG]   -> File exists but drwav failed to decode audio frames.\n");
+            continue;
         }
+
+        if (orig_frames == 0 || orig_sr == 0) {
+            printf("[DEBUG]   -> drwav decoded 0 frames or invalid sample rate (frames=%llu, sr=%u, ch=%u).\n",
+                   (unsigned long long)orig_frames, orig_sr, orig_ch);
+            drwav_free(orig_pcm, NULL);
+            continue;
+        }
+
+        mono_combined = (float*)malloc(orig_frames * sizeof(float));
+        if (!mono_combined) {
+            printf("[DEBUG]   -> Memory allocation failed for mono audio buffer (%llu frames).\n", (unsigned long long)orig_frames);
+            drwav_free(orig_pcm, NULL);
+            continue;
+        }
+
+        group_audio_len = (int)orig_frames;
+        group_audio_sr = (int)orig_sr;
+        strncpy(loaded_orig_path, path_to_try, sizeof(loaded_orig_path) - 1);
+
+        if (orig_ch == 1) {
+            memcpy(mono_combined, orig_pcm, orig_frames * sizeof(float));
+        } else {
+            for (drwav_uint64 f = 0; f < orig_frames; f++) {
+                double sum = 0.0;
+                for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
+                    sum += orig_pcm[f * orig_ch + ch_i];
+                }
+                mono_combined[f] = (float)(sum / orig_ch);
+            }
+        }
+        drwav_free(orig_pcm, NULL);
+
+        float max_abs_val = 0.0f;
+        for (int s = 0; s < group_audio_len; s++) {
+            float abs_smp = fabsf(mono_combined[s]);
+            if (abs_smp > max_abs_val) max_abs_val = abs_smp;
+        }
+
+        if (max_abs_val > 0.0f) {
+            float norm_factor = 1.0f / max_abs_val;
+            for (int s = 0; s < group_audio_len; s++) {
+                mono_combined[s] *= norm_factor;
+            }
+        }
+
+        printf("[DEBUG]   -> Successfully loaded original audio (%d frames, %d Hz, %d ch)\n",
+               group_audio_len, group_audio_sr, orig_ch);
+        printf("\nUsing original audio file for group report: %s\n", loaded_orig_path);
+        break;
     }
 
     if (!mono_combined) {
         printf("\nError: Original audio file was not provided or could not be loaded for group report analysis.\n");
+        printf("[DEBUG] Summary of attempted candidate paths:\n");
+        for (int c = 0; c < num_cands; c++) {
+            if (cand_paths[c]) {
+                printf("[DEBUG]   Candidate %d: '%s'\n", c + 1, cand_paths[c]);
+            }
+        }
         if (accumulated_contour) free(accumulated_contour);
         if (contour_evo) free(contour_evo);
         return 0;
