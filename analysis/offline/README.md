@@ -32,7 +32,7 @@ When executing via `ct_analyze_group.bat`, the batch script automatically checks
 4. **Parallel Per-Stem Asset Export**:
    - Concurrently exports `.ctbin`, `snapshots.bin`, `snapshots.js`, `manifest.json`, `report_data.json/js`, and `<stem>.html` for all stems (omitting common stem name prefixes from created stem output directories to keep path lengths short).
    - Slicing of isolated loop WAVs (`[loops]/pattern_N.wav`) and pass-aligned stem WAVs (`[stems]/pattern_N.wav`) is omitted for individual analyzed stem directories in group mode, and generated exclusively for the main group output in the root `[palettes]` directory.
-   - Companion raw flux WAV files (`<basename>_pitch_<03d>_<note_name>_flux.wav`) and modified flux WAV files (`<basename>_pitch_<03d>_<note_name>_modified_flux.wav`) are exported to the `[flux]` subdirectory along with an interactive report (`[flux]/index.html`) displaying peak (top) and trough (bottom) hash marks.
+   - Companion raw flux WAV files (`<basename>_pitch_<03d>_<note_name>_flux.wav`) and modified flux WAV files (`<basename>_pitch_<03d>_<note_name>_modified_flux.wav`) are exported to the `[flux]` subdirectory (applying a 0.009 noise gate) along with an interactive report (`[flux]/index.html`) displaying peak (top) and trough (bottom) hash marks.
 5. **Combined Group Mix & Report**:
    - Requires an original audio file specified via `--original <path>` or `original.wav` / `glued.wav` in the parent directory. It decodes and uses this original audio file for `group_<name>.wav` and group report analysis (`group_<name>_pattern_analysis.html`). Stem audio reconstruction is strictly avoided.
 6. **Thread Task Delegation & Fine-Grained Console Progress Indicators**:
