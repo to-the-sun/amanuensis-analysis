@@ -448,7 +448,14 @@ static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int
     while (p >= 0) {
         if (count >= capacity) {
             capacity *= 2;
-            arr = (int*)realloc(arr, capacity * sizeof(int));
+            int *new_arr = (int*)realloc(arr, capacity * sizeof(int));
+            if (!new_arr) {
+                free(arr);
+                *out_peaks = NULL;
+                *out_count = 0;
+                return;
+            }
+            arr = new_arr;
         }
         arr[count++] = p;
         curr_x = p - 1;
@@ -579,7 +586,7 @@ void generate_flux_html_report(
         fprintf(f, "        <span>Peaks: %d</span>\n", st->num_peaks);
         fprintf(f, "        <span>Troughs: %d</span>\n", st->num_troughs);
         fprintf(f, "      </div>\n");
-        fprintf(f, "      <audio controls src=\"%s\" preload=\"metadata\"></audio>\n", st->mod_filename);
+        fprintf(f, "      <audio controls src=\"../%s\" preload=\"metadata\"></audio>\n", st->mod_filename);
         fprintf(f, "    </div>\n");
         fprintf(f, "    <div class=\"canvas-container\">\n");
         fprintf(f, "      <canvas id=\"canvas-%d\" data-index=\"%d\"></canvas>\n", i, i);
@@ -688,7 +695,7 @@ void generate_flux_html_report(
         fprintf(f, "    {\n");
         fprintf(f, "      pitch: %d,\n", st->pitch);
         fprintf(f, "      name: \"%s\",\n", st->note_name);
-        fprintf(f, "      file: \"%s\"\n", st->mod_filename);
+        fprintf(f, "      file: \"../%s\"\n", st->mod_filename);
         fprintf(f, "    }%s\n", (i + 1 < stem_count) ? "," : "");
     }
 
@@ -1715,7 +1722,7 @@ int process_audio(const char *input_path) {
 
         if (stem->mod_flux) {
             char mod_flux_filepath[4096];
-            snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/[flux]/%s",
+            snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
                      stem_dir, stem->mod_filename);
             write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, stem->mod_flux);
 
