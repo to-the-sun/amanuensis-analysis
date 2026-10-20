@@ -4,8 +4,7 @@
  * Perfect Reconstruction Pitch Stem Separator - Spectral Flux Focus
  *
  * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
- * applying noise gating to the flux envelope (0.009 threshold), identifying
- * peak and trough markers, generating modified flux envelopes via backward comparison,
+ * identifying peak and trough markers, generating modified flux envelopes via peak salience,
  * exporting companion _flux.wav and _modified_flux.wav files to [flux]/,
  * and producing an interactive HTML report in [flux]/index.html.
  *
@@ -240,6 +239,8 @@ static int find_trough_right(const double *env, uint32_t n, int x) {
     return (int)n - 1;
 }
 
+static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int *out_count);
+
 void apply_flux_noise_gate(double *env, uint32_t total_samples, double threshold) {
     for (uint32_t i = 0; i < total_samples; i++) {
         if (env[i] < threshold) {
@@ -251,87 +252,78 @@ void apply_flux_noise_gate(double *env, uint32_t total_samples, double threshold
 void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     if (total_samples < 3) return;
 
-    apply_flux_noise_gate(env, total_samples, 0.009);
+    int *peaks = NULL;
+    int num_peaks = 0;
+    detect_all_peaks(env, total_samples, &peaks, &num_peaks);
 
-    int curr_x = (int)total_samples - 1;
-    int P_x = find_prev_peak(env, total_samples, curr_x);
+    if (num_peaks == 0 || !peaks) {
+        if (peaks) free(peaks);
+        return;
+    }
 
-    while (P_x >= 0) {
-        double y_P = env[P_x];
+    int *salience = (int*)malloc(num_peaks * sizeof(int));
+    if (!salience) {
+        free(peaks);
+        return;
+    }
 
-        int C_x = find_prev_peak(env, total_samples, P_x - 1);
-        int comp_idx = 0;
+    int max_salience = 0;
+    for (int i = 0; i < num_peaks; i++) {
+        double h = env[peaks[i]];
 
-        while (C_x >= 0) {
-            comp_idx++;
-            double y_C = env[C_x];
-
-            if (comp_idx == 1) {
-                if (y_C > y_P) {
-                    double dx = (double)(P_x - C_x);
-                    if (dx > 0) {
-                        for (int x = C_x; x <= P_x; x++) {
-                            double alpha = (double)(x - C_x) / dx;
-                            env[x] = y_C + alpha * (y_P - y_C);
-                        }
-                    }
-                    break;
-                }
-            } else {
-                if (y_C >= y_P) {
-                    break;
-                } else {
-                    double dx = (double)(P_x - C_x);
-                    if (dx <= 0) {
-                        C_x = find_prev_peak(env, total_samples, C_x - 1);
-                        continue;
-                    }
-
-                    int intermediary_peak_count = 0;
-                    int intermediary_hill_reduced = 0;
-
-                    int K_x = find_prev_peak(env, total_samples, P_x - 1);
-                    while (K_x > C_x) {
-                        intermediary_peak_count++;
-                        double alpha_K = (double)(K_x - C_x) / dx;
-                        double line_y_K = y_C + alpha_K * (y_P - y_C);
-
-                        if (env[K_x] > line_y_K) {
-                            int t_L = find_trough_left(env, total_samples, K_x);
-                            int t_R = find_trough_right(env, total_samples, K_x);
-
-                            double y_TL = env[t_L];
-                            double y_TR = env[t_R];
-                            double hill_dx = (double)(t_R - t_L);
-
-                            if (hill_dx > 0) {
-                                for (int x = t_L; x <= t_R; x++) {
-                                    double hill_alpha = (double)(x - t_L) / hill_dx;
-                                    env[x] = y_TL + hill_alpha * (y_TR - y_TL);
-                                }
-                            } else {
-                                env[t_L] = y_TL;
-                            }
-                            intermediary_hill_reduced = 1;
-                        }
-                        K_x = find_prev_peak(env, total_samples, K_x - 1);
-                    }
-
-                    if (intermediary_hill_reduced) {
-                        C_x = find_prev_peak(env, total_samples, C_x - 1);
-                        continue;
-                    } else if (intermediary_peak_count > 0) {
-                        break;
-                    }
-                }
-            }
-
-            C_x = find_prev_peak(env, total_samples, C_x - 1);
+        int left_count = 0;
+        for (int j = i - 1; j >= 0; j--) {
+            left_count++;
+            if (env[peaks[j]] >= h) break;
         }
 
-        curr_x = P_x - 1;
-        P_x = find_prev_peak(env, total_samples, curr_x);
+        int right_count = 0;
+        for (int j = i + 1; j < num_peaks; j++) {
+            right_count++;
+            if (env[peaks[j]] >= h) break;
+        }
+
+        int s_score = left_count + right_count;
+        salience[i] = s_score;
+        if (s_score > max_salience) {
+            max_salience = s_score;
+        }
     }
+
+    double *norm_salience = (double*)malloc(num_peaks * sizeof(double));
+    if (!norm_salience) {
+        free(salience);
+        free(peaks);
+        return;
+    }
+
+    for (int i = 0; i < num_peaks; i++) {
+        if (max_salience > 0) {
+            norm_salience[i] = (double)salience[i] / (double)max_salience;
+        } else {
+            norm_salience[i] = 1.0;
+        }
+    }
+
+    double *orig_env = (double*)malloc(total_samples * sizeof(double));
+    if (orig_env) {
+        memcpy(orig_env, env, total_samples * sizeof(double));
+
+        for (int i = 0; i < num_peaks; i++) {
+            int px = peaks[i];
+            int t_L = find_trough_left(orig_env, total_samples, px);
+            int t_R = find_trough_right(orig_env, total_samples, px);
+
+            for (int x = t_L; x <= t_R; x++) {
+                env[x] = orig_env[x] * norm_salience[i];
+            }
+        }
+        free(orig_env);
+    }
+
+    free(norm_salience);
+    free(salience);
+    free(peaks);
 }
 
 void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
@@ -1659,26 +1651,15 @@ int process_audio(const char *input_path) {
         if (mod_flux_buf) {
             memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
 
-            // Apply noise gate (0.009) to a temporary buffer for peak/trough detection
-            double *gate_temp = (double*)malloc(total_channel_samples * sizeof(double));
-            if (gate_temp) {
-                memcpy(gate_temp, raw_flux_buf, total_channel_samples * sizeof(double));
-                for (size_t k = 0; k < total_channel_samples; k++) {
-                    if (gate_temp[k] < 0.009) {
-                        gate_temp[k] = 0.0;
-                    }
+            // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
+            double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
+            if (ch0_flux) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    ch0_flux[s] = raw_flux_buf[s * num_channels];
                 }
-
-                double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
-                if (ch0_flux) {
-                    for (uint32_t s = 0; s < total_samples; s++) {
-                        ch0_flux[s] = gate_temp[s * num_channels];
-                    }
-                    detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
-                    detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
-                    free(ch0_flux);
-                }
-                free(gate_temp);
+                detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
+                detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
+                free(ch0_flux);
             }
 
             // Process modified flux envelope for each channel
