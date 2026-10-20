@@ -244,18 +244,8 @@ static int find_trough_right(const double *env, uint32_t n, int x) {
     return (int)n - 1;
 }
 
-void apply_flux_noise_gate(double *env, uint32_t total_samples, double threshold) {
-    for (uint32_t i = 0; i < total_samples; i++) {
-        if (env[i] < threshold) {
-            env[i] = 0.0;
-        }
-    }
-}
-
 void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     if (total_samples < 3) return;
-
-    apply_flux_noise_gate(env, total_samples, 0.009);
 
     int curr_x = (int)total_samples - 1;
     int P_x = find_prev_peak(env, total_samples, curr_x);
@@ -2694,14 +2684,7 @@ int process_audio(const char *input_path) {
                     if (mod_flux_buf) {
                         memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
 
-                        // Apply noise gate (threshold = 0.009) to raw_flux_buf across all channels
-                        for (size_t k = 0; k < total_channel_samples; k++) {
-                            if (raw_flux_buf[k] < 0.009) {
-                                raw_flux_buf[k] = 0.0;
-                            }
-                        }
-
-                        // Detect initial peaks and troughs on channel 0 after noise gate application
+                        // Detect initial peaks and troughs on channel 0
                         double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
                         if (ch0_flux) {
                             for (uint32_t s = 0; s < total_samples; s++) {
