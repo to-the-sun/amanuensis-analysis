@@ -3047,8 +3047,40 @@ int export_group_assets_and_html(
         }
     }
 
+    if (!mono_combined && max_len > 0) {
+        printf("\nOriginal audio file not found. Reconstructing group audio by summing stems...\n");
+        mono_combined = (float*)calloc(max_len, sizeof(float));
+        if (mono_combined) {
+            group_audio_len = max_len;
+            group_audio_sr = common_sr;
+
+            for (int i = 0; i < num_stems; i++) {
+                int stem_len = stems[i].len;
+                const float* stem_data = stems[i].mono_data;
+                if (stem_data) {
+                    for (int s = 0; s < stem_len; s++) {
+                        mono_combined[s] += stem_data[s];
+                    }
+                }
+            }
+
+            float max_abs_val = 0.0f;
+            for (int s = 0; s < group_audio_len; s++) {
+                float abs_smp = fabsf(mono_combined[s]);
+                if (abs_smp > max_abs_val) max_abs_val = abs_smp;
+            }
+
+            if (max_abs_val > 0.0f) {
+                float norm_factor = 1.0f / max_abs_val;
+                for (int s = 0; s < group_audio_len; s++) {
+                    mono_combined[s] *= norm_factor;
+                }
+            }
+        }
+    }
+
     if (!mono_combined) {
-        printf("\nError: Original audio file was not provided or could not be loaded for group report analysis.\n");
+        printf("\nError: Failed to construct group audio buffer for group report analysis.\n");
         if (accumulated_contour) free(accumulated_contour);
         if (contour_evo) free(contour_evo);
         return 0;
