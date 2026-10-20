@@ -500,6 +500,7 @@ void generate_flux_html_report(
     uint32_t num_channels,
     uint32_t total_samples,
     double duration,
+    const double *orig_audio_buffer,
     const FluxStem *stems,
     int stem_count
 ) {
@@ -557,6 +558,7 @@ void generate_flux_html_report(
     fprintf(f, "    <label class=\"toggle-label\"><input type=\"checkbox\" id=\"syncZoomCheck\" checked> Sync Zoom Across Rows</label>\n");
     fprintf(f, "    <span class=\"view-info\" id=\"viewInfo\">Visible: 0.000s &ndash; %.3fs (Duration: %.3fs)</span>\n", duration, duration);
     fprintf(f, "    <div class=\"legend\">\n");
+    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: rgba(180, 190, 210, 0.45);\"></div> Original Audio Waveform</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ff5722;\"></div> Raw Spectral Flux Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #4caf50;\"></div> Modified Flux Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ffeb3b;\"></div> Detected Peaks (Top Marks)</div>\n");
@@ -599,6 +601,24 @@ void generate_flux_html_report(
         fprintf(fjs, "window.WAVEFORM_DATA = {\n");
 
         int16_t *pcm_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+
+        if (orig_audio_buffer && pcm_i16) {
+            for (uint32_t s = 0; s < total_samples; s++) {
+                double sum_f = 0.0;
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    sum_f += orig_audio_buffer[s * num_channels + c];
+                }
+                double val = sum_f / num_channels;
+                if (val > 1.0) val = 1.0;
+                if (val < -1.0) val = -1.0;
+                pcm_i16[s] = (int16_t)round(val * 32767.0);
+            }
+            char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+            fprintf(fjs, "  origPcm: \"%s\",\n", b64 ? b64 : "");
+            if (b64) free(b64);
+        } else {
+            fprintf(fjs, "  origPcm: \"\",\n");
+        }
 
         fprintf(fjs, "  rawFluxPcm: [\n");
         for (int i = 0; i < stem_count; i++) {
@@ -725,6 +745,9 @@ void generate_flux_html_report(
 
     fprintf(f, "function initAudioData() {\n");
     fprintf(f, "  if (window.WAVEFORM_DATA) {\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.origPcm) {\n");
+    fprintf(f, "      DATA.origPcm = base64ToFloat32(window.WAVEFORM_DATA.origPcm);\n");
+    fprintf(f, "    }\n");
     fprintf(f, "    if (window.WAVEFORM_DATA.rawFluxPcm) {\n");
     fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "        if (window.WAVEFORM_DATA.rawFluxPcm[i]) {\n");
@@ -823,6 +846,46 @@ void generate_flux_html_report(
     fprintf(f, "  const visibleSamples = Math.max(1, sampleEnd - sampleStart + 1);\n");
     fprintf(f, "  const stem = DATA.stems[index];\n");
 
+    fprintf(f, "  function drawOriginalWaveform(pcm) {\n");
+    fprintf(f, "    if (!pcm || pcm.length === 0) return;\n");
+    fprintf(f, "    ctx.fillStyle = 'rgba(180, 190, 210, 0.35)';\n");
+    fprintf(f, "    ctx.strokeStyle = 'rgba(180, 190, 210, 0.55)';\n");
+    fprintf(f, "    ctx.lineWidth = 1;\n");
+    fprintf(f, "    const midY = graphTop + graphHeight / 2;\n");
+    fprintf(f, "    const halfH = graphHeight / 2;\n");
+    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / DATA.sampleRate;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const val = pcm[s];\n");
+    fprintf(f, "        const y = midY - val * halfH;\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
+    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
+    fprintf(f, "          let minV = pcm[s1];\n");
+    fprintf(f, "          let maxV = pcm[s1];\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            const v = pcm[s];\n");
+    fprintf(f, "            if (v < minV) minV = v;\n");
+    fprintf(f, "            if (v > maxV) maxV = v;\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          const y1 = midY - maxV * halfH;\n");
+    fprintf(f, "          const y2 = midY - minV * halfH;\n");
+    fprintf(f, "          ctx.fillRect(px, y1, 1, Math.max(1, y2 - y1));\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n\n");
+
     fprintf(f, "  function drawFluxLine(pcm, color) {\n");
     fprintf(f, "    if (!pcm) return;\n");
     fprintf(f, "    ctx.strokeStyle = color;\n");
@@ -861,6 +924,11 @@ void generate_flux_html_report(
     fprintf(f, "      }\n");
     fprintf(f, "      ctx.stroke();\n");
     fprintf(f, "    }\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // 0. Draw Original Waveform Background\n");
+    fprintf(f, "  if (DATA.origPcm) {\n");
+    fprintf(f, "    drawOriginalWaveform(DATA.origPcm);\n");
     fprintf(f, "  }\n\n");
 
     fprintf(f, "  // 1. Draw Raw Spectral Flux Envelope\n");
@@ -1409,8 +1477,7 @@ int process_audio(const char *input_path) {
         }
     }
 
-    // Free raw input data buffer early
-    free(wav->data);
+    double *orig_audio_buffer = wav->data;
     wav->data = NULL;
 
     double window[FFT_SIZE];
@@ -1724,6 +1791,7 @@ int process_audio(const char *input_path) {
             num_channels,
             total_samples,
             audio_duration,
+            orig_audio_buffer,
             flux_stems,
             audible_count
         );
@@ -1770,6 +1838,7 @@ int process_audio(const char *input_path) {
     free(frame_pitch_active);
     free(cola_norm);
     free(pitch_bins);
+    if (orig_audio_buffer) free(orig_audio_buffer);
     free(wav);
 
     return 1;
