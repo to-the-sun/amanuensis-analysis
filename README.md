@@ -7,6 +7,8 @@ The project is organized into three primary subdirectories and root utility scri
 2. `transcription/` – Real-time Discord voice-to-text transcription (Aqua Voice API), phonetic syllabification, custom IPA weak-vowel overrides, backward vowel histogram analysis, and AI-driven poem generation (TypeSafe Jev API).
 3. `additive_synthesis/` – Interactive additive sound synthesis engine, LaTeX/Sigma notation displays, preset management, psychoacoustic analysis test suite, and generative sound creation.
 4. `analysis/pitch_separator.c` / `analysis/pitch_separator.exe` – C-based Perfect Reconstruction Pitch Stem Separator (drag-and-drop / double-click executable for Windows and Linux).
+5. `analysis/ct_pitch_separator.c` / `analysis/ct_pitch_separator.exe` – C-based Pitch Stem Separator with Cumulative Transience Marking and Non-Tonal Audio Injection.
+6. `analysis/flux_pitch_separator.c` / `analysis/flux_pitch_separator.exe` – C-based Spectral Flux Pitch Separator focusing strictly on deriving per-pitch-stem flux envelopes, modified flux envelopes, peak/trough identification, companion flux WAV exports, and interactive HTML flux reports.
 5. `tune_stems.py` – Continuous interval-relative pitch alignment for song stems.
 
 ---
@@ -32,6 +34,8 @@ make
 # Usage:
 ./analysis/pitch_separator "path/to/audio.wav"          # Linux / macOS
 analysis/pitch_separator.exe "path/to/audio.wav"        # Windows
+./analysis/flux_pitch_separator "path/to/audio.wav"     # Spectral Flux Focus (Linux / macOS)
+analysis/flux_pitch_separator.exe "path/to/audio.wav"   # Spectral Flux Focus (Windows)
 ```
 
 ---
