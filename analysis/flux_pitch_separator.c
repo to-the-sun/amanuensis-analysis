@@ -182,6 +182,9 @@ typedef struct {
     int num_peaks;
     int *troughs;
     int num_troughs;
+    int *saliences;
+    int max_salience;
+    double avg_salience;
     char mod_filename[1024];
 } FluxStem;
 
@@ -570,6 +573,8 @@ void generate_flux_html_report(
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #4caf50;\"></div> Modified Flux Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ffeb3b;\"></div> Detected Peaks (Top Marks)</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #00bcd4;\"></div> Detected Troughs (Bottom Marks)</div>\n");
+    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #e91e63;\"></div> Peak Salience Line</div>\n");
+    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"border-bottom: 2px dashed #9c27b0; height: 0; width: 14px; margin-top: 6px;\"></div> Avg Salience Level</div>\n");
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
@@ -586,6 +591,8 @@ void generate_flux_html_report(
         fprintf(f, "      <div class=\"stem-metrics\">\n");
         fprintf(f, "        <span>Peaks: %d</span>\n", st->num_peaks);
         fprintf(f, "        <span>Troughs: %d</span>\n", st->num_troughs);
+        fprintf(f, "        <span>Avg Salience: %.2f</span>\n", st->avg_salience);
+        fprintf(f, "        <span>Max Salience: %d</span>\n", st->max_salience);
         fprintf(f, "      </div>\n");
         fprintf(f, "      <audio controls src=\"../%s\" preload=\"metadata\"></audio>\n", st->mod_filename);
         fprintf(f, "    </div>\n");
@@ -693,6 +700,30 @@ void generate_flux_html_report(
             }
             fprintf(fjs, "]%s\n", (i + 1 < stem_count) ? "," : "");
         }
+        fprintf(fjs, "  ],\n");
+
+        fprintf(fjs, "  saliences: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            const FluxStem *st = &stems[i];
+            fprintf(fjs, "    [");
+            for (int k = 0; k < st->num_peaks; k++) {
+                int sal = (st->saliences) ? st->saliences[k] : 0;
+                fprintf(fjs, "%d%s", sal, (k + 1 < st->num_peaks) ? "," : "");
+            }
+            fprintf(fjs, "]%s\n", (i + 1 < stem_count) ? "," : "");
+        }
+        fprintf(fjs, "  ],\n");
+
+        fprintf(fjs, "  maxSalience: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            fprintf(fjs, "    %d%s\n", stems[i].max_salience, (i + 1 < stem_count) ? "," : "");
+        }
+        fprintf(fjs, "  ],\n");
+
+        fprintf(fjs, "  avgSalience: [\n");
+        for (int i = 0; i < stem_count; i++) {
+            fprintf(fjs, "    %.4f%s\n", stems[i].avg_salience, (i + 1 < stem_count) ? "," : "");
+        }
         fprintf(fjs, "  ]\n");
 
         if (pcm_i16) free(pcm_i16);
@@ -714,6 +745,8 @@ void generate_flux_html_report(
         fprintf(f, "    {\n");
         fprintf(f, "      pitch: %d,\n", st->pitch);
         fprintf(f, "      name: \"%s\",\n", st->note_name);
+        fprintf(f, "      maxSalience: %d,\n", st->max_salience);
+        fprintf(f, "      avgSalience: %.4f,\n", st->avg_salience);
         fprintf(f, "      file: \"../%s\"\n", st->mod_filename);
         fprintf(f, "    }%s\n", (i + 1 < stem_count) ? "," : "");
     }
@@ -777,6 +810,21 @@ void generate_flux_html_report(
     fprintf(f, "    if (window.WAVEFORM_DATA.troughs) {\n");
     fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "        DATA.stems[i].troughs = window.WAVEFORM_DATA.troughs[i] || [];\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.saliences) {\n");
+    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "        DATA.stems[i].saliences = window.WAVEFORM_DATA.saliences[i] || [];\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.maxSalience) {\n");
+    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "        DATA.stems[i].maxSalience = window.WAVEFORM_DATA.maxSalience[i] || DATA.stems[i].maxSalience || 0;\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    if (window.WAVEFORM_DATA.avgSalience) {\n");
+    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "        DATA.stems[i].avgSalience = window.WAVEFORM_DATA.avgSalience[i] || DATA.stems[i].avgSalience || 0;\n");
     fprintf(f, "      }\n");
     fprintf(f, "    }\n");
     fprintf(f, "  }\n");
@@ -942,7 +990,49 @@ void generate_flux_html_report(
     fprintf(f, "  drawFluxLine(stem.rawFluxPcm, '#ff5722');\n");
 
     fprintf(f, "  // 2. Draw Modified Flux Envelope\n");
-    fprintf(f, "  drawFluxLine(stem.modFluxPcm, '#4caf50');\n");
+    fprintf(f, "  drawFluxLine(stem.modFluxPcm, '#4caf50');\n\n");
+
+    fprintf(f, "  // 2b. Draw Average Salience Level (Dashed Horizontal Line)\n");
+    fprintf(f, "  if (stem.maxSalience > 0 && stem.avgSalience > 0) {\n");
+    fprintf(f, "    const normAvg = stem.avgSalience / stem.maxSalience;\n");
+    fprintf(f, "    const avgY = graphBottom - normAvg * graphHeight;\n");
+    fprintf(f, "    ctx.strokeStyle = '#9c27b0';\n");
+    fprintf(f, "    ctx.lineWidth = 1.5;\n");
+    fprintf(f, "    ctx.setLineDash([6, 4]);\n");
+    fprintf(f, "    ctx.beginPath(); ctx.moveTo(0, avgY); ctx.lineTo(width, avgY); ctx.stroke();\n");
+    fprintf(f, "    ctx.setLineDash([]);\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // 2c. Draw Peak Salience Line and Vertex Dots\n");
+    fprintf(f, "  if (stem.peaks && stem.saliences && stem.peaks.length > 0 && stem.maxSalience > 0) {\n");
+    fprintf(f, "    ctx.strokeStyle = '#e91e63';\n");
+    fprintf(f, "    ctx.fillStyle = '#e91e63';\n");
+    fprintf(f, "    ctx.lineWidth = 1.5;\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    let started = false;\n");
+    fprintf(f, "    for (let k = 0; k < stem.peaks.length; k++) {\n");
+    fprintf(f, "      const s = stem.peaks[k];\n");
+    fprintf(f, "      const t = s / DATA.sampleRate;\n");
+    fprintf(f, "      const x = timeToX(t, width);\n");
+    fprintf(f, "      const sal = stem.saliences[k] || 0;\n");
+    fprintf(f, "      const normSal = sal / stem.maxSalience;\n");
+    fprintf(f, "      const y = graphBottom - normSal * graphHeight;\n");
+    fprintf(f, "      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n\n");
+
+    fprintf(f, "    for (let k = 0; k < stem.peaks.length; k++) {\n");
+    fprintf(f, "      const s = stem.peaks[k];\n");
+    fprintf(f, "      if (s >= sampleStart && s <= sampleEnd) {\n");
+    fprintf(f, "        const t = s / DATA.sampleRate;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const sal = stem.saliences[k] || 0;\n");
+    fprintf(f, "        const normSal = sal / stem.maxSalience;\n");
+    fprintf(f, "        const y = graphBottom - normSal * graphHeight;\n");
+    fprintf(f, "        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n");
 
     fprintf(f, "  // 3. Draw Peak Hash Marks (coming down from top)\n");
     fprintf(f, "  if (stem.peaks) {\n");
@@ -1047,8 +1137,23 @@ void generate_flux_html_report(
     fprintf(f, "      const s = Math.min(DATA.totalSamples - 1, Math.max(0, Math.round(t * DATA.sampleRate)));\n");
     fprintf(f, "      const rawVal = (stem.rawFluxPcm && stem.rawFluxPcm.length > s) ? stem.rawFluxPcm[s] : 0;\n");
     fprintf(f, "      const modVal = (stem.modFluxPcm && stem.modFluxPcm.length > s) ? stem.modFluxPcm[s] : 0;\n");
+    fprintf(f, "      let salStr = '';\n");
+    fprintf(f, "      if (stem.peaks && stem.saliences && stem.peaks.length > 0) {\n");
+    fprintf(f, "        let closestDist = Infinity;\n");
+    fprintf(f, "        let closestSal = 0;\n");
+    fprintf(f, "        for (let k = 0; k < stem.peaks.length; k++) {\n");
+    fprintf(f, "          const dist = Math.abs(stem.peaks[k] - s);\n");
+    fprintf(f, "          if (dist < closestDist) {\n");
+    fprintf(f, "            closestDist = dist;\n");
+    fprintf(f, "            closestSal = stem.saliences[k];\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "        if (closestDist < DATA.sampleRate * 0.1) {\n");
+    fprintf(f, "          salStr = ` | Peak Salience: ${closestSal}`;\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
     fprintf(f, "      tooltip.style.opacity = '1';\n");
-    fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Raw Flux: ${rawVal.toFixed(4)} | Modified Flux: ${modVal.toFixed(4)}`;\n");
+    fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Raw Flux: ${rawVal.toFixed(4)} | Modified Flux: ${modVal.toFixed(4)}${salStr} | Avg Salience: ${(stem.avgSalience || 0).toFixed(2)}`;\n");
     fprintf(f, "    });\n");
 
     fprintf(f, "    canvas.addEventListener('mouseleave', () => {\n");
@@ -1725,7 +1830,7 @@ int process_audio(const char *input_path) {
         if (mod_flux_buf) {
             memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
 
-            // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
+            // Detect peaks, troughs, and peak saliences on channel 0 raw flux envelope for report visualization
             double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
             if (ch0_flux) {
                 for (uint32_t s = 0; s < total_samples; s++) {
@@ -1733,6 +1838,35 @@ int process_audio(const char *input_path) {
                 }
                 detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
                 detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
+
+                if (stem->num_peaks > 0 && stem->peaks) {
+                    size_t n_p = (size_t)stem->num_peaks;
+                    stem->saliences = (int*)malloc(n_p * sizeof(int));
+                    if (stem->saliences) {
+                        int max_s = 0;
+                        double sum_s = 0.0;
+                        for (int i = 0; i < stem->num_peaks; i++) {
+                            double h = ch0_flux[stem->peaks[i]];
+                            int left_count = 0;
+                            for (int j = i - 1; j >= 0; j--) {
+                                left_count++;
+                                if (ch0_flux[stem->peaks[j]] >= h) break;
+                            }
+                            int right_count = 0;
+                            for (int j = i + 1; j < stem->num_peaks; j++) {
+                                right_count++;
+                                if (ch0_flux[stem->peaks[j]] >= h) break;
+                            }
+                            int s_score = left_count + right_count;
+                            stem->saliences[i] = s_score;
+                            sum_s += (double)s_score;
+                            if (s_score > max_s) max_s = s_score;
+                        }
+                        stem->max_salience = max_s;
+                        stem->avg_salience = sum_s / (double)stem->num_peaks;
+                    }
+                }
+
                 free(ch0_flux);
             }
 
@@ -1821,6 +1955,7 @@ int process_audio(const char *input_path) {
             if (flux_stems[idx].mod_flux) free(flux_stems[idx].mod_flux);
             if (flux_stems[idx].peaks) free(flux_stems[idx].peaks);
             if (flux_stems[idx].troughs) free(flux_stems[idx].troughs);
+            if (flux_stems[idx].saliences) free(flux_stems[idx].saliences);
         }
         free(flux_stems);
     }
