@@ -256,18 +256,20 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     int num_peaks = 0;
     detect_all_peaks(env, total_samples, &peaks, &num_peaks);
 
-    if (num_peaks == 0 || !peaks) {
+    if (num_peaks <= 0 || !peaks) {
         if (peaks) free(peaks);
         return;
     }
 
-    int *salience = (int*)malloc(num_peaks * sizeof(int));
+    size_t n_peaks = (size_t)num_peaks;
+    int *salience = (int*)malloc(n_peaks * sizeof(int));
     if (!salience) {
         free(peaks);
         return;
     }
 
     int max_salience = 0;
+    double sum_salience = 0.0;
     for (int i = 0; i < num_peaks; i++) {
         double h = env[peaks[i]];
 
@@ -285,12 +287,15 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
 
         int s_score = left_count + right_count;
         salience[i] = s_score;
+        sum_salience += (double)s_score;
         if (s_score > max_salience) {
             max_salience = s_score;
         }
     }
 
-    double *norm_salience = (double*)malloc(num_peaks * sizeof(double));
+    double avg_salience = sum_salience / (double)num_peaks;
+
+    double *norm_salience = (double*)malloc(n_peaks * sizeof(double));
     if (!norm_salience) {
         free(salience);
         free(peaks);
@@ -310,12 +315,14 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
         memcpy(orig_env, env, total_samples * sizeof(double));
 
         for (int i = 0; i < num_peaks; i++) {
-            int px = peaks[i];
-            int t_L = find_trough_left(orig_env, total_samples, px);
-            int t_R = find_trough_right(orig_env, total_samples, px);
+            if ((double)salience[i] < avg_salience) {
+                int px = peaks[i];
+                int t_L = find_trough_left(orig_env, total_samples, px);
+                int t_R = find_trough_right(orig_env, total_samples, px);
 
-            for (int x = t_L; x <= t_R; x++) {
-                env[x] = orig_env[x] * norm_salience[i];
+                for (int x = t_L; x <= t_R; x++) {
+                    env[x] = orig_env[x] * norm_salience[i];
+                }
             }
         }
         free(orig_env);
