@@ -288,7 +288,7 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
             if (env[peaks[j]] >= h) break;
         }
 
-        int s_score = left_count + right_count;
+        int s_score = (left_count < right_count) ? left_count : right_count;
         salience[i] = s_score;
         sum_salience += (double)s_score;
         if (s_score > max_salience) {
@@ -1857,7 +1857,7 @@ int process_audio(const char *input_path) {
                                 right_count++;
                                 if (ch0_flux[stem->peaks[j]] >= h) break;
                             }
-                            int s_score = left_count + right_count;
+                            int s_score = (left_count < right_count) ? left_count : right_count;
                             stem->saliences[i] = s_score;
                             sum_s += (double)s_score;
                             if (s_score > max_s) max_s = s_score;
