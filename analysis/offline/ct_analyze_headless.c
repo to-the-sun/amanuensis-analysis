@@ -175,14 +175,17 @@ static void scan_and_copy_passes_files_from_dir(const char* dir_path, const char
 }
 
 static void copy_matching_passes_text_files(const char* dir_path, const char* stem_name, const char* output_dir) {
-    if (!istarts_with(stem_name, "palette")) {
-        return;
-    }
-
-    const char* rest_of_stem = stem_name + 7;
     char target_passes_stem[1024];
-    snprintf(target_passes_stem, sizeof(target_passes_stem), "passes%s", rest_of_stem);
-    size_t target_len = strlen(target_passes_stem);
+    size_t target_len = 0;
+
+    if (istarts_with(stem_name, "palette")) {
+        const char* rest_of_stem = stem_name + 7;
+        snprintf(target_passes_stem, sizeof(target_passes_stem), "passes%s", rest_of_stem);
+        target_len = strlen(target_passes_stem);
+    } else {
+        strcpy(target_passes_stem, "passes");
+        target_len = 6;
+    }
 
     scan_and_copy_passes_files_from_dir(dir_path, target_passes_stem, target_len, output_dir);
 }
