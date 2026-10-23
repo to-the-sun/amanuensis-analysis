@@ -540,7 +540,10 @@ static int export_single_stem_assets_from_res(
     int export_pattern_wavs,
     const float* source_audio,
     int source_len,
-    int source_sr
+    int source_sr,
+    const char* custom_loops_dir,
+    const char* custom_stems_dir,
+    const char* pattern_filename_prefix
 ) {
     printf("[DEBUG] export_single_stem_assets_from_res starting for stem '%s'\n", stem_name ? stem_name : "(null)");
     printf("[DEBUG]   Target Output Dir: %s\n", output_dir ? output_dir : "(null)");
@@ -667,13 +670,21 @@ static int export_single_stem_assets_from_res(
         int pat_len = (source_audio && source_len > 0 && source_sr > 0) ? source_len : len;
         int pat_sr = (source_audio && source_len > 0 && source_sr > 0) ? source_sr : sr;
 
-        // Ensure [loops] and [stems] subdirectories exist inside output_dir
+        // Determine target loops and stems directories
         char loops_dir[4096];
-        snprintf(loops_dir, sizeof(loops_dir), "%s" PATH_SEP_STR "[loops]", output_dir);
+        if (custom_loops_dir && custom_loops_dir[0] != '\0') {
+            snprintf(loops_dir, sizeof(loops_dir), "%s", custom_loops_dir);
+        } else {
+            snprintf(loops_dir, sizeof(loops_dir), "%s" PATH_SEP_STR "[loops]", output_dir);
+        }
         int loops_dir_res = mkdir_p(loops_dir);
 
         char stems_dir[4096];
-        snprintf(stems_dir, sizeof(stems_dir), "%s" PATH_SEP_STR "[stems]", output_dir);
+        if (custom_stems_dir && custom_stems_dir[0] != '\0') {
+            snprintf(stems_dir, sizeof(stems_dir), "%s", custom_stems_dir);
+        } else {
+            snprintf(stems_dir, sizeof(stems_dir), "%s" PATH_SEP_STR "[stems]", output_dir);
+        }
         int stems_dir_res = mkdir_p(stems_dir);
 
         printf("[DEBUG] Subdirectory creation for stem '%s': [loops] res=%d, [stems] res=%d\n", stem_name, loops_dir_res, stems_dir_res);
@@ -684,11 +695,13 @@ static int export_single_stem_assets_from_res(
         int total_passes = 0;
         parse_passes_in_dir(output_dir, passes, &total_passes);
 
+        const char* prefix = (pattern_filename_prefix && pattern_filename_prefix[0] != '\0') ? pattern_filename_prefix : "";
+
         // Cut & Save identified pattern WAV files directly using dr_wav
         for (int p = 0; p < num_patterns; p++) {
             // 1. Loopable WAV file in [loops]
             char pat_wav_path[4096];
-            snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "[loops]" PATH_SEP_STR "pattern_%d.wav", output_dir, p + 1);
+            snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", loops_dir, prefix, p + 1);
 
             uint64_t start_smp = (uint64_t)round((patterns[p].start_ms / 1000.0) * pat_sr);
             uint64_t end_smp = (uint64_t)round((patterns[p].end_ms / 1000.0) * pat_sr);
@@ -736,7 +749,7 @@ static int export_single_stem_assets_from_res(
             uint64_t blank_frames = (uint64_t)round((blank_space_ms / 1000.0) * pat_sr);
 
             char stem_wav_path[4096];
-            snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "[stems]" PATH_SEP_STR "pattern_%d.wav", output_dir, p + 1);
+            snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", stems_dir, prefix, p + 1);
 
             drwav wav_stem_out;
             if (drwav_init_file_write(&wav_stem_out, stem_wav_path, &format, NULL)) {
@@ -1930,7 +1943,10 @@ static int export_all_assets_and_html_internal(
         1,
         NULL,
         0,
-        0
+        0,
+        NULL,
+        NULL,
+        NULL
     );
 
     if (accumulated_contour) free(accumulated_contour);
@@ -2479,6 +2495,16 @@ static void process_single_stem_export(
         }
     }
 
+    // Overall [loops] and [stems] target folders inside parent [palettes]
+    char overall_loops_dir[4096];
+    snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
+
+    char overall_stems_dir[4096];
+    snprintf(overall_stems_dir, sizeof(overall_stems_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[stems]", parent_dir);
+
+    char pattern_prefix[1024];
+    snprintf(pattern_prefix, sizeof(pattern_prefix), "%s_", stem->stem_name);
+
     // Export stem assets and HTML report directly from res2_stem result using shared group Pass 1 assets
     export_single_stem_assets_from_res(
         stem_output_dir,
@@ -2498,7 +2524,10 @@ static void process_single_stem_export(
         1,
         source_audio,
         source_len,
-        source_sr
+        source_sr,
+        overall_loops_dir,
+        overall_stems_dir,
+        pattern_prefix
     );
 }
 
@@ -2934,36 +2963,17 @@ int export_group_assets_and_html(
     int group_audio_sr = common_sr;
     char loaded_orig_path[4096] = "";
 
-    // Candidate search list for original audio file
-    const char* cand_paths[3] = { NULL, NULL, NULL };
-    int num_cands = 0;
-
     if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-        cand_paths[num_cands++] = original_audio_filepath;
-    }
-
-    char fallback_orig[4096];
-    snprintf(fallback_orig, sizeof(fallback_orig), "%s" PATH_SEP_STR "original.wav", parent_dir);
-    cand_paths[num_cands++] = fallback_orig;
-
-    char fallback_glued[4096];
-    snprintf(fallback_glued, sizeof(fallback_glued), "%s" PATH_SEP_STR "glued.wav", parent_dir);
-    cand_paths[num_cands++] = fallback_glued;
-
-    for (int c = 0; c < num_cands; c++) {
-        const char* path_to_try = cand_paths[c];
-        if (!path_to_try || path_to_try[0] == '\0') continue;
-
         unsigned int orig_ch = 0, orig_sr = 0;
         drwav_uint64 orig_frames = 0;
-        float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(path_to_try, &orig_ch, &orig_sr, &orig_frames, NULL);
+        float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(original_audio_filepath, &orig_ch, &orig_sr, &orig_frames, NULL);
 
         if (orig_pcm && orig_frames > 0 && orig_sr > 0) {
             mono_combined = (float*)malloc(orig_frames * sizeof(float));
             if (mono_combined) {
                 group_audio_len = (int)orig_frames;
                 group_audio_sr = (int)orig_sr;
-                strncpy(loaded_orig_path, path_to_try, sizeof(loaded_orig_path) - 1);
+                strncpy(loaded_orig_path, original_audio_filepath, sizeof(loaded_orig_path) - 1);
 
                 if (orig_ch == 1) {
                     memcpy(mono_combined, orig_pcm, orig_frames * sizeof(float));
@@ -2976,7 +2986,6 @@ int export_group_assets_and_html(
                         mono_combined[f] = (float)(sum / orig_ch);
                     }
                 }
-                drwav_free(orig_pcm, NULL);
 
                 float max_abs_val = 0.0f;
                 for (int s = 0; s < group_audio_len; s++) {
@@ -2992,7 +3001,6 @@ int export_group_assets_and_html(
                 }
 
                 printf("\nUsing original audio file for group analysis and stem pattern sourcing: %s\n", loaded_orig_path);
-                break;
             }
             drwav_free(orig_pcm, NULL);
         }
@@ -3166,7 +3174,10 @@ int export_group_assets_and_html(
                 0,
                 NULL,
                 0,
-                0
+                0,
+                NULL,
+                NULL,
+                NULL
             );
             analyzer_free_analysis(&res2_group);
         }
