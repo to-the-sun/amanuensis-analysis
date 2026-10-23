@@ -283,7 +283,7 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
             if (env[peaks[j]] >= h) break;
         }
 
-        int s_score = left_count + right_count;
+        int s_score = (left_count < right_count) ? left_count : right_count;
         salience[i] = s_score;
         if (s_score > max_salience) {
             max_salience = s_score;
