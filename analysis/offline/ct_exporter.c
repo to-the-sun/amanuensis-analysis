@@ -551,7 +551,15 @@ static int analyzer_batch_analyze_shared(
     ChunkAnalysisResult* res = (ChunkAnalysisResult*)malloc(sizeof(ChunkAnalysisResult));
     if (!res) { analyzer_destroy(a); free(gpu_flux); return 0; }
 
+    int total_chunks = (len + flush_samples + step - 1) / step;
+    if (total_chunks < 1) total_chunks = 1;
+    int chunk_idx = 0;
+
+    print_progress_bar(0, total_chunks, "Analyzing Group Audio");
+
     for (int last_t = 0; last_t < len + flush_samples; last_t += step) {
+        chunk_idx++;
+        print_progress_bar(chunk_idx, total_chunks, "Analyzing Group Audio");
         int act_s = last_t - (int)(sr * 0.2), win_s = act_s - (int)(sr * (window_ms / 1000.0)); if (win_s < 0) win_s = 0;
         memset(res, 0, sizeof(ChunkAnalysisResult));
         float* push_ptr = (float*)calloc(step, sizeof(float));
@@ -1200,6 +1208,10 @@ static int export_single_stem_assets_from_res(
     char html_filepath[4096];
     snprintf(html_filepath, sizeof(html_filepath), "%s" PATH_SEP_STR "%s.html", output_dir, stem_name);
     FILE* f_html = fopen(html_filepath, "w");
+    if (!f_html) {
+        printf("Error: Could not open HTML report file for writing: %s\n", html_filepath);
+        return 0;
+    }
     if (f_html) {
         fprintf(f_html, "<!DOCTYPE html>\n");
         fprintf(f_html, "<html lang=\"en\">\n");
@@ -2632,7 +2644,11 @@ int export_group_assets_and_html(
     int pass1_window_ms,
     const char* original_audio_filepath
 ) {
-    if (!stems || num_stems <= 0 || !parent_dir || !group_name) return 0;
+    if (!stems || num_stems <= 0 || !parent_dir || !group_name) {
+        printf("Error: Invalid arguments passed to export_group_assets_and_html (stems=%p, num_stems=%d, parent_dir=%s, group_name=%s)\n",
+               (void*)stems, num_stems, parent_dir ? parent_dir : "NULL", group_name ? group_name : "NULL");
+        return 0;
+    }
     if (pass1_window_ms > 15000) pass1_window_ms = 15000;
     if (pass1_window_ms < 5000) pass1_window_ms = 5000;
 
@@ -2640,6 +2656,7 @@ int export_group_assets_and_html(
     char group_output_dir[4096];
     snprintf(group_output_dir, sizeof(group_output_dir), "%s" PATH_SEP_STR "[palettes]", parent_dir);
     mkdir_p(group_output_dir);
+    printf("[Group Mode] Output directory ready: %s\n", group_output_dir);
 
     if (original_audio_filepath && original_audio_filepath[0] != '\0') {
         copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
@@ -3235,6 +3252,7 @@ int export_group_assets_and_html(
 
     printf("\nCombining patterns across %d stem(s): %d raw pattern(s) -> %d merged pattern(s)\n",
            num_stems, total_raw_intervals, num_combined_intervals);
+    print_progress_bar(0, num_combined_intervals > 0 ? num_combined_intervals : 1, "Generating Merged Pattern WAVs");
 
     for (int p = 0; p < num_combined_intervals; p++) {
         // 1. Loopable WAV file in [palettes]/[loops]/pattern_N.wav
@@ -3319,6 +3337,7 @@ int export_group_assets_and_html(
             }
             drwav_uninit(&wav_stem_out);
         }
+        print_progress_bar(p + 1, num_combined_intervals, "Generating Merged Pattern WAVs");
     }
 
     for (int i = 0; i < num_stems; i++) {
@@ -3335,10 +3354,12 @@ int export_group_assets_and_html(
 
     if (mono_combined && group_audio_len > 0) {
         char group_wav_filename[1024];
-        snprintf(group_wav_filename, sizeof(group_wav_filename), "group_%s.wav", group_name);
+        snprintf(group_wav_filename, sizeof(group_wav_filename), "group_%s_pattern_analysis.wav", group_name);
 
         char group_wav_path[4096];
         snprintf(group_wav_path, sizeof(group_wav_path), "%s" PATH_SEP_STR "%s", group_output_dir, group_wav_filename);
+
+        printf("\n[Group Mode] Writing group audio WAV file: %s...\n", group_wav_path);
 
         drwav_data_format format;
         format.container = drwav_container_riff;
@@ -3372,6 +3393,7 @@ int export_group_assets_and_html(
         // Run Pass 2 on group mono audio to get group res2
         FullAnalysisResult res2_group;
         if (analyzer_batch_analyze_shared(mono_combined, group_audio_len, group_audio_sr, pass2_win_ms, 1, NULL, &res2_group)) {
+            printf("[Group Mode] Transience analysis completed for Group HTML Report. Writing assets...\n");
             int export_ok = export_single_stem_assets_from_res(
                 group_output_dir,
                 group_stem_name,
@@ -3396,7 +3418,7 @@ int export_group_assets_and_html(
                 NULL
             );
             if (export_ok) {
-                printf("Group HTML Report generated successfully: %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
+                printf("SUCCESS: Group HTML Report generated successfully: %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
             } else {
                 printf("Error: Failed to write Group HTML report %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
             }
