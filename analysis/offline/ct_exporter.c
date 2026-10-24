@@ -551,6 +551,10 @@ static int analyzer_batch_analyze_shared(
     ChunkAnalysisResult* res = (ChunkAnalysisResult*)malloc(sizeof(ChunkAnalysisResult));
     if (!res) { analyzer_destroy(a); free(gpu_flux); return 0; }
 
+    int total_steps = (len + flush_samples + step - 1) / step;
+    if (total_steps < 1) total_steps = 1;
+    int current_step = 0;
+
     for (int last_t = 0; last_t < len + flush_samples; last_t += step) {
         int act_s = last_t - (int)(sr * 0.2), win_s = act_s - (int)(sr * (window_ms / 1000.0)); if (win_s < 0) win_s = 0;
         memset(res, 0, sizeof(ChunkAnalysisResult));
@@ -590,6 +594,9 @@ static int analyzer_batch_analyze_shared(
             if (result_out->bands[b].num_peaks >= pcap[b]) { pcap[b] *= 2; PeakResult* np = realloc(pband[b], sizeof(PeakResult) * pcap[b]); if(np) pband[b] = np; }
             memcpy(&pband[b][result_out->bands[b].num_peaks++], pr, sizeof(PeakResult));
         }
+
+        current_step++;
+        print_progress_bar(current_step, total_steps, "Group Report Analysis");
     }
     free(res);
     if (gpu_flux) free(gpu_flux);

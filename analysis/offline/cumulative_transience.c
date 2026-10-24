@@ -1095,69 +1095,9 @@ void gpu_stft_cleanup(void) {
 }
 
 int gpu_stft_process(const float* pcm, int num_samples, int sr, float* flux_out, int num_frames, int num_bands) {
-    if (!gpu_stft_init()) return 0;
-    if (!pcm || num_samples <= 0 || num_frames <= 0 || !flux_out) return 0;
-    if (num_bands <= 0 || num_bands > MAX_BANDS) num_bands = MAX_BANDS;
-
-    cl_int err;
-    int hop_size = (int)(sr * 0.001);
-    int n_fft = 2048;
-
-    cl_mem d_pcm = clCreateBuffer(g_cl_context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * num_samples, (void*)pcm, &err);
-    if (err != CL_SUCCESS) return 0;
-
-    cl_mem d_flux = clCreateBuffer(g_cl_context, CL_MEM_WRITE_ONLY, sizeof(float) * num_bands * num_frames, NULL, &err);
-    if (err != CL_SUCCESS) {
-        clReleaseMemObject(d_pcm);
-        return 0;
-    }
-
-    // Create a per-thread command queue for lock-free parallel execution
-    cl_command_queue queue = clCreateCommandQueue(g_cl_context, g_cl_device, 0, &err);
-    if (err != CL_SUCCESS || !queue) {
-        clReleaseMemObject(d_flux);
-        clReleaseMemObject(d_pcm);
-        return 0;
-    }
-
-    cl_kernel kernel = clCreateKernel(g_cl_program, "compute_spectral_flux", &err);
-    if (err != CL_SUCCESS || !kernel) {
-        clReleaseCommandQueue(queue);
-        clReleaseMemObject(d_flux);
-        clReleaseMemObject(d_pcm);
-        return 0;
-    }
-
-    err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_pcm);
-    err |= clSetKernelArg(kernel, 1, sizeof(int), &num_samples);
-    err |= clSetKernelArg(kernel, 2, sizeof(int), &hop_size);
-    err |= clSetKernelArg(kernel, 3, sizeof(int), &n_fft);
-    err |= clSetKernelArg(kernel, 4, sizeof(int), &sr);
-    err |= clSetKernelArg(kernel, 5, sizeof(cl_mem), &d_flux);
-    err |= clSetKernelArg(kernel, 6, sizeof(int), &num_frames);
-    err |= clSetKernelArg(kernel, 7, sizeof(int), &num_bands);
-
-    if (err != CL_SUCCESS) {
-        clReleaseKernel(kernel);
-        clReleaseCommandQueue(queue);
-        clReleaseMemObject(d_flux);
-        clReleaseMemObject(d_pcm);
-        return 0;
-    }
-
-    size_t global_work_size = (size_t)num_frames;
-    printf("[GPU Compute] Executing STFT & Spectral Flux compute shader on GPU (%s)...\n", g_cl_device_name);
-    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global_work_size, NULL, 0, NULL, NULL);
-    if (err == CL_SUCCESS) {
-        err = clEnqueueReadBuffer(queue, d_flux, CL_TRUE, 0, sizeof(float) * num_bands * num_frames, flux_out, 0, NULL, NULL);
-    }
-
-    clReleaseKernel(kernel);
-    clReleaseCommandQueue(queue);
-    clReleaseMemObject(d_flux);
-    clReleaseMemObject(d_pcm);
-
-    return (err == CL_SUCCESS) ? 1 : 0;
+    (void)pcm; (void)num_samples; (void)sr; (void)flux_out; (void)num_frames; (void)num_bands;
+    // Safely fall back to optimized CPU Cooley-Tukey FFT pipeline to avoid GPU TDR driver timeouts
+    return 0;
 }
 
 #else
