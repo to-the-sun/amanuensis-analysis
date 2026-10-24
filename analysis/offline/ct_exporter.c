@@ -2696,6 +2696,15 @@ int export_group_assets_and_html(
     snprintf(group_output_dir, sizeof(group_output_dir), "%s" PATH_SEP_STR "[palettes]", parent_dir);
     mkdir_p(group_output_dir);
 
+    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+        copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
+    }
+    for (int i = 0; i < num_stems; i++) {
+        if (stems[i].audio_filepath) {
+            copy_passes_files_for_audio(stems[i].audio_filepath, group_output_dir);
+        }
+    }
+
     // Ensure progress bar mutex is initialized prior to spawning threads
     if (!g_progress_mutex_inited) {
         group_mutex_init(&g_progress_mutex);
@@ -3411,11 +3420,11 @@ int export_group_assets_and_html(
 
         // Export full combined group interactive HTML report & assets directly reusing shared Pass 1 & Pass 2 results
         char group_stem_name[1024];
-        snprintf(group_stem_name, sizeof(group_stem_name), "group_%s", group_name);
+        snprintf(group_stem_name, sizeof(group_stem_name), "group_%s_pattern_analysis", group_name);
 
-        // Run Pass 2 on group mono audio with group_shared to get group res2
+        // Run Pass 2 on group mono audio to get group res2
         FullAnalysisResult res2_group;
-        if (analyzer_batch_analyze_shared(mono_combined, group_audio_len, group_audio_sr, pass2_win_ms, 1, &group_shared, &res2_group)) {
+        if (analyzer_batch_analyze_shared(mono_combined, group_audio_len, group_audio_sr, pass2_win_ms, 1, NULL, &res2_group)) {
             export_single_stem_assets_from_res(
                 group_output_dir,
                 group_stem_name,
