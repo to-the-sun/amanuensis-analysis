@@ -605,6 +605,146 @@ static int analyzer_batch_analyze_shared(
     analyzer_destroy(a); return 1;
 }
 
+static int derive_stem_patterns_and_segments(
+    int len,
+    int sr,
+    double best_bar_length_ms,
+    const FullAnalysisResult* res2,
+    const float* y,
+    SegmentInfo** out_segments,
+    int* out_num_segments,
+    PatternDef* out_patterns,
+    int max_patterns
+) {
+    if (!res2 || len <= 0 || sr <= 0 || best_bar_length_ms <= 0.0) {
+        if (out_segments) *out_segments = NULL;
+        if (out_num_segments) *out_num_segments = 0;
+        return 0;
+    }
+
+    double total_duration_ms = ((double)len / (double)sr) * 1000.0;
+    int num_segments = (int)ceil(total_duration_ms / best_bar_length_ms);
+    if (num_segments < 1) num_segments = 1;
+
+    SegmentInfo* segments = (SegmentInfo*)calloc(num_segments, sizeof(SegmentInfo));
+    if (!segments) {
+        if (out_segments) *out_segments = NULL;
+        if (out_num_segments) *out_num_segments = 0;
+        return 0;
+    }
+
+    for (int seg_i = 0; seg_i < num_segments; seg_i++) {
+        segments[seg_i].segment_index = seg_i;
+        segments[seg_i].start_ms = seg_i * best_bar_length_ms;
+        segments[seg_i].end_ms = (seg_i + 1) * best_bar_length_ms;
+        if (segments[seg_i].end_ms > total_duration_ms) segments[seg_i].end_ms = total_duration_ms;
+
+        // Downsample audio waveform min/max for segment if y is provided
+        if (y) {
+            int s_sample = (int)round((segments[seg_i].start_ms / 1000.0) * sr);
+            int e_sample = (int)round((segments[seg_i].end_ms / 1000.0) * sr);
+            if (s_sample < 0) s_sample = 0;
+            if (e_sample > len) e_sample = len;
+            int seg_len_samples = e_sample - s_sample;
+
+            if (seg_len_samples > 0) {
+                int step = seg_len_samples / 300;
+                if (step < 1) step = 1;
+                for (int p = 0; p < 300; p++) {
+                    int p_start = s_sample + p * step;
+                    int p_end = p_start + step;
+                    if (p_start >= e_sample) p_start = e_sample - 1;
+                    if (p_end > e_sample) p_end = e_sample;
+
+                    float min_v = y[p_start];
+                    float max_v = y[p_start];
+                    for (int s = p_start; s < p_end; s++) {
+                        if (y[s] < min_v) min_v = y[s];
+                        if (y[s] > max_v) max_v = y[s];
+                    }
+                    segments[seg_i].waveform_min[p] = min_v;
+                    segments[seg_i].waveform_max[p] = max_v;
+                }
+            }
+        }
+
+        // Calculate average peak score in segment
+        double score_sum = 0.0;
+        int peak_cnt = 0;
+        for (int b = 0; b < res2->num_bands; b++) {
+            for (int k = 0; k < res2->bands[b].num_peaks; k++) {
+                double peak_ms = res2->bands[b].peaks[k].time * 1000.0;
+                if (peak_ms >= segments[seg_i].start_ms && peak_ms < segments[seg_i].end_ms) {
+                    score_sum += res2->bands[b].peaks[k].total_score;
+                    peak_cnt++;
+                }
+            }
+        }
+        segments[seg_i].peak_count = peak_cnt;
+        segments[seg_i].rating = (peak_cnt > 0) ? (score_sum / peak_cnt) : 0.0;
+    }
+
+    int num_patterns = 0;
+
+    if (num_segments >= 2 && out_patterns && max_patterns > 0) {
+        int pat_start = 0;
+        for (int seg_i = 1; seg_i < num_segments; seg_i++) {
+            int pat_len = seg_i - pat_start;
+            double min_rating_without = segments[pat_start].rating;
+            for (int k = pat_start; k < seg_i; k++) {
+                if (segments[k].rating < min_rating_without) min_rating_without = segments[k].rating;
+            }
+            double rating_without = min_rating_without * pat_len;
+
+            double min_rating_with = min_rating_without;
+            if (segments[seg_i].rating < min_rating_with) min_rating_with = segments[seg_i].rating;
+            double rating_with = min_rating_with * (pat_len + 1);
+
+            double standalone_rating = segments[seg_i].rating;
+
+            if (rating_with <= rating_without || standalone_rating > rating_with) {
+                if (pat_len >= 2 && num_patterns < max_patterns) {
+                    out_patterns[num_patterns].start_ms = segments[pat_start].start_ms;
+                    out_patterns[num_patterns].end_ms = segments[seg_i - 1].end_ms;
+                    out_patterns[num_patterns].duration_ms = out_patterns[num_patterns].end_ms - out_patterns[num_patterns].start_ms;
+                    out_patterns[num_patterns].rating = rating_without;
+                    out_patterns[num_patterns].num_segments = pat_len;
+                    int num_segs_to_copy = pat_len < 512 ? pat_len : 512;
+                    for (int k = 0; k < num_segs_to_copy; k++) out_patterns[num_patterns].segment_indices[k] = pat_start + k;
+                    num_patterns++;
+                }
+                pat_start = seg_i;
+            }
+        }
+
+        // Last pattern candidate
+        int pat_len = num_segments - pat_start;
+        if (pat_len >= 2 && num_patterns < max_patterns) {
+            double min_rating = segments[pat_start].rating;
+            for (int k = pat_start; k < num_segments; k++) {
+                if (segments[k].rating < min_rating) min_rating = segments[k].rating;
+            }
+            out_patterns[num_patterns].start_ms = segments[pat_start].start_ms;
+            out_patterns[num_patterns].end_ms = segments[num_segments - 1].end_ms;
+            out_patterns[num_patterns].duration_ms = out_patterns[num_patterns].end_ms - out_patterns[num_patterns].start_ms;
+            out_patterns[num_patterns].rating = min_rating * pat_len;
+            out_patterns[num_patterns].num_segments = pat_len;
+            int num_segs_to_copy = pat_len < 512 ? pat_len : 512;
+            for (int k = 0; k < num_segs_to_copy; k++) out_patterns[num_patterns].segment_indices[k] = pat_start + k;
+            num_patterns++;
+        }
+    }
+
+    if (out_segments) {
+        *out_segments = segments;
+    } else {
+        free(segments);
+    }
+    if (out_num_segments) *out_num_segments = num_segments;
+
+    return num_patterns;
+}
+
 static int export_single_stem_assets_from_res(
     const char* output_dir,
     const char* stem_name,
@@ -638,114 +778,14 @@ static int export_single_stem_assets_from_res(
     int ctbin_ok = export_ctbin_from_res(ctbin_path, res2, sr, pass2_win_ms);
     printf("[DEBUG] Export .ctbin file '%s': %s\n", ctbin_path, ctbin_ok ? "SUCCESS" : "FAILED");
 
-    // Segment transience grouping & scoring
+    // Segment transience grouping & pattern derivation
     double total_duration_ms = ((double)len / (double)sr) * 1000.0;
-    int num_segments = (int)ceil(total_duration_ms / best_bar_length_ms);
-    if (num_segments < 1) num_segments = 1;
-
-    SegmentInfo* segments = (SegmentInfo*)calloc(num_segments, sizeof(SegmentInfo));
-
-    for (int seg_i = 0; seg_i < num_segments; seg_i++) {
-        segments[seg_i].segment_index = seg_i;
-        segments[seg_i].start_ms = seg_i * best_bar_length_ms;
-        segments[seg_i].end_ms = (seg_i + 1) * best_bar_length_ms;
-        if (segments[seg_i].end_ms > total_duration_ms) segments[seg_i].end_ms = total_duration_ms;
-
-        // Downsample audio waveform min/max for segment
-        int s_sample = (int)round((segments[seg_i].start_ms / 1000.0) * sr);
-        int e_sample = (int)round((segments[seg_i].end_ms / 1000.0) * sr);
-        if (s_sample < 0) s_sample = 0;
-        if (e_sample > len) e_sample = len;
-        int seg_len_samples = e_sample - s_sample;
-
-        if (seg_len_samples > 0) {
-            int step = seg_len_samples / 300;
-            if (step < 1) step = 1;
-            for (int p = 0; p < 300; p++) {
-                int p_start = s_sample + p * step;
-                int p_end = p_start + step;
-                if (p_start >= e_sample) p_start = e_sample - 1;
-                if (p_end > e_sample) p_end = e_sample;
-
-                float min_v = y[p_start];
-                float max_v = y[p_start];
-                for (int s = p_start; s < p_end; s++) {
-                    if (y[s] < min_v) min_v = y[s];
-                    if (y[s] > max_v) max_v = y[s];
-                }
-                segments[seg_i].waveform_min[p] = min_v;
-                segments[seg_i].waveform_max[p] = max_v;
-            }
-        }
-
-        // Calculate average peak score in segment
-        double score_sum = 0.0;
-        int peak_cnt = 0;
-        for (int b = 0; b < res2->num_bands; b++) {
-            for (int k = 0; k < res2->bands[b].num_peaks; k++) {
-                double peak_ms = res2->bands[b].peaks[k].time * 1000.0;
-                if (peak_ms >= segments[seg_i].start_ms && peak_ms < segments[seg_i].end_ms) {
-                    score_sum += res2->bands[b].peaks[k].total_score;
-                    peak_cnt++;
-                }
-            }
-        }
-        segments[seg_i].peak_count = peak_cnt;
-        segments[seg_i].rating = (peak_cnt > 0) ? (score_sum / peak_cnt) : 0.0;
-    }
-
-    // Pattern identification logic
+    SegmentInfo* segments = NULL;
+    int num_segments = 0;
     PatternDef patterns[256];
-    int num_patterns = 0;
-
-    if (num_segments >= 2) {
-        int pat_start = 0;
-        for (int seg_i = 1; seg_i < num_segments; seg_i++) {
-            int pat_len = seg_i - pat_start;
-            double min_rating_without = segments[pat_start].rating;
-            for (int k = pat_start; k < seg_i; k++) {
-                if (segments[k].rating < min_rating_without) min_rating_without = segments[k].rating;
-            }
-            double rating_without = min_rating_without * pat_len;
-
-            double min_rating_with = min_rating_without;
-            if (segments[seg_i].rating < min_rating_with) min_rating_with = segments[seg_i].rating;
-            double rating_with = min_rating_with * (pat_len + 1);
-
-            double standalone_rating = segments[seg_i].rating;
-
-            if (rating_with <= rating_without || standalone_rating > rating_with) {
-                if (pat_len >= 2 && num_patterns < 256) {
-                    patterns[num_patterns].start_ms = segments[pat_start].start_ms;
-                    patterns[num_patterns].end_ms = segments[seg_i - 1].end_ms;
-                    patterns[num_patterns].duration_ms = patterns[num_patterns].end_ms - patterns[num_patterns].start_ms;
-                    patterns[num_patterns].rating = rating_without;
-                    patterns[num_patterns].num_segments = pat_len;
-                    int num_segs_to_copy = pat_len < 512 ? pat_len : 512;
-                    for (int k = 0; k < num_segs_to_copy; k++) patterns[num_patterns].segment_indices[k] = pat_start + k;
-                    num_patterns++;
-                }
-                pat_start = seg_i;
-            }
-        }
-
-        // Last pattern candidate
-        int pat_len = num_segments - pat_start;
-        if (pat_len >= 2 && num_patterns < 256) {
-            double min_rating = segments[pat_start].rating;
-            for (int k = pat_start; k < num_segments; k++) {
-                if (segments[k].rating < min_rating) min_rating = segments[k].rating;
-            }
-            patterns[num_patterns].start_ms = segments[pat_start].start_ms;
-            patterns[num_patterns].end_ms = segments[num_segments - 1].end_ms;
-            patterns[num_patterns].duration_ms = patterns[num_patterns].end_ms - patterns[num_patterns].start_ms;
-            patterns[num_patterns].rating = min_rating * pat_len;
-            patterns[num_patterns].num_segments = pat_len;
-            int num_segs_to_copy = pat_len < 512 ? pat_len : 512;
-            for (int k = 0; k < num_segs_to_copy; k++) patterns[num_patterns].segment_indices[k] = pat_start + k;
-            num_patterns++;
-        }
-    }
+    int num_patterns = derive_stem_patterns_and_segments(
+        len, sr, best_bar_length_ms, res2, y, &segments, &num_segments, patterns, 256
+    );
 
     if (export_pattern_wavs) {
         // Source audio selection for pattern slicing
@@ -2570,7 +2610,7 @@ static void process_single_stem_export(
         evo_frames,
         evo_pts,
         res2_stem,
-        1,
+        0,
         source_audio,
         source_len,
         source_sr,
@@ -3160,6 +3200,172 @@ int export_group_assets_and_html(
         }
     }
 #endif
+
+    // Collect and combine overlapping patterns derived across all individual audio files (stems)
+    typedef struct {
+        double start_ms;
+        double end_ms;
+    } GroupPatternInterval;
+
+    GroupPatternInterval raw_intervals[4096];
+    int total_raw_intervals = 0;
+
+    for (int i = 0; i < num_stems; i++) {
+        PatternDef stem_pats[256];
+        int num_p = derive_stem_patterns_and_segments(
+            stems[i].len, stems[i].sr, best_bar_length_ms, &res2_stems[i], NULL, NULL, NULL, stem_pats, 256
+        );
+        for (int p = 0; p < num_p; p++) {
+            if (total_raw_intervals < 4096) {
+                raw_intervals[total_raw_intervals].start_ms = stem_pats[p].start_ms;
+                raw_intervals[total_raw_intervals].end_ms = stem_pats[p].end_ms;
+                total_raw_intervals++;
+            }
+        }
+    }
+
+    // Sort raw pattern intervals by start_ms ascending
+    for (int i = 0; i < total_raw_intervals - 1; i++) {
+        for (int j = i + 1; j < total_raw_intervals; j++) {
+            if (raw_intervals[j].start_ms < raw_intervals[i].start_ms ||
+                (raw_intervals[j].start_ms == raw_intervals[i].start_ms && raw_intervals[j].end_ms < raw_intervals[i].end_ms)) {
+                GroupPatternInterval tmp = raw_intervals[i];
+                raw_intervals[i] = raw_intervals[j];
+                raw_intervals[j] = tmp;
+            }
+        }
+    }
+
+    // Combine overlapping pattern intervals
+    GroupPatternInterval combined_intervals[4096];
+    int num_combined_intervals = 0;
+
+    if (total_raw_intervals > 0) {
+        double curr_start = raw_intervals[0].start_ms;
+        double curr_end = raw_intervals[0].end_ms;
+
+        for (int k = 1; k < total_raw_intervals; k++) {
+            if (raw_intervals[k].start_ms <= curr_end + 1e-3) {
+                if (raw_intervals[k].end_ms > curr_end) {
+                    curr_end = raw_intervals[k].end_ms;
+                }
+            } else {
+                if (num_combined_intervals < 4096) {
+                    combined_intervals[num_combined_intervals].start_ms = curr_start;
+                    combined_intervals[num_combined_intervals].end_ms = curr_end;
+                    num_combined_intervals++;
+                }
+                curr_start = raw_intervals[k].start_ms;
+                curr_end = raw_intervals[k].end_ms;
+            }
+        }
+        if (num_combined_intervals < 4096) {
+            combined_intervals[num_combined_intervals].start_ms = curr_start;
+            combined_intervals[num_combined_intervals].end_ms = curr_end;
+            num_combined_intervals++;
+        }
+    }
+
+    // Write combined pattern WAV files to overall [loops] and [stems]
+    char overall_loops_dir[4096];
+    snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
+    mkdir_p(overall_loops_dir);
+
+    char overall_stems_dir[4096];
+    snprintf(overall_stems_dir, sizeof(overall_stems_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[stems]", parent_dir);
+    mkdir_p(overall_stems_dir);
+
+    PassInfo passes[257];
+    int total_passes = 0;
+    parse_passes_in_dir(group_output_dir, passes, &total_passes);
+
+    printf("[DEBUG] Total raw pattern intervals derived across %d stems: %d -> combined into %d merged patterns\n",
+           num_stems, total_raw_intervals, num_combined_intervals);
+
+    for (int p = 0; p < num_combined_intervals; p++) {
+        // 1. Loopable WAV file in [palettes]/[loops]/pattern_N.wav
+        char pat_wav_path[4096];
+        snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, p + 1);
+
+        uint64_t start_smp = (uint64_t)round((combined_intervals[p].start_ms / 1000.0) * group_audio_sr);
+        uint64_t end_smp = (uint64_t)round((combined_intervals[p].end_ms / 1000.0) * group_audio_sr);
+        if (start_smp >= (uint64_t)group_audio_len) start_smp = group_audio_len - 1;
+        if (end_smp > (uint64_t)group_audio_len) end_smp = group_audio_len;
+        uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+
+        drwav_data_format format;
+        format.container = drwav_container_riff;
+        format.format = DR_WAVE_FORMAT_PCM;
+        format.channels = 1;
+        format.sampleRate = group_audio_sr;
+        format.bitsPerSample = 16;
+
+        drwav wav_out;
+        if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
+            int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
+            if (pcm16) {
+                for (uint64_t i = 0; i < frame_count; i++) {
+                    float smp = mono_combined[start_smp + i];
+                    if (smp > 1.0f) smp = 1.0f;
+                    if (smp < -1.0f) smp = -1.0f;
+                    pcm16[i] = (int16_t)(smp * 32767.0f);
+                }
+                drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
+                free(pcm16);
+            }
+            drwav_uninit(&wav_out);
+        }
+
+        // 2. Pass-aligned Stem WAV file in [palettes]/[stems]/pattern_N.wav
+        int assigned_pass_idx = 0;
+        for (int i = total_passes - 1; i >= 0; i--) {
+            if (combined_intervals[p].start_ms >= passes[i].loop_point_ms) {
+                assigned_pass_idx = i;
+                break;
+            }
+        }
+
+        double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
+        double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
+        double blank_space_ms = (combined_intervals[p].start_ms - pass_lp_ms) + pass_pad_ms;
+        if (blank_space_ms < 0.0) blank_space_ms = 0.0;
+
+        uint64_t blank_frames = (uint64_t)round((blank_space_ms / 1000.0) * group_audio_sr);
+
+        char stem_wav_path[4096];
+        snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_stems_dir, p + 1);
+
+        drwav wav_stem_out;
+        if (drwav_init_file_write(&wav_stem_out, stem_wav_path, &format, NULL)) {
+            int16_t chunk[8192];
+            memset(chunk, 0, sizeof(chunk));
+
+            // Write blank frames (silence)
+            uint64_t remaining_blank = blank_frames;
+            while (remaining_blank > 0) {
+                uint64_t write_cnt = (remaining_blank < 8192) ? remaining_blank : 8192;
+                drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                remaining_blank -= write_cnt;
+            }
+
+            // Write pattern audio frames
+            uint64_t remaining_audio = frame_count;
+            uint64_t curr_smp = start_smp;
+            while (remaining_audio > 0) {
+                uint64_t write_cnt = (remaining_audio < 8192) ? remaining_audio : 8192;
+                for (uint64_t i = 0; i < write_cnt; i++) {
+                    float smp = mono_combined[curr_smp + i];
+                    if (smp > 1.0f) smp = 1.0f;
+                    if (smp < -1.0f) smp = -1.0f;
+                    chunk[i] = (int16_t)(smp * 32767.0f);
+                }
+                drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                curr_smp += write_cnt;
+                remaining_audio -= write_cnt;
+            }
+            drwav_uninit(&wav_stem_out);
+        }
+    }
 
     for (int i = 0; i < num_stems; i++) {
         analyzer_free_analysis(&res2_stems[i]);
