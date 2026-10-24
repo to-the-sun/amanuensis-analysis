@@ -13,10 +13,12 @@
 #include <windows.h>
 #include <process.h>
 #define mkdir_cross(dir) _mkdir(dir)
+#define getcwd_cross(buf, size) _getcwd(buf, size)
 #else
 #include <pthread.h>
 #include <unistd.h>
 #define mkdir_cross(dir) mkdir(dir, 0755)
+#define getcwd_cross(buf, size) getcwd(buf, size)
 #endif
 
 #ifndef S_ISDIR
@@ -582,6 +584,20 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
         dir_copy[d_len - 1] = '\0';
         d_len--;
     }
+
+    if (strcmp(dir_copy, ".") == 0 || strcmp(dir_copy, "..") == 0) {
+        char cwd[2048];
+        if (getcwd_cross(cwd, sizeof(cwd))) {
+            strncpy(dir_copy, cwd, sizeof(dir_copy) - 1);
+            dir_copy[sizeof(dir_copy) - 1] = '\0';
+            d_len = strlen(dir_copy);
+            while (d_len > 1 && (dir_copy[d_len - 1] == '/' || dir_copy[d_len - 1] == '\\')) {
+                dir_copy[d_len - 1] = '\0';
+                d_len--;
+            }
+        }
+    }
+
     const char* last_sep = strrchr(dir_copy, '/');
     const char* last_backslash = strrchr(dir_copy, '\\');
     if (last_backslash && (!last_sep || last_backslash > last_sep)) last_sep = last_backslash;
@@ -589,8 +605,12 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
     char group_name[1024] = "all_stems";
     if (last_sep && strlen(last_sep + 1) > 0) {
         snprintf(group_name, sizeof(group_name), "%s", last_sep + 1);
-    } else if (d_len > 0) {
+    } else if (d_len > 0 && strcmp(dir_copy, ".") != 0 && strcmp(dir_copy, "..") != 0) {
         snprintf(group_name, sizeof(group_name), "%s", dir_copy);
+    }
+
+    if (strcmp(group_name, ".") == 0 || strcmp(group_name, "..") == 0 || group_name[0] == '\0') {
+        strcpy(group_name, "all_stems");
     }
 
     printf("\nRunning grouped cumulative transience analysis & asset exports in pure C...\n");

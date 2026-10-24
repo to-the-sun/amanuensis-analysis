@@ -1904,6 +1904,10 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "</body>\n");
         fprintf(f_html, "</html>\n");
         fclose(f_html);
+    } else {
+        printf("Error: Could not open HTML report file for writing: %s (errno: %d, %s)\n", html_filepath, errno, strerror(errno));
+        free(segments);
+        return 0;
     }
 
     return 1;
@@ -3334,8 +3338,11 @@ int export_group_assets_and_html(
     }
 
     if (mono_combined && group_audio_len > 0) {
+        char group_stem_name[1024];
+        snprintf(group_stem_name, sizeof(group_stem_name), "group_%s_pattern_analysis", group_name);
+
         char group_wav_filename[1024];
-        snprintf(group_wav_filename, sizeof(group_wav_filename), "group_%s.wav", group_name);
+        snprintf(group_wav_filename, sizeof(group_wav_filename), "%s.wav", group_stem_name);
 
         char group_wav_path[4096];
         snprintf(group_wav_path, sizeof(group_wav_path), "%s" PATH_SEP_STR "%s", group_output_dir, group_wav_filename);
@@ -3364,9 +3371,6 @@ int export_group_assets_and_html(
         }
 
         // Export full combined group interactive HTML report & assets
-        char group_stem_name[1024];
-        snprintf(group_stem_name, sizeof(group_stem_name), "group_%s_pattern_analysis", group_name);
-
         printf("\nGenerating Group Mix and HTML Report: %s" PATH_SEP_STR "%s.html...\n", group_output_dir, group_stem_name);
 
         // Run Pass 2 on group mono audio to get group res2
