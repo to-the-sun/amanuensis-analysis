@@ -73,6 +73,10 @@ static float calculate_prominence_global(TransientAnalyzer* self, int band_idx, 
     int latest_idx = (self->cache_write_ptr - 1 + CACHE_SIZE) % CACHE_SIZE;
     int steps_forward = (latest_idx - cache_idx + CACHE_SIZE) % CACHE_SIZE;
 
+    // Cap max prominence scan window to 1000ms (1 second) to prevent O(N*W) performance stalls
+    if (steps_back > 1000) steps_back = 1000;
+    if (steps_forward > 1000) steps_forward = 1000;
+
     float val = self->dynamic_smoothings[band_idx * CACHE_SIZE + cache_idx];
     float lmin = val;
     // Search backwards in the global circular buffer until rptr (oldest valid frame)
