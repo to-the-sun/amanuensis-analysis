@@ -183,6 +183,89 @@ static int is_text_file_ext(const char* filename) {
     return 0;
 }
 
+static int istarts_with_ext(const char* str, const char* prefix) {
+    while (*prefix) {
+        if (!*str || tolower((unsigned char)*str) != tolower((unsigned char)*prefix)) {
+            return 0;
+        }
+        str++;
+        prefix++;
+    }
+    return 1;
+}
+
+static void copy_passes_files_for_audio(const char* audio_filepath, const char* output_dir) {
+    if (!audio_filepath || audio_filepath[0] == '\0' || !output_dir) return;
+
+    const char* filename = audio_filepath;
+    const char* last_slash = strrchr(audio_filepath, '/');
+    const char* last_backslash = strrchr(audio_filepath, '\\');
+    if (last_slash && last_slash >= filename) filename = last_slash + 1;
+    if (last_backslash && last_backslash >= filename) filename = last_backslash + 1;
+
+    const char* dot = strrchr(filename, '.');
+    size_t stem_len = dot ? (size_t)(dot - filename) : strlen(filename);
+    char stem_name[1024];
+    if (stem_len >= sizeof(stem_name)) stem_len = sizeof(stem_name) - 1;
+    strncpy(stem_name, filename, stem_len);
+    stem_name[stem_len] = '\0';
+
+    char dir_path[2048];
+    size_t dir_len = (size_t)(filename - audio_filepath);
+    if (dir_len > 0) {
+        if (dir_len >= sizeof(dir_path)) dir_len = sizeof(dir_path) - 1;
+        strncpy(dir_path, audio_filepath, dir_len);
+        dir_path[dir_len] = '\0';
+    } else {
+        strcpy(dir_path, "." PATH_SEP_STR);
+    }
+
+    char target_passes_stem[1024];
+    if (istarts_with_ext(stem_name, "palette")) {
+        const char* rest_of_stem = stem_name + 7;
+        snprintf(target_passes_stem, sizeof(target_passes_stem), "passes%s", rest_of_stem);
+    } else {
+        strcpy(target_passes_stem, "passes");
+    }
+    size_t target_len = strlen(target_passes_stem);
+
+    DIR* d = opendir(dir_path);
+    if (!d) return;
+
+    struct dirent* entry;
+    while ((entry = readdir(d)) != NULL) {
+        const char* name = entry->d_name;
+        if (!is_text_file_ext(name)) continue;
+
+        const char* entry_dot = strrchr(name, '.');
+        size_t entry_stem_len = entry_dot ? (size_t)(entry_dot - name) : strlen(name);
+        char entry_stem[1024];
+        if (entry_stem_len >= sizeof(entry_stem)) entry_stem_len = sizeof(entry_stem) - 1;
+        strncpy(entry_stem, name, entry_stem_len);
+        entry_stem[entry_stem_len] = '\0';
+
+        if (istarts_with_ext(entry_stem, target_passes_stem)) {
+            if (entry_stem_len == target_len || !isalnum((unsigned char)entry_stem[target_len])) {
+                char src_p[4096], dst_p[4096];
+                snprintf(src_p, sizeof(src_p), "%s" PATH_SEP_STR "%s", dir_path, name);
+                snprintf(dst_p, sizeof(dst_p), "%s" PATH_SEP_STR "%s", output_dir, name);
+                FILE* sf = fopen(src_p, "rb");
+                if (sf) {
+                    FILE* df = fopen(dst_p, "wb");
+                    if (df) {
+                        char b[65536]; size_t br;
+                        while ((br = fread(b, 1, sizeof(b), sf)) > 0) fwrite(b, 1, br, df);
+                        fclose(df);
+                        printf("Copied matching passes text file: %s -> %s\n", src_p, dst_p);
+                    }
+                    fclose(sf);
+                }
+            }
+        }
+    }
+    closedir(d);
+}
+
 static void parse_passes_in_dir(const char* output_dir, PassInfo* out_passes, int* out_total_passes) {
     out_passes[0].index = 0;
     out_passes[0].loop_point_ms = 0.0;
@@ -2400,6 +2483,7 @@ typedef struct {
     const float* source_audio;
     int source_len;
     int source_sr;
+    const char* original_audio_filepath;
     volatile int* export_counter;
     GroupMutex* counter_mutex;
     int total_stems;
@@ -2419,7 +2503,8 @@ static void process_single_stem_export(
     FullAnalysisResult* res2_stem,
     const float* source_audio,
     int source_len,
-    int source_sr
+    int source_sr,
+    const char* original_audio_filepath
 ) {
     printf("[DEBUG] process_single_stem_export starting for stem_name='%s', audio_filepath='%s'\n",
            (stem && stem->stem_name) ? stem->stem_name : "(null)",
@@ -2454,46 +2539,10 @@ static void process_single_stem_export(
     }
 
     // Copy matching passes text files into stem palette output directory
-    char stem_dir_path[2048], stem_stem_name[1024];
-    const char* last_s = strrchr(stem->audio_filepath, '/');
-    const char* last_bs = strrchr(stem->audio_filepath, '\\');
-    const char* fn = stem->audio_filepath;
-    if (last_s && last_s >= fn) fn = last_s + 1;
-    if (last_bs && last_bs >= fn) fn = last_bs + 1;
-    const char* dot = strrchr(fn, '.');
-    size_t s_len = dot ? (size_t)(dot - fn) : strlen(fn);
-    strncpy(stem_stem_name, fn, s_len);
-    stem_stem_name[s_len] = '\0';
-    size_t d_len = (size_t)(fn - stem->audio_filepath);
-    if (d_len > 0) { strncpy(stem_dir_path, stem->audio_filepath, d_len); stem_dir_path[d_len] = '\0'; }
-    else { strcpy(stem_dir_path, "." PATH_SEP_STR); }
-
-    if (strncmp(stem_stem_name, "palette", 7) == 0) {
-        char target_passes_stem[1024];
-        snprintf(target_passes_stem, sizeof(target_passes_stem), "passes%s", stem_stem_name + 7);
-        DIR* d = opendir(stem_dir_path);
-        if (d) {
-            struct dirent* entry;
-            while ((entry = readdir(d)) != NULL) {
-                if (is_text_file_ext(entry->d_name) && strncmp(entry->d_name, target_passes_stem, strlen(target_passes_stem)) == 0) {
-                    char src_p[4096], dst_p[4096];
-                    snprintf(src_p, sizeof(src_p), "%s" PATH_SEP_STR "%s", stem_dir_path, entry->d_name);
-                    snprintf(dst_p, sizeof(dst_p), "%s" PATH_SEP_STR "%s", stem_output_dir, entry->d_name);
-                    FILE* sf = fopen(src_p, "rb");
-                    if (sf) {
-                        FILE* df = fopen(dst_p, "wb");
-                        if (df) {
-                            char b[65536]; size_t br;
-                            while ((br = fread(b, 1, sizeof(b), sf)) > 0) fwrite(b, 1, br, df);
-                            fclose(df);
-                        }
-                        fclose(sf);
-                    }
-                }
-            }
-            closedir(d);
-        }
+    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+        copy_passes_files_for_audio(original_audio_filepath, stem_output_dir);
     }
+    copy_passes_files_for_audio(stem->audio_filepath, stem_output_dir);
 
     // Overall [loops] and [stems] target folders inside parent [palettes]
     char overall_loops_dir[4096];
@@ -2540,7 +2589,7 @@ static unsigned int __stdcall export_worker_win(void* arg) {
         t->stem, t->parent_dir, t->pass2_win_ms,
         t->best_bar_length_ms, t->accumulated_contour, t->contour_len,
         t->contour_sample_count, t->contour_evo, t->evo_frames, t->evo_pts, t->res2_stem,
-        t->source_audio, t->source_len, t->source_sr
+        t->source_audio, t->source_len, t->source_sr, t->original_audio_filepath
     );
     group_mutex_lock(t->counter_mutex);
     (*(t->export_counter))++;
@@ -2560,7 +2609,7 @@ static void* export_worker_posix(void* arg) {
         t->stem, t->parent_dir, t->pass2_win_ms,
         t->best_bar_length_ms, t->accumulated_contour, t->contour_len,
         t->contour_sample_count, t->contour_evo, t->evo_frames, t->evo_pts, t->res2_stem,
-        t->source_audio, t->source_len, t->source_sr
+        t->source_audio, t->source_len, t->source_sr, t->original_audio_filepath
     );
     group_mutex_lock(t->counter_mutex);
     (*(t->export_counter))++;
@@ -3077,6 +3126,7 @@ int export_group_assets_and_html(
         export_tasks[i].source_audio = mono_combined;
         export_tasks[i].source_len = group_audio_len;
         export_tasks[i].source_sr = group_audio_sr;
+        export_tasks[i].original_audio_filepath = original_audio_filepath;
         export_tasks[i].export_counter = &export_counter;
         export_tasks[i].counter_mutex = &export_mutex;
         export_tasks[i].total_stems = num_stems;
@@ -3118,6 +3168,10 @@ int export_group_assets_and_html(
     free(res2_stems);
     free(export_tasks);
     group_mutex_destroy(&export_mutex);
+
+    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+        copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
+    }
 
     if (mono_combined && group_audio_len > 0) {
         char group_wav_filename[1024];
