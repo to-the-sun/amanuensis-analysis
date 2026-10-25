@@ -501,7 +501,8 @@ static int analyzer_batch_analyze_shared(
     int window_ms,
     int num_bands,
     SharedTransientBuffer* shared_buffer,
-    FullAnalysisResult* result_out
+    FullAnalysisResult* result_out,
+    int is_direct_flux
 ) {
     if (window_ms > 15000) window_ms = 15000;
     if (window_ms <= 0) window_ms = 15000;
@@ -535,21 +536,24 @@ static int analyzer_batch_analyze_shared(
         result_out->bands[b].peaks = NULL;
         result_out->bands[b].num_peaks = 0;
     }
-    float* gpu_flux = (float*)malloc(sizeof(float) * num_bands * num_f);
+    float* gpu_flux = NULL;
     int gpu_ok = 0;
-    if (gpu_flux) {
-        gpu_ok = gpu_stft_process(y, len, sr, gpu_flux, num_f, num_bands);
+    if (!is_direct_flux) {
+        gpu_flux = (float*)malloc(sizeof(float) * num_bands * num_f);
+        if (gpu_flux) {
+            gpu_ok = gpu_stft_process(y, len, sr, gpu_flux, num_f, num_bands);
+        }
     }
 
     TransientAnalyzer* a = analyzer_create(1.0, shared_buffer, NULL, NULL, NULL, window_ms, num_bands);
-    if (!a) { free(gpu_flux); return 0; }
+    if (!a) { if (gpu_flux) free(gpu_flux); return 0; }
     analyzer_set_sample_rate(a, sr); int step = hop * 100;
     PeakResult* pband[MAX_BANDS]; int pcap[MAX_BANDS];
     for(int b=0; b<num_bands; b++) { pcap[b] = 1024; pband[b] = (PeakResult*)malloc(sizeof(PeakResult) * pcap[b]); }
     int flush_samples = (int)(sr * 0.3);
 
     ChunkAnalysisResult* res = (ChunkAnalysisResult*)malloc(sizeof(ChunkAnalysisResult));
-    if (!res) { analyzer_destroy(a); free(gpu_flux); return 0; }
+    if (!res) { analyzer_destroy(a); if (gpu_flux) free(gpu_flux); return 0; }
 
     int total_chunks = (len + flush_samples + step - 1) / step;
     if (total_chunks < 1) total_chunks = 1;
@@ -567,7 +571,11 @@ static int analyzer_batch_analyze_shared(
             int rem = len - last_t;
             memcpy(push_ptr, y + last_t, sizeof(float) * (rem < step ? rem : step));
         }
-        analyzer_analyze_chunk(a, push_ptr, step, sr, win_s / hop, act_s / hop, res);
+        if (is_direct_flux) {
+            analyzer_analyze_chunk_flux_direct(a, push_ptr, step, sr, win_s / hop, act_s / hop, res);
+        } else {
+            analyzer_analyze_chunk(a, push_ptr, step, sr, win_s / hop, act_s / hop, res);
+        }
         free(push_ptr);
         for (int b = 0; b < num_bands; b++) {
             for (int i = 0; i < 100; i++) {
@@ -2021,7 +2029,7 @@ static int export_all_assets_and_html_internal(
     if (pass2_win_ms < 5000) pass2_win_ms = 5000;
 
     FullAnalysisResult res2;
-    if (!analyzer_batch_analyze_shared(y, len, sr, pass2_win_ms, 1, shared_buffer, &res2)) return 0;
+    if (!analyzer_batch_analyze_shared(y, len, sr, pass2_win_ms, 1, shared_buffer, &res2, 0)) return 0;
 
     int ret = export_single_stem_assets_from_res(
         output_dir,
@@ -2128,7 +2136,7 @@ static unsigned int __stdcall pass1_stem_worker_win(void* arg) {
                 int chunk_len = (rem < step) ? rem : step;
                 if (chunk_len > 0) memcpy(push_ptr, t->stem->mono_data + last_t, sizeof(float) * chunk_len);
             }
-            analyzer_analyze_chunk(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
+            analyzer_analyze_chunk_flux_direct(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
 
             if (step_idx < t->total_steps) {
                 group_mutex_lock(t->shared_mutex);
@@ -2192,7 +2200,7 @@ static void* pass1_stem_worker_posix(void* arg) {
                 int chunk_len = (rem < step) ? rem : step;
                 if (chunk_len > 0) memcpy(push_ptr, t->stem->mono_data + last_t, sizeof(float) * chunk_len);
             }
-            analyzer_analyze_chunk(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
+            analyzer_analyze_chunk_flux_direct(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
 
             if (step_idx < t->total_steps) {
                 group_mutex_lock(t->shared_mutex);
@@ -2280,7 +2288,7 @@ static unsigned int __stdcall pass2_stem_worker_win(void* arg) {
                 int chunk_len = (rem < step) ? rem : step;
                 if (chunk_len > 0) memcpy(push_ptr, t->stem->mono_data + last_t, sizeof(float) * chunk_len);
             }
-            analyzer_analyze_chunk(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
+            analyzer_analyze_chunk_flux_direct(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
 
             for (int b = 0; b < 1; b++) {
                 for (int k = 0; k < 100; k++) {
@@ -2372,7 +2380,7 @@ static void* pass2_stem_worker_posix(void* arg) {
                 int chunk_len = (rem < step) ? rem : step;
                 if (chunk_len > 0) memcpy(push_ptr, t->stem->mono_data + last_t, sizeof(float) * chunk_len);
             }
-            analyzer_analyze_chunk(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
+            analyzer_analyze_chunk_flux_direct(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
 
             for (int b = 0; b < 1; b++) {
                 for (int k = 0; k < 100; k++) {
@@ -3392,7 +3400,7 @@ int export_group_assets_and_html(
 
         // Run Pass 2 on group mono audio to get group res2
         FullAnalysisResult res2_group;
-        if (analyzer_batch_analyze_shared(mono_combined, group_audio_len, group_audio_sr, pass2_win_ms, 1, NULL, &res2_group)) {
+        if (analyzer_batch_analyze_shared(mono_combined, group_audio_len, group_audio_sr, pass2_win_ms, 1, NULL, &res2_group, 1)) {
             printf("[Group Mode] Transience analysis completed for Group HTML Report. Writing assets...\n");
             int export_ok = export_single_stem_assets_from_res(
                 group_output_dir,

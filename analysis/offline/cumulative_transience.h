@@ -180,6 +180,15 @@ int analyzer_analyze_chunk(TransientAnalyzer* self,
                            ChunkAnalysisResult* result_out);
 
 void analyzer_push_audio(TransientAnalyzer* self, const float* y, int len, int sr);
+void analyzer_push_flux_direct(TransientAnalyzer* self, const float* flux_samples, int len, int sr);
+
+int analyzer_analyze_chunk_flux_direct(TransientAnalyzer* self,
+                                       const float* flux_samples,
+                                       int len,
+                                       int sr,
+                                       int buffer_start_frame,
+                                       int active_start_frame,
+                                       ChunkAnalysisResult* result_out);
 
 // Full analysis structures
 typedef struct {
@@ -223,6 +232,7 @@ typedef struct {
 } FullAnalysisResult;
 
 int analyzer_batch_analyze(const float* y, int len, int sr, int window_ms, int num_bands, FullAnalysisResult* result_out);
+int analyzer_batch_analyze_direct_flux(const float* flux_samples, int len, int sr, int window_ms, int num_bands, FullAnalysisResult* result_out);
 void analyzer_free_analysis(FullAnalysisResult* result);
 
 // OpenCL GPU Compute Shader Acceleration Interface
