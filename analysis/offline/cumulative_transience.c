@@ -58,44 +58,71 @@ static float calculate_half_max(float* values, int n) {
     return max_v / 2.0f;
 }
 
-static float calculate_prominence_global(TransientAnalyzer* self, int band_idx, int cache_idx, float* lmin_out, float* rmin_out) {
-    int nf = self->cache_count;
-    if (nf <= 0) {
-        if (lmin_out) *lmin_out = 0;
-        if (rmin_out) *rmin_out = 0;
-        return 0;
+static void compute_prominence_array_linear(const float* env, int nf, float* lmin_arr, float* rmin_arr, float* prom_arr) {
+    if (nf <= 0) return;
+    if (nf == 1) {
+        if (lmin_arr) lmin_arr[0] = env[0];
+        if (rmin_arr) rmin_arr[0] = env[0];
+        if (prom_arr) prom_arr[0] = 0.0f;
+        return;
     }
 
-    int rptr = (self->cache_write_ptr - nf + CACHE_SIZE) % CACHE_SIZE;
-    // Find how many steps we can go back from cache_idx to reach rptr
-    int steps_back = (cache_idx - rptr + CACHE_SIZE) % CACHE_SIZE;
-    // Find how many steps we can go forward from cache_idx to reach the latest frame (write_ptr - 1)
-    int latest_idx = (self->cache_write_ptr - 1 + CACHE_SIZE) % CACHE_SIZE;
-    int steps_forward = (latest_idx - cache_idx + CACHE_SIZE) % CACHE_SIZE;
-
-    float val = self->dynamic_smoothings[band_idx * CACHE_SIZE + cache_idx];
-    float lmin = val;
-    // Search backwards in the global circular buffer until rptr (oldest valid frame)
-    for (int k = 1; k <= steps_back; k++) {
-        int idx = (cache_idx - k + CACHE_SIZE) % CACHE_SIZE;
-        float v = self->dynamic_smoothings[band_idx * CACHE_SIZE + idx];
-        if (v > val) break;
-        if (v < lmin) lmin = v;
+    int* stack = (int*)malloc(sizeof(int) * nf);
+    float* min_since_stack = (float*)malloc(sizeof(float) * nf);
+    if (!stack || !min_since_stack) {
+        if (stack) free(stack);
+        if (min_since_stack) free(min_since_stack);
+        return;
     }
 
-    float rmin = val;
-    // Search forwards in the global circular buffer until latest_idx (newest valid frame)
-    for (int k = 1; k <= steps_forward; k++) {
-        int idx = (cache_idx + k) % CACHE_SIZE;
-        float v = self->dynamic_smoothings[band_idx * CACHE_SIZE + idx];
-        if (v > val) break;
-        if (v < rmin) rmin = v;
+    // Pass 1: Left minimum sweep
+    int stack_size = 0;
+    for (int i = 0; i < nf; i++) {
+        float val = env[i];
+        float cur_min = val;
+        while (stack_size > 0 && env[stack[stack_size - 1]] <= val) {
+            float prev_min = min_since_stack[stack_size - 1];
+            if (prev_min < cur_min) cur_min = prev_min;
+            stack_size--;
+        }
+        if (lmin_arr) lmin_arr[i] = cur_min;
+
+        stack[stack_size] = i;
+        min_since_stack[stack_size] = cur_min;
+        stack_size++;
     }
 
-    if (lmin_out) *lmin_out = lmin;
-    if (rmin_out) *rmin_out = rmin;
-    return val - (lmin > rmin ? lmin : rmin);
+    // Pass 2: Right minimum sweep
+    stack_size = 0;
+    for (int i = nf - 1; i >= 0; i--) {
+        float val = env[i];
+        float cur_min = val;
+        while (stack_size > 0 && env[stack[stack_size - 1]] <= val) {
+            float prev_min = min_since_stack[stack_size - 1];
+            if (prev_min < cur_min) cur_min = prev_min;
+            stack_size--;
+        }
+        if (rmin_arr) rmin_arr[i] = cur_min;
+
+        stack[stack_size] = i;
+        min_since_stack[stack_size] = cur_min;
+        stack_size++;
+    }
+
+    free(stack);
+    free(min_since_stack);
+
+    // Pass 3: Compute prominence
+    if (prom_arr && lmin_arr && rmin_arr) {
+        for (int i = 0; i < nf; i++) {
+            float lm = lmin_arr[i];
+            float rm = rmin_arr[i];
+            float key_min = (lm > rm) ? lm : rm;
+            prom_arr[i] = env[i] - key_min;
+        }
+    }
 }
+
 
 static double* create_mel_filterbank(int sr, int n_fft, int n_mels);
 
@@ -685,6 +712,17 @@ int analyzer_analyze_chunk_flux_direct(TransientAnalyzer* self, const float* flu
     float *bth[MAX_BANDS] = {0}, *bl[MAX_BANDS] = {0}, *br[MAX_BANDS] = {0}, *bp[MAX_BANDS] = {0};
     for (int b = 0; b < num_b; b++) {
         float *env = envs[b], *thr = thrs[b];
+        float *lmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *rmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *prom_arr = (float*)malloc(sizeof(float) * nf);
+        if (lmin_arr && rmin_arr && prom_arr) {
+            compute_prominence_array_linear(sm_envs[b], nf, lmin_arr, rmin_arr, prom_arr);
+            for (int f = 0; f < nf; f++) {
+                int cache_idx_f = (rptr + f) % CACHE_SIZE;
+                self->prominence_envelopes[b * CACHE_SIZE + cache_idx_f] = prom_arr[f];
+            }
+        }
+
         int *tp = (int*)malloc(sizeof(int) * nf);
         float *tt = (float*)malloc(sizeof(float) * nf), *tl = (float*)malloc(sizeof(float) * nf), *tr = (float*)malloc(sizeof(float) * nf), *tm = (float*)malloc(sizeof(float) * nf);
         int pc = 0;
@@ -694,9 +732,9 @@ int analyzer_analyze_chunk_flux_direct(TransientAnalyzer* self, const float* flu
                     bool replaced = false, too_close = false;
                     if (pc > 0 && f - tp[pc-1] < 200) { too_close = true; if (env[f] > env[tp[pc-1]]) replaced = true; }
                     if (!too_close || replaced) {
-                        float lmin_s, rmin_s;
-                        int cache_idx_f = (rptr + f) % CACHE_SIZE;
-                        float prom_s = calculate_prominence_global(self, b, cache_idx_f, &lmin_s, &rmin_s);
+                        float lmin_s = lmin_arr ? lmin_arr[f] : 0.0f;
+                        float rmin_s = rmin_arr ? rmin_arr[f] : 0.0f;
+                        float prom_s = prom_arr ? prom_arr[f] : 0.0f;
 
                         if (prom_s > self->smoothing_avgs[b]) {
                             if (replaced) { tp[pc-1] = f; tt[pc-1] = thr[f]; tl[pc-1] = lmin_s; tr[pc-1] = rmin_s; tm[pc-1] = prom_s; }
@@ -717,6 +755,9 @@ int analyzer_analyze_chunk_flux_direct(TransientAnalyzer* self, const float* flu
             if (br[b]) memcpy(br[b], tr, sizeof(float) * pc);
             if (bp[b]) memcpy(bp[b], tm, sizeof(float) * pc);
         }
+        if (lmin_arr) free(lmin_arr);
+        if (rmin_arr) free(rmin_arr);
+        if (prom_arr) free(prom_arr);
         free(tp); free(tt); free(tl); free(tr); free(tm);
     }
     float gmax = 0; bool any = false;
@@ -746,9 +787,7 @@ int analyzer_analyze_chunk_flux_direct(TransientAnalyzer* self, const float* flu
             if (lf >= 0 && lf < nf) {
                 int cache_idx = (rptr + (int)lf) % CACHE_SIZE;
                 smooth = self->dynamic_smoothings[b * CACHE_SIZE + cache_idx];
-                prom = calculate_prominence_global(self, b, cache_idx, NULL, NULL);
-
-                self->prominence_envelopes[b * CACHE_SIZE + cache_idx] = prom;
+                prom = self->prominence_envelopes[b * CACHE_SIZE + cache_idx];
             }
             result_out->last_dynamic_smoothing[b][i] = smooth;
             result_out->last_prominence[b][i] = prom;
@@ -854,7 +893,15 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
     }
     int *bpeaks[MAX_BANDS] = {0}, bpeak_counts[MAX_BANDS] = {0}; float *bth[MAX_BANDS] = {0}, *bl[MAX_BANDS] = {0}, *br[MAX_BANDS] = {0}, *bp[MAX_BANDS] = {0};
     for (int b = 0; b < num_b; b++) {
-        float *env = envs[b], *thr = thrs[b]; int *tp = (int*)malloc(sizeof(int) * nf);
+        float *env = envs[b], *thr = thrs[b];
+        float *lmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *rmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *prom_arr = (float*)malloc(sizeof(float) * nf);
+        if (lmin_arr && rmin_arr && prom_arr) {
+            compute_prominence_array_linear(sm_envs[b], nf, lmin_arr, rmin_arr, prom_arr);
+        }
+
+        int *tp = (int*)malloc(sizeof(int) * nf);
         float *tt = (float*)malloc(sizeof(float) * nf), *tl = (float*)malloc(sizeof(float) * nf), *tr = (float*)malloc(sizeof(float) * nf), *tm = (float*)malloc(sizeof(float) * nf);
         int pc = 0;
         if (tp && tt && tl && tr && tm) {
@@ -863,9 +910,9 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
                     bool replaced = false, too_close = false;
                     if (pc > 0 && f - tp[pc-1] < 200) { too_close = true; if (env[f] > env[tp[pc-1]]) replaced = true; }
                     if (!too_close || replaced) {
-                        float lmin_s, rmin_s;
-                        int cache_idx_f = (rptr + f) % CACHE_SIZE;
-                        float prom_s = calculate_prominence_global(self, b, cache_idx_f, &lmin_s, &rmin_s);
+                        float lmin_s = lmin_arr ? lmin_arr[f] : 0.0f;
+                        float rmin_s = rmin_arr ? rmin_arr[f] : 0.0f;
+                        float prom_s = prom_arr ? prom_arr[f] : 0.0f;
 
                         if (prom_s > self->smoothing_avgs[b]) {
                             if (replaced) { tp[pc-1] = f; tt[pc-1] = thr[f]; tl[pc-1] = lmin_s; tr[pc-1] = rmin_s; tm[pc-1] = prom_s; }
@@ -886,6 +933,9 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
             if (br[b]) memcpy(br[b], tr, sizeof(float) * pc);
             if (bp[b]) memcpy(bp[b], tm, sizeof(float) * pc);
         }
+        if (lmin_arr) free(lmin_arr);
+        if (rmin_arr) free(rmin_arr);
+        if (prom_arr) free(prom_arr);
         free(tp); free(tt); free(tl); free(tr); free(tm);
     }
     float gmax = 0; bool any = false;
@@ -915,10 +965,7 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
             if (lf >= 0 && lf < nf) {
                 int cache_idx = (rptr + (int)lf) % CACHE_SIZE;
                 smooth = self->dynamic_smoothings[b * CACHE_SIZE + cache_idx];
-                prom = calculate_prominence_global(self, b, cache_idx, NULL, NULL);
-
-                // Store calculated prominence in the persistent cache
-                self->prominence_envelopes[b * CACHE_SIZE + cache_idx] = prom;
+                prom = self->prominence_envelopes[b * CACHE_SIZE + cache_idx];
             }
             result_out->last_dynamic_smoothing[b][i] = smooth;
             result_out->last_prominence[b][i] = prom;
