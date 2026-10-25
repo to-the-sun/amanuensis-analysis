@@ -2801,12 +2801,12 @@ int export_group_assets_and_html(
     }
     free(pass1_analyzers);
 
-    // Determine segment length high point from accumulated_contour
-    int m_len = contour_len - 99;
-    double max_contour_val = -1e9;
+    // Determine segment length high point from accumulated_contour (searching 100ms to 14,000ms)
+    int m_len = contour_len - 100;
+    double max_contour_val = 0.0;
     int best_lag_ms = 1000;
     if (m_len > 0 && accumulated_contour) {
-        for (int k = 0; k < m_len; k++) {
+        for (int k = 1000; k < m_len; k++) {
             if (accumulated_contour[k] > max_contour_val) {
                 max_contour_val = accumulated_contour[k];
                 best_lag_ms = (contour_len - 1) - k;
@@ -2814,7 +2814,7 @@ int export_group_assets_and_html(
         }
     }
     double best_bar_length_ms = (double)best_lag_ms;
-    if (best_bar_length_ms <= 0.0) best_bar_length_ms = 1000.0;
+    if (best_bar_length_ms < 100.0 || max_contour_val <= 0.0) best_bar_length_ms = 1000.0;
 
     int pass2_win_ms = (int)round(best_bar_length_ms * 2.0);
     if (pass2_win_ms > 15000) pass2_win_ms = 15000;

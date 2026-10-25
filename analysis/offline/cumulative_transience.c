@@ -589,19 +589,26 @@ void analyzer_push_flux_direct(TransientAnalyzer* self, const float* flux_sample
         self->total_samples_received = 0;
     }
 
-    for (int i = 0; i < len; i++) {
+    int hop = (int)(sr * 0.001);
+    if (hop < 1) hop = 1;
+
+    for (int i = 0; i < len; i += hop) {
         int f_idx = self->cache_write_ptr;
-        float flux = flux_samples[i];
-        if (flux < 0.0f) flux = 0.0f;
+        float max_flux = 0.0f;
+        int end_k = i + hop;
+        if (end_k > len) end_k = len;
+        for (int k = i; k < end_k; k++) {
+            if (flux_samples[k] > max_flux) max_flux = flux_samples[k];
+        }
 
         for (int b = 0; b < self->num_bands; b++) {
-            self->flux_envelopes[b * CACHE_SIZE + f_idx] = flux;
+            self->flux_envelopes[b * CACHE_SIZE + f_idx] = max_flux;
 
             float prev_smooth = self->smoothing_states[b];
-            if (flux > prev_smooth) {
-                self->smoothing_states[b] = flux;
+            if (max_flux > prev_smooth) {
+                self->smoothing_states[b] = max_flux;
             } else {
-                self->smoothing_states[b] = prev_smooth - (prev_smooth - flux) / 200.0f;
+                self->smoothing_states[b] = prev_smooth - (prev_smooth - max_flux) / 200.0f;
             }
             self->dynamic_smoothings[b * CACHE_SIZE + f_idx] = self->smoothing_states[b];
         }
