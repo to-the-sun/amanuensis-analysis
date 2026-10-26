@@ -582,6 +582,24 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
         dir_copy[d_len - 1] = '\0';
         d_len--;
     }
+
+    if (strcmp(dir_copy, ".") == 0 || strcmp(dir_copy, "..") == 0 || dir_copy[0] == '\0') {
+        char abs_dir[2048] = "";
+#if defined(_WIN32) || defined(_WIN64)
+        if (_getcwd(abs_dir, sizeof(abs_dir)) != NULL) {
+#else
+        if (getcwd(abs_dir, sizeof(abs_dir)) != NULL) {
+#endif
+            strncpy(dir_copy, abs_dir, sizeof(dir_copy) - 1);
+            dir_copy[sizeof(dir_copy) - 1] = '\0';
+            d_len = strlen(dir_copy);
+            while (d_len > 1 && (dir_copy[d_len - 1] == '/' || dir_copy[d_len - 1] == '\\')) {
+                dir_copy[d_len - 1] = '\0';
+                d_len--;
+            }
+        }
+    }
+
     const char* last_sep = strrchr(dir_copy, '/');
     const char* last_backslash = strrchr(dir_copy, '\\');
     if (last_backslash && (!last_sep || last_backslash > last_sep)) last_sep = last_backslash;
@@ -593,6 +611,7 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
         snprintf(group_name, sizeof(group_name), "%s", dir_copy);
     }
 
+    printf("[Group Mode] Resolved group name: '%s'\n", group_name);
     printf("\nRunning grouped cumulative transience analysis & asset exports in pure C...\n");
     if (original_audio_filepath && original_audio_filepath[0] != '\0') {
         printf("Original audio file specified: %s\n", original_audio_filepath);

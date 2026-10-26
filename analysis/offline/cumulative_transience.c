@@ -58,44 +58,71 @@ static float calculate_half_max(float* values, int n) {
     return max_v / 2.0f;
 }
 
-static float calculate_prominence_global(TransientAnalyzer* self, int band_idx, int cache_idx, float* lmin_out, float* rmin_out) {
-    int nf = self->cache_count;
-    if (nf <= 0) {
-        if (lmin_out) *lmin_out = 0;
-        if (rmin_out) *rmin_out = 0;
-        return 0;
+static void compute_prominence_array_linear(const float* env, int nf, float* lmin_arr, float* rmin_arr, float* prom_arr) {
+    if (nf <= 0) return;
+    if (nf == 1) {
+        if (lmin_arr) lmin_arr[0] = env[0];
+        if (rmin_arr) rmin_arr[0] = env[0];
+        if (prom_arr) prom_arr[0] = 0.0f;
+        return;
     }
 
-    int rptr = (self->cache_write_ptr - nf + CACHE_SIZE) % CACHE_SIZE;
-    // Find how many steps we can go back from cache_idx to reach rptr
-    int steps_back = (cache_idx - rptr + CACHE_SIZE) % CACHE_SIZE;
-    // Find how many steps we can go forward from cache_idx to reach the latest frame (write_ptr - 1)
-    int latest_idx = (self->cache_write_ptr - 1 + CACHE_SIZE) % CACHE_SIZE;
-    int steps_forward = (latest_idx - cache_idx + CACHE_SIZE) % CACHE_SIZE;
-
-    float val = self->dynamic_smoothings[band_idx * CACHE_SIZE + cache_idx];
-    float lmin = val;
-    // Search backwards in the global circular buffer until rptr (oldest valid frame)
-    for (int k = 1; k <= steps_back; k++) {
-        int idx = (cache_idx - k + CACHE_SIZE) % CACHE_SIZE;
-        float v = self->dynamic_smoothings[band_idx * CACHE_SIZE + idx];
-        if (v > val) break;
-        if (v < lmin) lmin = v;
+    int* stack = (int*)malloc(sizeof(int) * nf);
+    float* min_since_stack = (float*)malloc(sizeof(float) * nf);
+    if (!stack || !min_since_stack) {
+        if (stack) free(stack);
+        if (min_since_stack) free(min_since_stack);
+        return;
     }
 
-    float rmin = val;
-    // Search forwards in the global circular buffer until latest_idx (newest valid frame)
-    for (int k = 1; k <= steps_forward; k++) {
-        int idx = (cache_idx + k) % CACHE_SIZE;
-        float v = self->dynamic_smoothings[band_idx * CACHE_SIZE + idx];
-        if (v > val) break;
-        if (v < rmin) rmin = v;
+    // Pass 1: Left minimum sweep
+    int stack_size = 0;
+    for (int i = 0; i < nf; i++) {
+        float val = env[i];
+        float cur_min = val;
+        while (stack_size > 0 && env[stack[stack_size - 1]] <= val) {
+            float prev_min = min_since_stack[stack_size - 1];
+            if (prev_min < cur_min) cur_min = prev_min;
+            stack_size--;
+        }
+        if (lmin_arr) lmin_arr[i] = cur_min;
+
+        stack[stack_size] = i;
+        min_since_stack[stack_size] = cur_min;
+        stack_size++;
     }
 
-    if (lmin_out) *lmin_out = lmin;
-    if (rmin_out) *rmin_out = rmin;
-    return val - (lmin > rmin ? lmin : rmin);
+    // Pass 2: Right minimum sweep
+    stack_size = 0;
+    for (int i = nf - 1; i >= 0; i--) {
+        float val = env[i];
+        float cur_min = val;
+        while (stack_size > 0 && env[stack[stack_size - 1]] <= val) {
+            float prev_min = min_since_stack[stack_size - 1];
+            if (prev_min < cur_min) cur_min = prev_min;
+            stack_size--;
+        }
+        if (rmin_arr) rmin_arr[i] = cur_min;
+
+        stack[stack_size] = i;
+        min_since_stack[stack_size] = cur_min;
+        stack_size++;
+    }
+
+    free(stack);
+    free(min_since_stack);
+
+    // Pass 3: Compute prominence
+    if (prom_arr && lmin_arr && rmin_arr) {
+        for (int i = 0; i < nf; i++) {
+            float lm = lmin_arr[i];
+            float rm = rmin_arr[i];
+            float key_min = (lm > rm) ? lm : rm;
+            prom_arr[i] = env[i] - key_min;
+        }
+    }
 }
+
 
 static double* create_mel_filterbank(int sr, int n_fft, int n_mels);
 
@@ -582,6 +609,212 @@ void analyzer_push_audio(TransientAnalyzer* self, const float* y, int len, int s
     }
 }
 
+void analyzer_push_flux_direct(TransientAnalyzer* self, const float* flux_samples, int len, int sr) {
+    if (!self || !flux_samples || len <= 0) return;
+    if (self->sample_rate != sr) {
+        analyzer_set_sample_rate(self, sr);
+        self->total_samples_received = 0;
+    }
+
+    int hop = (int)(sr * 0.001);
+    if (hop < 1) hop = 1;
+
+    for (int i = 0; i < len; i += hop) {
+        int f_idx = self->cache_write_ptr;
+        float max_flux = 0.0f;
+        int end_k = i + hop;
+        if (end_k > len) end_k = len;
+        for (int k = i; k < end_k; k++) {
+            if (flux_samples[k] > max_flux) max_flux = flux_samples[k];
+        }
+
+        for (int b = 0; b < self->num_bands; b++) {
+            self->flux_envelopes[b * CACHE_SIZE + f_idx] = max_flux;
+
+            float prev_smooth = self->smoothing_states[b];
+            if (max_flux > prev_smooth) {
+                self->smoothing_states[b] = max_flux;
+            } else {
+                self->smoothing_states[b] = prev_smooth - (prev_smooth - max_flux) / 200.0f;
+            }
+            self->dynamic_smoothings[b * CACHE_SIZE + f_idx] = self->smoothing_states[b];
+        }
+
+        self->cache_write_ptr = (self->cache_write_ptr + 1) % CACHE_SIZE;
+        if (self->cache_count < CACHE_SIZE) self->cache_count++;
+        self->total_frames_pushed++;
+    }
+    self->total_samples_received += len;
+}
+
+int analyzer_analyze_chunk_flux_direct(TransientAnalyzer* self, const float* flux_samples, int len, int sr, int buffer_start_frame, int active_start_frame, ChunkAnalysisResult* result_out) {
+    (void)buffer_start_frame;
+    analyzer_cleanup_snapshots(self, active_start_frame);
+    analyzer_push_flux_direct(self, flux_samples, len, sr);
+    int nf = self->cache_count, rptr = (self->cache_write_ptr - nf + CACHE_SIZE) % CACHE_SIZE;
+    float *envs[MAX_BANDS] = {0}, *sm_envs[MAX_BANDS] = {0}, *thrs[MAX_BANDS] = {0};
+    float half_maxes[MAX_BANDS];
+
+    int num_b = self->num_bands;
+    for (int b = 0; b < num_b; b++) {
+        envs[b] = (float*)malloc(sizeof(float) * nf);
+        sm_envs[b] = (float*)malloc(sizeof(float) * nf);
+        thrs[b] = (float*)malloc(sizeof(float) * nf);
+        if (!envs[b] || !sm_envs[b] || !thrs[b]) { for(int k=0; k<=b; k++) { free(envs[k]); free(sm_envs[k]); free(thrs[k]); } return 0; }
+        for (int j = 0; j < nf; j++) {
+            envs[b][j] = self->flux_envelopes[b * CACHE_SIZE + (rptr + j) % CACHE_SIZE];
+            sm_envs[b][j] = self->dynamic_smoothings[b * CACHE_SIZE + (rptr + j) % CACHE_SIZE];
+        }
+
+        int n_dyn_b = (int)(self->midpoint_lookback[b] / self->frame_duration_ms);
+        if (n_dyn_b > nf) n_dyn_b = nf;
+        if (n_dyn_b <= 0) n_dyn_b = 1;
+
+        half_maxes[b] = calculate_half_max(envs[b] + nf - n_dyn_b, n_dyn_b);
+        for (int j = 0; j < nf; j++) thrs[b][j] = (float)self->smoothing_avgs[b];
+
+        result_out->metrics.band_lookbacks[b] = self->midpoint_lookback[b];
+        result_out->metrics.band_avg_deltas[b] = self->lookback_avg_delta[b];
+        result_out->metrics.band_total_deltas[b] = self->lookback_total_delta[b];
+        result_out->metrics.band_p_counts[b] = self->lookback_p_count[b];
+
+        double avg_delta_ms = 0;
+        double total_delta_ms = 0;
+        int p_count = 0;
+        int lookback_frames = (int)(self->midpoint_lookback[b] / self->frame_duration_ms);
+        int cutoff = active_start_frame - lookback_frames;
+
+        if (self->lock_func) self->lock_func(self->lock_obj);
+        SnapshotEntry* curr = self->snapshot_heads[b];
+        while (curr) {
+            if (curr->p_idx >= cutoff) p_count++;
+            curr = curr->next;
+        }
+        if (self->unlock_func) self->unlock_func(self->lock_obj);
+
+        if (p_count > 1) {
+            total_delta_ms = (double)self->window_ms;
+            avg_delta_ms = total_delta_ms / (double)p_count;
+        } else {
+            total_delta_ms = 0.0;
+            avg_delta_ms = 0.0;
+        }
+
+        self->lookback_avg_delta[b] = avg_delta_ms;
+        self->lookback_total_delta[b] = total_delta_ms;
+        self->lookback_p_count[b] = p_count;
+        self->midpoint_lookback[b] = (double)self->window_ms - avg_delta_ms;
+        if (self->midpoint_lookback[b] < 100.0) self->midpoint_lookback[b] = 100.0;
+        if (self->midpoint_lookback[b] > (double)self->window_ms) self->midpoint_lookback[b] = (double)self->window_ms;
+    }
+
+    int *bpeaks[MAX_BANDS] = {0}, bpeak_counts[MAX_BANDS] = {0};
+    float *bth[MAX_BANDS] = {0}, *bl[MAX_BANDS] = {0}, *br[MAX_BANDS] = {0}, *bp[MAX_BANDS] = {0};
+    for (int b = 0; b < num_b; b++) {
+        float *env = envs[b], *thr = thrs[b];
+        float *lmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *rmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *prom_arr = (float*)malloc(sizeof(float) * nf);
+        if (lmin_arr && rmin_arr && prom_arr) {
+            compute_prominence_array_linear(sm_envs[b], nf, lmin_arr, rmin_arr, prom_arr);
+            for (int f = 0; f < nf; f++) {
+                int cache_idx_f = (rptr + f) % CACHE_SIZE;
+                self->prominence_envelopes[b * CACHE_SIZE + cache_idx_f] = prom_arr[f];
+            }
+        }
+
+        int *tp = (int*)malloc(sizeof(int) * nf);
+        float *tt = (float*)malloc(sizeof(float) * nf), *tl = (float*)malloc(sizeof(float) * nf), *tr = (float*)malloc(sizeof(float) * nf), *tm = (float*)malloc(sizeof(float) * nf);
+        int pc = 0;
+        if (tp && tt && tl && tr && tm) {
+            for (int f = 1; f < nf - 1; f++) {
+                if (env[f] > env[f-1] && env[f] > env[f+1] && env[f] > thr[f] && env[f] >= 0.0f) {
+                    bool replaced = false, too_close = false;
+                    if (pc > 0 && f - tp[pc-1] < 200) { too_close = true; if (env[f] > env[tp[pc-1]]) replaced = true; }
+                    if (!too_close || replaced) {
+                        float lmin_s = lmin_arr ? lmin_arr[f] : 0.0f;
+                        float rmin_s = rmin_arr ? rmin_arr[f] : 0.0f;
+                        float prom_s = prom_arr ? prom_arr[f] : 0.0f;
+
+                        if (prom_s > self->smoothing_avgs[b]) {
+                            if (replaced) { tp[pc-1] = f; tt[pc-1] = thr[f]; tl[pc-1] = lmin_s; tr[pc-1] = rmin_s; tm[pc-1] = prom_s; }
+                            else { tp[pc] = f; tt[pc] = thr[f]; tl[pc] = lmin_s; tr[pc] = rmin_s; tm[pc] = prom_s; pc++; }
+                        }
+                    }
+                }
+            }
+            bpeaks[b] = (int*)malloc(sizeof(int) * pc);
+            bth[b] = (float*)malloc(sizeof(float) * pc);
+            bl[b] = (float*)malloc(sizeof(float) * pc);
+            br[b] = (float*)malloc(sizeof(float) * pc);
+            bp[b] = (float*)malloc(sizeof(float) * pc);
+            bpeak_counts[b] = pc;
+            if (bpeaks[b]) memcpy(bpeaks[b], tp, sizeof(int) * pc);
+            if (bth[b]) memcpy(bth[b], tt, sizeof(float) * pc);
+            if (bl[b]) memcpy(bl[b], tl, sizeof(float) * pc);
+            if (br[b]) memcpy(br[b], tr, sizeof(float) * pc);
+            if (bp[b]) memcpy(bp[b], tm, sizeof(float) * pc);
+        }
+        if (lmin_arr) free(lmin_arr);
+        if (rmin_arr) free(rmin_arr);
+        if (prom_arr) free(prom_arr);
+        free(tp); free(tt); free(tl); free(tr); free(tm);
+    }
+    float gmax = 0; bool any = false;
+    for (int b = 0; b < num_b; b++) for (int i = 0; i < bpeak_counts[b]; i++) { float v = envs[b][bpeaks[b][i]]; if (!any || v > gmax) { gmax = v; any = true; } }
+    if (any) {
+        if (self->lock_func) self->lock_func(self->lock_obj);
+        if (self->shared_buffer) {
+            if (gmax > (float)self->shared_buffer->max_peak) self->shared_buffer->max_peak = (double)gmax;
+        } else {
+            if (gmax > (float)self->private_max_peak) self->private_max_peak = (double)gmax;
+        }
+        if (self->unlock_func) self->unlock_func(self->lock_obj);
+    }
+    int tot = 0; for (int b = 0; b < num_b; b++) tot += bpeak_counts[b];
+    PeakRef* pref = (PeakRef*)malloc(sizeof(PeakRef) * (tot + 1)); int* aind = (int*)malloc(sizeof(int) * (tot + 1));
+    if (pref && aind) {
+        int curr = 0; for (int b = 0; b < num_b; b++) for (int i = 0; i < bpeak_counts[b]; i++) { pref[curr].p_idx = bpeaks[b][i]; pref[curr].band_idx = b; aind[curr] = bpeaks[b][i]; curr++; }
+        qsort(pref, tot, sizeof(PeakRef), compare_peaks);
+        result_out->peak_list.num_peaks = 0;
+        long long gstart = self->total_frames_pushed - self->cache_count;
+        for (int b = 0; b < num_b; b++) for (int i = 0; i < 100; i++) {
+            long long gf = (long long)active_start_frame + i, lf = gf - gstart;
+            result_out->last_flux[b][i] = (lf >= 0 && lf < nf) ? envs[b][lf] : 0;
+
+            float smooth = 0;
+            float prom = 0;
+            if (lf >= 0 && lf < nf) {
+                int cache_idx = (rptr + (int)lf) % CACHE_SIZE;
+                smooth = self->dynamic_smoothings[b * CACHE_SIZE + cache_idx];
+                prom = self->prominence_envelopes[b * CACHE_SIZE + cache_idx];
+            }
+            result_out->last_dynamic_smoothing[b][i] = smooth;
+            result_out->last_prominence[b][i] = prom;
+        }
+        for (int i = 0; i < tot; i++) {
+            int p_idx = pref[i].p_idx, b = pref[i].band_idx; long long gp = gstart + p_idx;
+            if (gp >= (long long)active_start_frame && gp < (long long)active_start_frame + 100) {
+                double pv = 0, tv = 0, lv = 0, rv = 0, prv = 0;
+                for (int k = 0; k < bpeak_counts[b]; k++) if (bpeaks[b][k] == p_idx) { pv = envs[b][p_idx]; tv = bth[b][k]; lv = bl[b][k]; rv = br[b][k]; prv = bp[b][k]; break; }
+                PeakResult pr; double time = (double)gp * self->frame_duration_ms / 1000.0;
+                if (analyzer_process_peak(self, p_idx, (int)gp, b, time, envs[b], nf, aind, tot, pv, tv, lv, rv, prv, &pr)) {
+                    if (result_out->peak_list.num_peaks < MAX_PEAKS_PER_CHUNK) {
+                        pr.p_idx = (int)gp;
+                        result_out->peak_list.peaks[result_out->peak_list.num_peaks++] = pr;
+                    }
+                }
+            }
+        }
+        analyzer_update_metrics(self, active_start_frame + 100, &result_out->metrics);
+        for (int b = 0; b < num_b; b++) result_out->metrics.band_midpoints[b] = (double)half_maxes[b];
+    }
+    for (int b = 0; b < num_b; b++) {
+        free(envs[b]); free(sm_envs[b]); free(thrs[b]); if (bpeak_counts[b] > 0) { free(bpeaks[b]); free(bth[b]); free(bl[b]); free(br[b]); free(bp[b]); }
+    }
+    free(pref); free(aind); return 1;
+}
+
 int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int sr, int buffer_start_frame, int active_start_frame, ChunkAnalysisResult* result_out) {
     (void)buffer_start_frame;
     analyzer_cleanup_snapshots(self, active_start_frame);
@@ -660,7 +893,15 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
     }
     int *bpeaks[MAX_BANDS] = {0}, bpeak_counts[MAX_BANDS] = {0}; float *bth[MAX_BANDS] = {0}, *bl[MAX_BANDS] = {0}, *br[MAX_BANDS] = {0}, *bp[MAX_BANDS] = {0};
     for (int b = 0; b < num_b; b++) {
-        float *env = envs[b], *thr = thrs[b]; int *tp = (int*)malloc(sizeof(int) * nf);
+        float *env = envs[b], *thr = thrs[b];
+        float *lmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *rmin_arr = (float*)malloc(sizeof(float) * nf);
+        float *prom_arr = (float*)malloc(sizeof(float) * nf);
+        if (lmin_arr && rmin_arr && prom_arr) {
+            compute_prominence_array_linear(sm_envs[b], nf, lmin_arr, rmin_arr, prom_arr);
+        }
+
+        int *tp = (int*)malloc(sizeof(int) * nf);
         float *tt = (float*)malloc(sizeof(float) * nf), *tl = (float*)malloc(sizeof(float) * nf), *tr = (float*)malloc(sizeof(float) * nf), *tm = (float*)malloc(sizeof(float) * nf);
         int pc = 0;
         if (tp && tt && tl && tr && tm) {
@@ -669,9 +910,9 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
                     bool replaced = false, too_close = false;
                     if (pc > 0 && f - tp[pc-1] < 200) { too_close = true; if (env[f] > env[tp[pc-1]]) replaced = true; }
                     if (!too_close || replaced) {
-                        float lmin_s, rmin_s;
-                        int cache_idx_f = (rptr + f) % CACHE_SIZE;
-                        float prom_s = calculate_prominence_global(self, b, cache_idx_f, &lmin_s, &rmin_s);
+                        float lmin_s = lmin_arr ? lmin_arr[f] : 0.0f;
+                        float rmin_s = rmin_arr ? rmin_arr[f] : 0.0f;
+                        float prom_s = prom_arr ? prom_arr[f] : 0.0f;
 
                         if (prom_s > self->smoothing_avgs[b]) {
                             if (replaced) { tp[pc-1] = f; tt[pc-1] = thr[f]; tl[pc-1] = lmin_s; tr[pc-1] = rmin_s; tm[pc-1] = prom_s; }
@@ -692,6 +933,9 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
             if (br[b]) memcpy(br[b], tr, sizeof(float) * pc);
             if (bp[b]) memcpy(bp[b], tm, sizeof(float) * pc);
         }
+        if (lmin_arr) free(lmin_arr);
+        if (rmin_arr) free(rmin_arr);
+        if (prom_arr) free(prom_arr);
         free(tp); free(tt); free(tl); free(tr); free(tm);
     }
     float gmax = 0; bool any = false;
@@ -721,10 +965,7 @@ int analyzer_analyze_chunk(TransientAnalyzer* self, const float* y, int len, int
             if (lf >= 0 && lf < nf) {
                 int cache_idx = (rptr + (int)lf) % CACHE_SIZE;
                 smooth = self->dynamic_smoothings[b * CACHE_SIZE + cache_idx];
-                prom = calculate_prominence_global(self, b, cache_idx, NULL, NULL);
-
-                // Store calculated prominence in the persistent cache
-                self->prominence_envelopes[b * CACHE_SIZE + cache_idx] = prom;
+                prom = self->prominence_envelopes[b * CACHE_SIZE + cache_idx];
             }
             result_out->last_dynamic_smoothing[b][i] = smooth;
             result_out->last_prominence[b][i] = prom;
@@ -872,6 +1113,131 @@ int analyzer_batch_analyze(const float* y, int len, int sr, int window_ms, int n
         free(pband[b]);
     }
     analyzer_destroy(a); return 1;
+}
+
+int analyzer_batch_analyze_direct_flux(const float* flux_samples, int len, int sr, int window_ms, int num_bands, FullAnalysisResult* result_out) {
+    if (window_ms > 15000) window_ms = 15000;
+    if (window_ms <= 0) window_ms = 15000;
+    if (num_bands <= 0 || num_bands > MAX_BANDS) num_bands = MAX_BANDS;
+    result_out->num_bands = num_bands;
+    int hop = (int)(sr * 0.001), num_f = (len + hop - 1) / hop;
+    result_out->num_frames = num_f;
+    result_out->times = (float*)malloc(sizeof(float) * num_f);
+    if (!result_out->times) return 0;
+    for (int i = 0; i < num_f; i++) result_out->times[i] = (float)i * (float)hop / (float)sr;
+    result_out->ratings = (double*)malloc(sizeof(double) * num_f);
+    result_out->std_devs = (double*)malloc(sizeof(double) * num_f);
+    result_out->means = (double*)malloc(sizeof(double) * num_f);
+    result_out->contrasts = (double*)malloc(sizeof(double) * num_f);
+    result_out->stability_scores = (double*)malloc(sizeof(double) * num_f);
+    result_out->highest_peaks_ms = (double*)malloc(sizeof(double) * num_f);
+    result_out->demarcation_lines = (double*)malloc(sizeof(double) * num_f);
+    result_out->rolling_global_flux_avg = (float*)calloc(num_f, sizeof(float));
+    result_out->rolling_global_smoothing_avg = (float*)calloc(num_f, sizeof(float));
+    for (int b = 0; b < num_bands; b++) {
+        result_out->bands[b].envelope = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_dynamic_smoothing = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_prominence = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_prominence_avg = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_prominence_half_max = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_smoothing_avg = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_flux_avg = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_threshold = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_lookback = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_avg_delta = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_total_delta = (float*)calloc(num_f, sizeof(float));
+        result_out->bands[b].rolling_p_count = (int*)calloc(num_f, sizeof(int));
+        result_out->bands[b].peaks = NULL;
+        result_out->bands[b].num_peaks = 0;
+    }
+
+    TransientAnalyzer* a = analyzer_create(1.0, NULL, NULL, NULL, NULL, window_ms, num_bands);
+    if (!a) return 0;
+    analyzer_set_sample_rate(a, sr);
+    int step = hop * 100;
+    PeakResult* pband[MAX_BANDS];
+    int pcap[MAX_BANDS];
+    for (int b = 0; b < num_bands; b++) {
+        pcap[b] = 1024;
+        pband[b] = (PeakResult*)malloc(sizeof(PeakResult) * pcap[b]);
+    }
+    int flush_samples = (int)(sr * 0.3);
+
+    for (int last_t = 0; last_t < len + flush_samples; last_t += step) {
+        int act_s = last_t - (int)(sr * 0.2);
+        int win_s = act_s - (int)(sr * (window_ms / 1000.0));
+        if (win_s < 0) win_s = 0;
+
+        ChunkAnalysisResult* res = (ChunkAnalysisResult*)malloc(sizeof(ChunkAnalysisResult));
+        if (!res) { analyzer_destroy(a); return 0; }
+
+        float* push_ptr = (float*)calloc(step, sizeof(float));
+        if (last_t < len) {
+            int rem = len - last_t;
+            memcpy(push_ptr, flux_samples + last_t, sizeof(float) * (rem < step ? rem : step));
+        }
+
+        analyzer_analyze_chunk_flux_direct(a, push_ptr, step, sr, win_s / hop, act_s / hop, res);
+        free(push_ptr);
+
+        for (int b = 0; b < num_bands; b++) {
+            for (int i = 0; i < 100; i++) {
+                int f = act_s / hop + i;
+                if (f >= 0 && f < num_f) {
+                    result_out->bands[b].envelope[f] = res->last_flux[b][i];
+                    result_out->bands[b].rolling_dynamic_smoothing[f] = res->last_dynamic_smoothing[b][i];
+                    result_out->bands[b].rolling_prominence[f] = res->last_prominence[b][i];
+                    result_out->bands[b].rolling_prominence_avg[f] = (float)res->metrics.band_prominence_avgs[b];
+                    result_out->bands[b].rolling_prominence_half_max[f] = (float)res->metrics.band_prominence_half_maxes[b];
+                    result_out->bands[b].rolling_smoothing_avg[f] = (float)res->metrics.band_smoothing_avgs[b];
+                    result_out->bands[b].rolling_flux_avg[f] = (float)res->metrics.band_flux_avgs[b];
+                    result_out->bands[b].rolling_threshold[f] = (float)res->metrics.band_midpoints[b];
+                    result_out->bands[b].rolling_lookback[f] = (float)res->metrics.band_lookbacks[b];
+                    result_out->bands[b].rolling_avg_delta[f] = (float)res->metrics.band_avg_deltas[b];
+                    result_out->bands[b].rolling_total_delta[f] = (float)res->metrics.band_total_deltas[b];
+                    result_out->bands[b].rolling_p_count[f] = res->metrics.band_p_counts[b];
+                }
+            }
+        }
+        for (int i = 0; i < 100; i++) {
+            int f = act_s / hop + i;
+            if (f >= 0 && f < num_f) {
+                result_out->ratings[f] = res->metrics.rating;
+                result_out->std_devs[f] = res->metrics.std_dev;
+                result_out->means[f] = res->metrics.mean;
+                result_out->contrasts[f] = res->metrics.contrast;
+                result_out->stability_scores[f] = res->metrics.stability_score;
+                result_out->highest_peaks_ms[f] = res->metrics.highest_peak_valid ? res->metrics.highest_peak_ms : -999.0;
+                result_out->demarcation_lines[f] = res->metrics.demarcation_line;
+                result_out->rolling_global_flux_avg[f] = (float)res->metrics.global_flux_avg;
+                result_out->rolling_global_smoothing_avg[f] = (float)res->metrics.global_smoothing_avg;
+            }
+        }
+        for (int i = 0; i < res->peak_list.num_peaks; i++) {
+            PeakResult* pr = &res->peak_list.peaks[i];
+            int b = pr->band_idx;
+            if (result_out->bands[b].num_peaks >= pcap[b]) {
+                pcap[b] *= 2;
+                PeakResult* np = realloc(pband[b], sizeof(PeakResult) * pcap[b]);
+                if (np) pband[b] = np;
+            }
+            memcpy(&pband[b][result_out->bands[b].num_peaks++], pr, sizeof(PeakResult));
+        }
+        free(res);
+    }
+
+    result_out->max_peak_value = (float)analyzer_get_max_peak(a);
+    result_out->min_score_seen = a->private_min_score_seen;
+    result_out->max_score_seen = a->private_max_score_seen;
+    result_out->tolerance = a->tolerance;
+    for (int b = 0; b < num_bands; b++) {
+        int n = result_out->bands[b].num_peaks;
+        result_out->bands[b].peaks = (PeakResult*)malloc(sizeof(PeakResult) * n);
+        if (result_out->bands[b].peaks) memcpy(result_out->bands[b].peaks, pband[b], sizeof(PeakResult) * n);
+        free(pband[b]);
+    }
+    analyzer_destroy(a);
+    return 1;
 }
 
 void analyzer_free_analysis(FullAnalysisResult* result) {
