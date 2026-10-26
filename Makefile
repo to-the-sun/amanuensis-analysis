@@ -31,7 +31,7 @@ $(TARGET_CT): $(SRCS_CT)
 	$(CC) $(CFLAGS) $(SRCS_CT) -o $(TARGET_CT) $(LDFLAGS)
 
 $(TARGET_FLUX): $(SRCS_FLUX)
-	$(CC) $(CFLAGS) $(SRCS_FLUX) -o $(TARGET_FLUX) $(LDFLAGS)
+	$(CC) $(CFLAGS) -pthread $(SRCS_FLUX) -o $(TARGET_FLUX) $(LDFLAGS)
 
 win: $(WIN_TARGETS)
 
@@ -42,7 +42,7 @@ $(WIN_TARGET_CT): $(SRCS_CT)
 	$(WIN_CC) $(WIN_CFLAGS) $(SRCS_CT) -o $(WIN_TARGET_CT) $(LDFLAGS)
 
 $(WIN_TARGET_FLUX): $(SRCS_FLUX)
-	$(WIN_CC) $(WIN_CFLAGS) $(SRCS_FLUX) -o $(WIN_TARGET_FLUX) $(LDFLAGS)
+	$(WIN_CC) $(WIN_CFLAGS) -pthread $(SRCS_FLUX) -o $(WIN_TARGET_FLUX) $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS) $(WIN_TARGETS) analysis/*.o analysis/offline/*.o

@@ -8,7 +8,7 @@ The project is organized into three primary subdirectories and root utility scri
 3. `additive_synthesis/` – Interactive additive sound synthesis engine, LaTeX/Sigma notation displays, preset management, psychoacoustic analysis test suite, and generative sound creation.
 4. `analysis/pitch_separator.c` / `analysis/pitch_separator.exe` – C-based Perfect Reconstruction Pitch Stem Separator (drag-and-drop / double-click executable for Windows and Linux).
 5. `analysis/ct_pitch_separator.c` / `analysis/ct_pitch_separator.exe` – C-based Pitch Stem Separator with Cumulative Transience Marking and Non-Tonal Audio Injection.
-6. `analysis/flux_pitch_separator.c` / `analysis/flux_pitch_separator.exe` – C-based Spectral Flux Pitch Separator focusing strictly on deriving per-pitch-stem flux envelopes, modified flux envelopes, peak/trough identification, companion flux WAV exports, and interactive HTML flux reports.
+6. `analysis/flux_pitch_separator.c` / `analysis/flux_pitch_separator.exe` – C-based Spectral Flux Pitch Separator focusing strictly on deriving per-pitch-stem flux envelopes, modified flux envelopes, peak/trough identification, companion flux WAV exports, and interactive HTML flux reports. Supports single-file, multi-file drag-and-drop, and automatic directory scanning with multi-threaded concurrent CPU execution.
 5. `tune_stems.py` – Continuous interval-relative pitch alignment for song stems.
 
 ---
@@ -19,12 +19,13 @@ Separates an audio file into individual MIDI integer pitch stems ($0..127$, repr
 
 **Key Features:**
 - **Perfect Reconstruction & Active Duration Filtering**: Summing all exported pitch stems sample-by-sample reconstructs the original audible notes perfectly. Applies a segmented noise gate on each separated pitch stem audio, zeroing out any audio segment bounded on either side by at least 1 millisecond of silence if it never rises above the global 19% noise floor ratio (`g_noise_floor_ratio`), and exporting WAV files for stems with at least $99\text{ ms}$ of active frames.
-- **Companion Transience (Flux) WAV Output**: For every exported pitch stem (`<basename>_pitch_<03d>_<note_name>.wav`), pitch separator calculates its frame-by-frame spectral flux throughout time and exports a matching companion WAV file stem (`<basename>_pitch_<03d>_<note_name>_flux.wav`) containing the transience measure waveform normalized against the individual stem's peak flux. In addition, `flux_pitch_separator` evaluates peak salience scores (counting peaks iterated in either direction before finding an equal or greater peak), normalizes salience scores using a thinned percentile rank within the ordered list of unique salience integers (`rank / num_unique`), and multiplies each sample in the hill between troughs of its respective peak by the peak's normalized salience score to generate `<basename>_pitch_<03d>_<note_name>_modified_flux.wav`, generating an interactive report in `<basename>_pitch_stems/[flux]/index.html` displaying peak (top) and trough (bottom) hash marks.
+- **Companion Transience (Flux) WAV Output**: For every exported pitch stem (`<basename>_pitch_<03d>_<note_name>.wav`), pitch separator calculates its frame-by-frame spectral flux throughout time and exports a matching companion WAV file stem (`<basename>_pitch_<03d>_<note_name>_flux.wav`) containing the transience measure waveform normalized against the individual stem's peak flux. In addition, `flux_pitch_separator` evaluates peak salience scores (counting peaks iterated in either direction before finding an equal or greater peak), normalizes salience scores using a thinned percentile rank within the ordered list of unique salience integers (`rank / num_unique`), and multiplies each sample in the hill between troughs of its respective peak by the peak's normalized salience score to generate `<basename>_pitch_<03d>_<note_name>_modified_flux.wav`. All generated outputs land in a unified `pitch_stems/` directory and `pitch_stems/[flux]/` subdirectory, using `<basename>` in output filenames (`<basename>_pitch_<03d>_<note_name>_modified_flux.wav`, `<basename>_pitch_<03d>_<note_name>_flux.wav`, `<basename>_flux_waveform_data.js`, `<basename>_index.html`) to prevent filename collisions. In multi-file or directory mode, a master batch dashboard report is generated in `pitch_stems/[flux]/index.html`.
 - **Non-Tonal Audio Stem Export**: Exports an additional WAV file (`<basename>_nontonal.wav`) containing all remaining non-tonal, unpitched, or noise portions of the audio (original input audio minus all exported gated pitch stems) written directly without noise floor gating.
 - **Console Progress Bars & Metadata**: Displays live ASCII progress bars during STFT processing, an acoustic metadata table (peak/RMS amplitudes, active duration, center frequencies) per pitch, non-tonal stem summary statistics, and real-time processing speed factors.
-- **Double-Click & Drag-and-Drop**:
-  - **Windows**: Drag and drop any WAV audio file directly onto `analysis/pitch_separator.exe` or `run_pitch_separator.bat`, or double-click to launch interactive mode.
-  - **Linux / macOS**: Run `./analysis/pitch_separator "audio.wav"` or double-click the binary executable.
+- **Double-Click & Drag-and-Drop (Multi-File & Multithreaded)**:
+  - **Multi-File Drag & Drop**: Drag single or multiple WAV files (or folders) directly onto `flux_pitch_separator.exe` or pass multiple file paths as arguments.
+  - **Double-Click Folder Scanning**: Double-clicking `flux_pitch_separator.exe` without arguments automatically scans its current folder for all WAV files and processes them simultaneously using POSIX worker threads across all available CPU cores.
+  - **Unified Output Directory**: Generated modified flux WAVs, raw flux WAVs, JS data files, and interactive HTML reports for all processed files are placed into a single shared `pitch_stems/` directory (`pitch_stems/[flux]/`) with a master batch analysis dashboard at `pitch_stems/[flux]/index.html`.
 
 **Compilation & Usage:**
 ```bash
@@ -34,8 +35,9 @@ make
 # Usage:
 ./analysis/pitch_separator "path/to/audio.wav"          # Linux / macOS
 analysis/pitch_separator.exe "path/to/audio.wav"        # Windows
-./analysis/flux_pitch_separator "path/to/audio.wav"     # Spectral Flux Focus (Linux / macOS)
-analysis/flux_pitch_separator.exe "path/to/audio.wav"   # Spectral Flux Focus (Windows)
+./analysis/flux_pitch_separator file1.wav file2.wav ... # Multi-file Spectral Flux Analysis (Linux / macOS)
+analysis/flux_pitch_separator.exe file1.wav file2.wav # Multi-file Spectral Flux Analysis (Windows)
+./analysis/flux_pitch_separator                         # Double-click / scan current directory for all WAVs
 ```
 
 ---

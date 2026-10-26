@@ -2,15 +2,17 @@
  * flux_pitch_separator.c
  *
  * Perfect Reconstruction Pitch Stem Separator - Spectral Flux Focus
+ * Multi-File, Directory Scanning & Multi-Threaded Concurrent Execution
  *
  * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
  * identifying peak and trough markers, generating modified flux envelopes via peak salience,
  * exporting companion _flux.wav and _modified_flux.wav files to [flux]/,
- * and producing an interactive HTML report in [flux]/index.html.
+ * and producing interactive HTML reports in [flux]/<basename>_index.html as well as
+ * a master batch dashboard in [flux]/index.html.
  *
- * Does NOT perform cumulative transience analysis, non-tonal injection,
- * or noise gating on main pitch stems, and does NOT produce main pitch stem WAV files.
- * Reconstructed STFT stem audio is freed immediately after deriving raw spectral flux.
+ * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
+ * (which automatically scans the folder for all WAV files and processes them simultaneously
+ * using CPU multithreading).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -22,8 +24,11 @@
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
+#include <pthread.h>
+#include <dirent.h>
 
 #if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+#include <windows.h>
 #include <direct.h>
 #define MKDIR(dir) _mkdir(dir)
 #else
@@ -48,6 +53,9 @@ double g_noise_floor_ratio = 0.19;
 /* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
 double g_silence_threshold = 0.009;
 
+static pthread_mutex_t g_console_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 typedef struct {
     double r;
     double i;
@@ -66,6 +74,19 @@ typedef struct {
     uint32_t total_samples; // samples per channel
     double *data; // interleaved: data[c + ch * num_channels]
 } WAVFile;
+
+typedef struct {
+    char input_path[1024];
+    char basename[512];
+    uint32_t sample_rate;
+    uint16_t num_channels;
+    uint32_t total_samples;
+    double duration;
+    int stem_count;
+    double elapsed_sec;
+    double speed_ratio;
+    int success;
+} FileBatchResult;
 
 const char *NOTE_NAMES[12] = {
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
@@ -184,6 +205,102 @@ typedef struct {
     int num_troughs;
     char mod_filename[1024];
 } FluxStem;
+
+static int ends_with_icase(const char *str, const char *suffix) {
+    if (!str || !suffix) return 0;
+    size_t str_len = strlen(str);
+    size_t suf_len = strlen(suffix);
+    if (str_len < suf_len) return 0;
+    const char *p = str + str_len - suf_len;
+    for (size_t i = 0; i < suf_len; i++) {
+        if (tolower((unsigned char)p[i]) != tolower((unsigned char)suffix[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int contains_icase(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return 0;
+    size_t hlen = strlen(haystack);
+    size_t nlen = strlen(needle);
+    if (hlen < nlen) return 0;
+    for (size_t i = 0; i <= hlen - nlen; i++) {
+        int match = 1;
+        for (size_t j = 0; j < nlen; j++) {
+            if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) return 1;
+    }
+    return 0;
+}
+
+int is_valid_input_wav(const char *path) {
+    if (!path) return 0;
+    if (!ends_with_icase(path, ".wav")) return 0;
+
+    if (contains_icase(path, "_flux.wav")) return 0;
+    if (contains_icase(path, "_modified_flux.wav")) return 0;
+    if (contains_icase(path, "_nontonal.wav")) return 0;
+    if (contains_icase(path, "_original.wav")) return 0;
+    if (contains_icase(path, "_coherence.wav")) return 0;
+
+    if (contains_icase(path, "pitch_stems") || contains_icase(path, "[flux]")) return 0;
+
+    const char *filename = strrchr(path, '/');
+    const char *bs = strrchr(path, '\\');
+    if (bs > filename) filename = bs;
+    if (filename) filename++; else filename = path;
+    if (filename[0] == '.') return 0;
+
+    return 1;
+}
+
+void scan_directory_for_wavs(const char *dir_path, char ***file_list, int *num_files, int *capacity) {
+    DIR *d = opendir(dir_path);
+    if (!d) return;
+
+    struct dirent *dir;
+    while ((dir = readdir(d)) != NULL) {
+        if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) {
+            continue;
+        }
+
+        char full_path[2048];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, dir->d_name);
+
+        if (is_valid_input_wav(full_path)) {
+            if (*num_files >= *capacity) {
+                *capacity = (*capacity == 0) ? 16 : (*capacity * 2);
+                *file_list = (char**)realloc(*file_list, (*capacity) * sizeof(char*));
+            }
+            (*file_list)[*num_files] = strdup(full_path);
+            (*num_files)++;
+        }
+    }
+    closedir(d);
+}
+
+int get_cpu_cores(void) {
+#if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    int num = (int)sysinfo.dwNumberOfProcessors;
+    return num > 0 ? num : 1;
+#else
+    long num = sysconf(_SC_NPROCESSORS_ONLN);
+    return num > 0 ? (int)num : 1;
+#endif
+}
+
+void ensure_dir_exists(const char *path) {
+    pthread_mutex_lock(&g_dir_mutex);
+    MKDIR(path);
+    pthread_mutex_unlock(&g_dir_mutex);
+}
 
 static int find_prev_peak(const double *env, uint32_t n, int start_x) {
     if (start_x >= (int)n - 1) {
@@ -538,11 +655,13 @@ void generate_flux_html_report(
     int stem_count
 ) {
     char html_path[4096];
-    snprintf(html_path, sizeof(html_path), "%s/index.html", flux_dir);
+    snprintf(html_path, sizeof(html_path), "%s/%s_index.html", flux_dir, basename);
 
     FILE *f = fopen(html_path, "w");
     if (!f) {
+        pthread_mutex_lock(&g_console_mutex);
         printf("Error: Could not open Flux HTML report file '%s' for writing.\n", html_path);
+        pthread_mutex_unlock(&g_console_mutex);
         return;
     }
 
@@ -558,7 +677,7 @@ void generate_flux_html_report(
     fprintf(f, "  h1 { font-size: 1.6rem; color: #fff; margin-bottom: 6px; }\n");
     fprintf(f, "  .meta-p { font-size: 0.9rem; color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 14px; }\n");
     fprintf(f, "  .toolbar { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--border); }\n");
-    fprintf(f, "  .btn { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }\n");
+    fprintf(f, "  .btn { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; text-decoration: none; display: inline-block; }\n");
     fprintf(f, "  .btn:hover { opacity: 0.9; }\n");
     fprintf(f, "  .toggle-label { font-size: 0.9rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }\n");
     fprintf(f, "  .view-info { font-size: 0.85rem; color: #4caf50; font-family: monospace; font-weight: bold; }\n");
@@ -587,6 +706,7 @@ void generate_flux_html_report(
     fprintf(f, "    <span><strong>Stems:</strong> %d</span>\n", stem_count);
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"toolbar\">\n");
+    fprintf(f, "    <a class=\"btn\" href=\"index.html\">&larr; Batch Dashboard</a>\n");
     fprintf(f, "    <button class=\"btn\" id=\"resetZoomBtn\" onclick=\"resetZoom()\">Reset Zoom</button>\n");
     fprintf(f, "    <label class=\"toggle-label\"><input type=\"checkbox\" id=\"syncZoomCheck\" checked> Sync Zoom Across Rows</label>\n");
     fprintf(f, "    <span class=\"view-info\" id=\"viewInfo\">Visible: 0.000s &ndash; %.3fs (Duration: %.3fs)</span>\n", duration, duration);
@@ -1124,7 +1244,99 @@ void generate_flux_html_report(
     fprintf(f, "</body>\n</html>\n");
 
     fclose(f);
-    printf("  Flux HTML Report generated: %s/index.html\n", flux_dir);
+
+    pthread_mutex_lock(&g_console_mutex);
+    printf("  Flux HTML Report generated: %s/%s_index.html\n", flux_dir, basename);
+    pthread_mutex_unlock(&g_console_mutex);
+}
+
+void generate_master_flux_html_report(
+    const char *flux_dir,
+    const char *stem_dir,
+    const FileBatchResult *results,
+    int num_results,
+    double total_wall_clock_sec
+) {
+    char master_html_path[4096];
+    snprintf(master_html_path, sizeof(master_html_path), "%s/index.html", flux_dir);
+
+    FILE *f = fopen(master_html_path, "w");
+    if (!f) return;
+
+    if (num_results == 1 && results[0].success) {
+        /* Single file redirect to <basename>_index.html */
+        fprintf(f, "<!DOCTYPE html>\n<html>\n<head>\n");
+        fprintf(f, "<meta http-equiv=\"refresh\" content=\"0; url=%s_index.html\">\n", results[0].basename);
+        fprintf(f, "<title>Spectral Flux Report Redirect</title>\n</head>\n<body>\n");
+        fprintf(f, "<p>Redirecting to <a href=\"%s_index.html\">%s Spectral Flux Report</a>...</p>\n", results[0].basename, results[0].basename);
+        fprintf(f, "</body>\n</html>\n");
+        fclose(f);
+    } else {
+        /* Multi-file Master Batch Dashboard */
+        fprintf(f, "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
+        fprintf(f, "<meta charset=\"UTF-8\">\n");
+        fprintf(f, "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
+        fprintf(f, "<title>Spectral Flux Batch Analysis Dashboard</title>\n");
+        fprintf(f, "<style>\n");
+        fprintf(f, "  :root { --bg: #121216; --card-bg: #1a1a22; --border: #2a2a36; --text: #e1e1e6; --muted: #a0a0b0; --accent: #2196f3; }\n");
+        fprintf(f, "  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }\n");
+        fprintf(f, "  body { background: var(--bg); color: var(--text); padding: 24px; line-height: 1.5; }\n");
+        fprintf(f, "  header { background: var(--card-bg); padding: 24px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 24px; }\n");
+        fprintf(f, "  h1 { font-size: 1.8rem; color: #fff; margin-bottom: 8px; }\n");
+        fprintf(f, "  .batch-stats { display: flex; gap: 24px; flex-wrap: wrap; font-size: 0.95rem; color: var(--muted); margin-top: 10px; }\n");
+        fprintf(f, "  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }\n");
+        fprintf(f, "  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; transition: transform 0.2s, border-color 0.2s; }\n");
+        fprintf(f, "  .card:hover { border-color: var(--accent); transform: translateY(-2px); }\n");
+        fprintf(f, "  .card-title { font-size: 1.1rem; font-weight: bold; color: #fff; margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n");
+        fprintf(f, "  .card-meta { font-size: 0.85rem; color: var(--muted); font-family: monospace; display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }\n");
+        fprintf(f, "  .btn { display: inline-block; background: var(--accent); color: #fff; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 0.9rem; text-align: center; width: 100%%; transition: opacity 0.2s; }\n");
+        fprintf(f, "  .btn:hover { opacity: 0.9; }\n");
+        fprintf(f, "  .status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; font-family: monospace; }\n");
+        fprintf(f, "  .badge-success { background: #1b5e20; color: #81c784; }\n");
+        fprintf(f, "  .badge-fail { background: #b71c1c; color: #e57373; }\n");
+        fprintf(f, "</style>\n</head>\n<body>\n");
+
+        fprintf(f, "<header>\n");
+        fprintf(f, "  <h1>Spectral Flux Batch Analysis Dashboard</h1>\n");
+        fprintf(f, "  <div class=\"batch-stats\">\n");
+        fprintf(f, "    <span><strong>Files Processed:</strong> %d</span>\n", num_results);
+        fprintf(f, "    <span><strong>Total Elapsed Wall-Clock Time:</strong> %.2fs</span>\n", total_wall_clock_sec);
+        fprintf(f, "  </div>\n");
+        fprintf(f, "</header>\n\n");
+
+        fprintf(f, "<div class=\"grid\">\n");
+        for (int i = 0; i < num_results; i++) {
+            const FileBatchResult *r = &results[i];
+            fprintf(f, "  <div class=\"card\">\n");
+            fprintf(f, "    <div class=\"card-title\" title=\"%s\">%s.wav</div>\n", r->basename, r->basename);
+            fprintf(f, "    <div class=\"card-meta\">\n");
+            fprintf(f, "      <span>Status: %s</span>\n", r->success ? "<span class=\"status-badge badge-success\">COMPLETE</span>" : "<span class=\"status-badge badge-fail\">FAILED</span>");
+            fprintf(f, "      <span>Duration: %.2fs (%u Hz, %s)</span>\n", r->duration, r->sample_rate, r->num_channels == 1 ? "Mono" : "Stereo");
+            fprintf(f, "      <span>Flux Stems Exported: %d</span>\n", r->stem_count);
+            fprintf(f, "      <span>Processing Time: %.2fs (%.1fx Real-Time)</span>\n", r->elapsed_sec, r->speed_ratio);
+            fprintf(f, "    </div>\n");
+            if (r->success) {
+                fprintf(f, "    <a class=\"btn\" href=\"%s_index.html\">Open Interactive Report &rarr;</a>\n", r->basename);
+            }
+            fprintf(f, "  </div>\n");
+        }
+        fprintf(f, "</div>\n");
+        fprintf(f, "</body>\n</html>\n");
+        fclose(f);
+    }
+
+    /* Top-level redirecting index.html in stem_dir */
+    char redirect_path[4096];
+    snprintf(redirect_path, sizeof(redirect_path), "%s/index.html", stem_dir);
+    FILE *f_redir = fopen(redirect_path, "w");
+    if (f_redir) {
+        fprintf(f_redir, "<!DOCTYPE html>\n<html>\n<head>\n");
+        fprintf(f_redir, "<meta http-equiv=\"refresh\" content=\"0; url=[flux]/index.html\">\n");
+        fprintf(f_redir, "<title>Spectral Flux Report Redirect</title>\n</head>\n<body>\n");
+        fprintf(f_redir, "<p>Redirecting to <a href=\"[flux]/index.html\">Spectral Flux Batch Report</a>...</p>\n");
+        fprintf(f_redir, "</body>\n</html>\n");
+        fclose(f_redir);
+    }
 }
 
 void init_fft_tables(void) {
@@ -1264,7 +1476,9 @@ void fft(Complex *x, int n, int invert) {
 WAVFile* read_wav(const char *filepath) {
     FILE *f = fopen(filepath, "rb");
     if (!f) {
+        pthread_mutex_lock(&g_console_mutex);
         printf("Error: Could not open file '%s'\n", filepath);
+        pthread_mutex_unlock(&g_console_mutex);
         return NULL;
     }
 
@@ -1273,13 +1487,17 @@ WAVFile* read_wav(const char *filepath) {
     char format[5] = {0};
 
     if (fread(chunk_id, 1, 4, f) != 4 || fread(&chunk_size, 4, 1, f) != 1 || fread(format, 1, 4, f) != 4) {
+        pthread_mutex_lock(&g_console_mutex);
         printf("Error: Invalid WAV header in '%s'\n", filepath);
+        pthread_mutex_unlock(&g_console_mutex);
         fclose(f);
         return NULL;
     }
 
     if (strncmp(chunk_id, "RIFF", 4) != 0 || strncmp(format, "WAVE", 4) != 0) {
+        pthread_mutex_lock(&g_console_mutex);
         printf("Error: File '%s' is not a valid RIFF WAVE file\n", filepath);
+        pthread_mutex_unlock(&g_console_mutex);
         fclose(f);
         return NULL;
     }
@@ -1301,7 +1519,9 @@ WAVFile* read_wav(const char *filepath) {
                 fread(&bytes_per_sec, 4, 1, f) != 1 ||
                 fread(&block_align, 2, 1, f) != 1 ||
                 fread(&bits, 2, 1, f) != 1) {
-                printf("Error: Failed to read format header\n");
+                pthread_mutex_lock(&g_console_mutex);
+                printf("Error: Failed to read format header in '%s'\n", filepath);
+                pthread_mutex_unlock(&g_console_mutex);
                 free(wav);
                 fclose(f);
                 return NULL;
@@ -1325,7 +1545,9 @@ WAVFile* read_wav(const char *filepath) {
     }
 
     if (data_size == 0 || wav->num_channels == 0 || wav->sample_rate == 0) {
+        pthread_mutex_lock(&g_console_mutex);
         printf("Error: Missing format or data chunk in '%s'\n", filepath);
+        pthread_mutex_unlock(&g_console_mutex);
         free(wav);
         fclose(f);
         return NULL;
@@ -1366,7 +1588,9 @@ WAVFile* read_wav(const char *filepath) {
         }
         free(buf);
     } else {
-        printf("Error: Unsupported WAV format (format: %d, bits: %d)\n", wav->audio_format, wav->bits_per_sample);
+        pthread_mutex_lock(&g_console_mutex);
+        printf("Error: Unsupported WAV format (format: %d, bits: %d) in '%s'\n", wav->audio_format, wav->bits_per_sample, filepath);
+        pthread_mutex_unlock(&g_console_mutex);
         free(wav->data);
         free(wav);
         fclose(f);
@@ -1381,7 +1605,9 @@ WAVFile* read_wav(const char *filepath) {
 int write_wav_16bit(const char *filepath, uint32_t sample_rate, uint16_t num_channels, uint32_t total_frames, const double *data) {
     FILE *f = fopen(filepath, "wb");
     if (!f) {
+        pthread_mutex_lock(&g_console_mutex);
         printf("Error: Could not open output file '%s' for writing\n", filepath);
+        pthread_mutex_unlock(&g_console_mutex);
         return 0;
     }
 
@@ -1464,14 +1690,27 @@ void get_filepath_components(const char *filepath, char *out_dir, char *out_base
     }
 }
 
-int process_audio(const char *input_path) {
+int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int total_batch_files) {
     clock_t start_clock = clock();
 
     init_fft_tables();
 
-    printf("Reading WAV audio file: %s ...\n", input_path);
+    char dir[1024], basename[512];
+    get_filepath_components(input_path, dir, basename, sizeof(basename));
+
+    if (result) {
+        memset(result, 0, sizeof(FileBatchResult));
+        snprintf(result->input_path, sizeof(result->input_path), "%s", input_path);
+        snprintf(result->basename, sizeof(result->basename), "%s", basename);
+    }
+
+    pthread_mutex_lock(&g_console_mutex);
+    printf("[%s] Reading WAV audio file...\n", basename);
+    pthread_mutex_unlock(&g_console_mutex);
+
     WAVFile *wav = read_wav(input_path);
     if (!wav) {
+        if (result) result->success = 0;
         return 0;
     }
 
@@ -1479,6 +1718,13 @@ int process_audio(const char *input_path) {
     uint32_t num_channels = wav->num_channels;
     uint32_t total_samples = wav->total_samples;
     uint32_t sample_rate = wav->sample_rate;
+
+    if (result) {
+        result->sample_rate = sample_rate;
+        result->num_channels = num_channels;
+        result->total_samples = total_samples;
+        result->duration = audio_duration;
+    }
 
     // Calculate overall input signal peak
     double overall_peak = 0.0;
@@ -1491,13 +1737,17 @@ int process_audio(const char *input_path) {
 
     double noise_floor_threshold = overall_peak * g_noise_floor_ratio;
 
-    printf("\nAudio File Properties:\n");
-    printf("  Format:          %s PCM (%u bits)\n", (wav->audio_format == 3) ? "IEEE Float" : "Integer", wav->bits_per_sample);
-    printf("  Sample Rate:     %u Hz\n", wav->sample_rate);
-    printf("  Channels:        %u (%s)\n", wav->num_channels, (wav->num_channels == 1) ? "Mono" : "Stereo");
-    printf("  Total Duration:  %.2f seconds (%u frames per channel)\n", audio_duration, wav->total_samples);
-    printf("  Signal Peak:     %.5f\n", overall_peak);
-    printf("  Noise Floor Threshold: %.5f (19.0%% peak threshold / -14.4 dB, min 99ms active frames)\n\n", noise_floor_threshold);
+    if (total_batch_files == 1) {
+        pthread_mutex_lock(&g_console_mutex);
+        printf("\nAudio File Properties (%s):\n", basename);
+        printf("  Format:          %s PCM (%u bits)\n", (wav->audio_format == 3) ? "IEEE Float" : "Integer", wav->bits_per_sample);
+        printf("  Sample Rate:     %u Hz\n", wav->sample_rate);
+        printf("  Channels:        %u (%s)\n", wav->num_channels, (wav->num_channels == 1) ? "Mono" : "Stereo");
+        printf("  Total Duration:  %.2f seconds (%u frames per channel)\n", audio_duration, wav->total_samples);
+        printf("  Signal Peak:     %.5f\n", overall_peak);
+        printf("  Noise Floor Threshold: %.5f (19.0%% peak threshold / -14.4 dB, min 99ms active frames)\n\n", noise_floor_threshold);
+        pthread_mutex_unlock(&g_console_mutex);
+    }
 
     uint32_t pad_samples = FFT_SIZE;
     uint32_t padded_total_samples = total_samples + 2 * pad_samples;
@@ -1534,11 +1784,14 @@ int process_audio(const char *input_path) {
     int pitch_bin_count[NUM_MIDI_PITCHES] = {0};
     int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_MIDI_PITCHES * (FFT_SIZE / 2 + 1) * sizeof(int));
     if (!pitch_bins) {
-        printf("Error: Could not allocate memory for pitch_bins.\n");
+        pthread_mutex_lock(&g_console_mutex);
+        printf("Error: Could not allocate memory for pitch_bins (%s).\n", basename);
+        pthread_mutex_unlock(&g_console_mutex);
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
         free(padded_input);
         free(cola_norm);
         free(wav);
+        if (result) result->success = 0;
         return 0;
     }
 
@@ -1549,19 +1802,26 @@ int process_audio(const char *input_path) {
         pitch_bins[p][pitch_bin_count[p]++] = k;
     }
 
-    printf("Executing STFT COLA Pitch Separation (8192 FFT, 75%% Overlap)...\n");
+    if (total_batch_files == 1) {
+        pthread_mutex_lock(&g_console_mutex);
+        printf("[%s] Executing STFT COLA Pitch Separation (8192 FFT, 75%% Overlap)...\n", basename);
+        pthread_mutex_unlock(&g_console_mutex);
+    }
 
     size_t num_bins_per_frame = FFT_SIZE / 2 + 1;
     size_t total_stft_entries = (size_t)num_channels * num_frames * num_bins_per_frame;
 
     ComplexFloat *stft_data = (ComplexFloat*)malloc(total_stft_entries * sizeof(ComplexFloat));
     if (!stft_data) {
-        printf("Error: Could not allocate memory for STFT matrix.\n");
+        pthread_mutex_lock(&g_console_mutex);
+        printf("Error: Could not allocate memory for STFT matrix (%s).\n", basename);
+        pthread_mutex_unlock(&g_console_mutex);
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
         free(padded_input);
         free(cola_norm);
         free(pitch_bins);
         free(wav);
+        if (result) result->success = 0;
         return 0;
     }
 
@@ -1580,7 +1840,7 @@ int process_audio(const char *input_path) {
             uint32_t offset = m * HOP_SIZE;
 
             current_step++;
-            if (current_step % 100 == 0 || current_step == total_stft_steps) {
+            if (total_batch_files == 1 && (current_step % 100 == 0 || current_step == total_stft_steps)) {
                 double elapsed = (double)(clock() - stft_start_clock) / CLOCKS_PER_SEC;
                 print_progress_bar("Analyzing STFT Frames", current_step, total_stft_steps, elapsed);
             }
@@ -1608,7 +1868,9 @@ int process_audio(const char *input_path) {
             }
         }
     }
-    printf("\n");
+    if (total_batch_files == 1) {
+        printf("\n");
+    }
 
     for (uint32_t c = 0; c < num_channels; c++) {
         free(padded_input[c]);
@@ -1616,18 +1878,17 @@ int process_audio(const char *input_path) {
     free(padded_input);
     padded_input = NULL;
 
-    char dir[1024], basename[512];
-    get_filepath_components(input_path, dir, basename, sizeof(basename));
+    ensure_dir_exists(stem_dir);
 
-    char stem_dir[4096];
-    snprintf(stem_dir, sizeof(stem_dir), "%s/%s_pitch_stems", dir, basename);
-    MKDIR(stem_dir);
-
-    char flux_dir[4096];
+    char flux_dir[8192];
     snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
-    MKDIR(flux_dir);
+    ensure_dir_exists(flux_dir);
 
-    printf("\nDeriving spectral flux envelopes per pitch stem...\n");
+    if (total_batch_files == 1) {
+        pthread_mutex_lock(&g_console_mutex);
+        printf("[%s] Deriving spectral flux envelopes per pitch stem...\n", basename);
+        pthread_mutex_unlock(&g_console_mutex);
+    }
 
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
@@ -1785,10 +2046,14 @@ int process_audio(const char *input_path) {
     // Export companion flux WAV files
     int exported_count = 0;
 
-    printf("Spectral Flux Stem Export Table:\n");
-    printf("-----------------------------------------------------------------------------------\n");
-    printf(" MIDI | Note | Freq (Hz)  | Peak Flux | RMS Flux | Peaks | Troughs | Flux Files Exported\n");
-    printf("-----------------------------------------------------------------------------------\n");
+    pthread_mutex_lock(&g_console_mutex);
+    if (total_batch_files == 1) {
+        printf("Spectral Flux Stem Export Table (%s):\n", basename);
+        printf("-----------------------------------------------------------------------------------\n");
+        printf(" MIDI | Note | Freq (Hz)  | Peak Flux | RMS Flux | Peaks | Troughs | Flux Files Exported\n");
+        printf("-----------------------------------------------------------------------------------\n");
+    }
+    pthread_mutex_unlock(&g_console_mutex);
 
     for (int idx = 0; idx < audible_count; idx++) {
         FluxStem *stem = &flux_stems[idx];
@@ -1807,13 +2072,22 @@ int process_audio(const char *input_path) {
                      stem_dir, stem->mod_filename);
             write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, stem->mod_flux);
 
-            printf(" %03d  | %-4s | %8.2f Hz | %9.5f | %8.5f | %5d | %7d | %s_pitch_%03d_%s_[flux|modified_flux].wav\n",
-                   p, stem->note_name, midi_to_frequency(p), stem->max_flux_peak, stem->rms_flux,
-                   stem->num_peaks, stem->num_troughs, basename, p, stem->note_name);
+            if (total_batch_files == 1) {
+                pthread_mutex_lock(&g_console_mutex);
+                printf(" %03d  | %-4s | %8.2f Hz | %9.5f | %8.5f | %5d | %7d | %s_pitch_%03d_%s_[flux|modified_flux].wav\n",
+                       p, stem->note_name, midi_to_frequency(p), stem->max_flux_peak, stem->rms_flux,
+                       stem->num_peaks, stem->num_troughs, basename, p, stem->note_name);
+                pthread_mutex_unlock(&g_console_mutex);
+            }
             exported_count++;
         }
     }
-    printf("-----------------------------------------------------------------------------------\n\n");
+
+    if (total_batch_files == 1) {
+        pthread_mutex_lock(&g_console_mutex);
+        printf("-----------------------------------------------------------------------------------\n\n");
+        pthread_mutex_unlock(&g_console_mutex);
+    }
 
     // Construct Flux HTML report in [flux] directory
     if (flux_stems) {
@@ -1829,19 +2103,6 @@ int process_audio(const char *input_path) {
             audible_count
         );
 
-        // Write top-level redirecting index.html in stem_dir
-        char redirect_path[4096];
-        snprintf(redirect_path, sizeof(redirect_path), "%s/index.html", stem_dir);
-        FILE *f_redir = fopen(redirect_path, "w");
-        if (f_redir) {
-            fprintf(f_redir, "<!DOCTYPE html>\n<html>\n<head>\n");
-            fprintf(f_redir, "<meta http-equiv=\"refresh\" content=\"0; url=[flux]/index.html\">\n");
-            fprintf(f_redir, "<title>Spectral Flux Report Redirect</title>\n</head>\n<body>\n");
-            fprintf(f_redir, "<p>Redirecting to <a href=\"[flux]/index.html\">Spectral Flux Report</a>...</p>\n");
-            fprintf(f_redir, "</body>\n</html>\n");
-            fclose(f_redir);
-        }
-
         for (int idx = 0; idx < audible_count; idx++) {
             if (flux_stems[idx].raw_flux) free(flux_stems[idx].raw_flux);
             if (flux_stems[idx].mod_flux) free(flux_stems[idx].mod_flux);
@@ -1854,6 +2115,14 @@ int process_audio(const char *input_path) {
     double total_elapsed = (double)(clock() - start_clock) / CLOCKS_PER_SEC;
     double speed_ratio = audio_duration / (total_elapsed > 0.001 ? total_elapsed : 0.001);
 
+    if (result) {
+        result->stem_count = exported_count;
+        result->elapsed_sec = total_elapsed;
+        result->speed_ratio = speed_ratio;
+        result->success = 1;
+    }
+
+    pthread_mutex_lock(&g_console_mutex);
     printf("====================================================\n");
     printf("               PROCESSING SUMMARY                   \n");
     printf("====================================================\n");
@@ -1863,7 +2132,8 @@ int process_audio(const char *input_path) {
     printf("  Total Time Elapsed:  %.2f seconds\n", total_elapsed);
     printf("  Processing Speed:    %.1fx Real-Time\n", speed_ratio);
     printf("  Status:              SPECTRAL FLUX DERIVATION COMPLETE\n");
-    printf("====================================================\n");
+    printf("====================================================\n\n");
+    pthread_mutex_unlock(&g_console_mutex);
 
     free(fft_frame);
     free(pitch_frame);
@@ -1877,37 +2147,183 @@ int process_audio(const char *input_path) {
     return 1;
 }
 
+typedef struct {
+    char **file_list;
+    int num_files;
+    char stem_dir[4096];
+    FileBatchResult *results;
+    int *next_file_idx;
+    pthread_mutex_t *queue_mutex;
+    int total_files;
+} WorkerArgs;
+
+void* worker_thread_func(void *arg) {
+    WorkerArgs *wargs = (WorkerArgs*)arg;
+    while (1) {
+        int idx = -1;
+        pthread_mutex_lock(wargs->queue_mutex);
+        if (*wargs->next_file_idx < wargs->num_files) {
+            idx = (*wargs->next_file_idx)++;
+        }
+        pthread_mutex_unlock(wargs->queue_mutex);
+
+        if (idx < 0) break;
+
+        const char *input_path = wargs->file_list[idx];
+        process_audio(input_path, wargs->stem_dir, &wargs->results[idx], wargs->total_files);
+    }
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
     printf("====================================================\n");
     printf("         SPECTRAL FLUX PITCH STEM SEPARATOR         \n");
     printf("====================================================\n\n");
 
-    char input_path[1024] = {0};
+    char **file_list = NULL;
+    int num_files = 0;
+    int capacity = 0;
 
     if (argc > 1) {
-        snprintf(input_path, sizeof(input_path), "%s", argv[1]);
-        trim_string(input_path);
+        for (int i = 1; i < argc; i++) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s", argv[i]);
+            trim_string(path);
+
+            DIR *d = opendir(path);
+            if (d) {
+                closedir(d);
+                scan_directory_for_wavs(path, &file_list, &num_files, &capacity);
+            } else if (is_valid_input_wav(path)) {
+                if (num_files >= capacity) {
+                    capacity = (capacity == 0) ? 16 : capacity * 2;
+                    file_list = (char**)realloc(file_list, capacity * sizeof(char*));
+                }
+                file_list[num_files++] = strdup(path);
+            }
+        }
     } else {
-        printf("Drag and drop a WAV audio file onto this console, or enter file path:\n");
-        printf("Path: ");
-        if (fgets(input_path, sizeof(input_path), stdin) != NULL) {
-            trim_string(input_path);
+        /* Double-clicked or run with no arguments: scan current directory */
+        scan_directory_for_wavs(".", &file_list, &num_files, &capacity);
+
+        /* Fallback: If no WAV files found in current directory, prompt interactively */
+        if (num_files == 0) {
+            char input_path[1024] = {0};
+            printf("Drag and drop a WAV audio file onto this console, or enter file path:\n");
+            printf("Path: ");
+            if (fgets(input_path, sizeof(input_path), stdin) != NULL) {
+                trim_string(input_path);
+            }
+
+            if (strlen(input_path) > 0) {
+                DIR *d = opendir(input_path);
+                if (d) {
+                    closedir(d);
+                    scan_directory_for_wavs(input_path, &file_list, &num_files, &capacity);
+                } else if (is_valid_input_wav(input_path)) {
+                    if (num_files >= capacity) {
+                        capacity = 16;
+                        file_list = (char**)realloc(file_list, capacity * sizeof(char*));
+                    }
+                    file_list[num_files++] = strdup(input_path);
+                }
+            }
         }
     }
 
-    if (strlen(input_path) == 0) {
-        printf("Error: No file path provided.\n");
+    if (num_files == 0) {
+        printf("Error: No valid WAV audio files found or provided.\n");
         wait_for_keypress();
         return 1;
     }
 
-    int success = process_audio(input_path);
-    if (!success) {
-        printf("\nProcessing failed.\n");
+    /* Extract common output directory */
+    char dir[1024], basename[512];
+    get_filepath_components(file_list[0], dir, basename, sizeof(basename));
+
+    char stem_dir[4096];
+    if (strlen(dir) == 0 || strcmp(dir, ".") == 0) {
+        snprintf(stem_dir, sizeof(stem_dir), "pitch_stems");
     } else {
-        printf("\nProcessing complete.\n");
+        snprintf(stem_dir, sizeof(stem_dir), "%s/pitch_stems", dir);
+    }
+    ensure_dir_exists(stem_dir);
+
+    char flux_dir[8192];
+    snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
+    ensure_dir_exists(flux_dir);
+
+    init_fft_tables();
+    init_flux_fft_tables();
+
+    int cpu_cores = get_cpu_cores();
+    int num_threads = (num_files < cpu_cores) ? num_files : cpu_cores;
+    if (num_threads < 1) num_threads = 1;
+
+    printf("Batch Processing Overview:\n");
+    printf("  Total Audio Files: %d\n", num_files);
+    printf("  CPU Cores:         %d\n", cpu_cores);
+    printf("  Worker Threads:    %d\n", num_threads);
+    printf("  Output Directory:  %s/\n\n", stem_dir);
+
+    FileBatchResult *results = (FileBatchResult*)calloc(num_files, sizeof(FileBatchResult));
+    int next_file_idx = 0;
+    pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+    clock_t batch_start_clock = clock();
+
+    if (num_threads > 1 && num_files > 1) {
+        pthread_t *threads = (pthread_t*)malloc(num_threads * sizeof(pthread_t));
+        WorkerArgs wargs = {
+            .file_list = file_list,
+            .num_files = num_files,
+            .stem_dir = "",
+            .results = results,
+            .next_file_idx = &next_file_idx,
+            .queue_mutex = &queue_mutex,
+            .total_files = num_files
+        };
+        snprintf(wargs.stem_dir, sizeof(wargs.stem_dir), "%s", stem_dir);
+
+        for (int t = 0; t < num_threads; t++) {
+            pthread_create(&threads[t], NULL, worker_thread_func, &wargs);
+        }
+
+        for (int t = 0; t < num_threads; t++) {
+            pthread_join(threads[t], NULL);
+        }
+        free(threads);
+    } else {
+        for (int i = 0; i < num_files; i++) {
+            process_audio(file_list[i], stem_dir, &results[i], num_files);
+        }
     }
 
+    double total_wall_clock_sec = (double)(clock() - batch_start_clock) / CLOCKS_PER_SEC;
+
+    /* Generate Master Batch HTML Report in [flux]/index.html */
+    generate_master_flux_html_report(flux_dir, stem_dir, results, num_files, total_wall_clock_sec);
+
+    int total_success = 0;
+    for (int i = 0; i < num_files; i++) {
+        if (results[i].success) total_success++;
+    }
+
+    printf("====================================================\n");
+    printf("             BATCH PROCESSING COMPLETE              \n");
+    printf("====================================================\n");
+    printf("  Successfully Processed: %d / %d WAV files\n", total_success, num_files);
+    printf("  Total Wall-Clock Time:  %.2f seconds\n", total_wall_clock_sec);
+    printf("  Output Stem Folder:     %s/\n", stem_dir);
+    printf("  Batch Report URL:       %s/index.html\n", flux_dir);
+    printf("====================================================\n");
+
+    for (int i = 0; i < num_files; i++) {
+        free(file_list[i]);
+    }
+    free(file_list);
+    free(results);
+
     wait_for_keypress();
-    return success ? 0 : 1;
+    return (total_success == num_files) ? 0 : 1;
 }
