@@ -267,7 +267,6 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
         return;
     }
 
-    int max_salience = 0;
     for (int i = 0; i < num_peaks; i++) {
         double h = env[peaks[i]];
 
@@ -285,25 +284,59 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
 
         int s_score = (left_count < right_count) ? left_count : right_count;
         salience[i] = s_score;
-        if (s_score > max_salience) {
-            max_salience = s_score;
+    }
+
+    /* Build thinned ordered list of unique salience integers */
+    int *unique_salience = (int*)malloc(num_peaks * sizeof(int));
+    int num_unique = 0;
+    if (unique_salience) {
+        int *sorted_salience = (int*)malloc(num_peaks * sizeof(int));
+        if (sorted_salience) {
+            memcpy(sorted_salience, salience, num_peaks * sizeof(int));
+            /* Simple bubble sort or qsort for unique salience values */
+            for (int a = 0; a < num_peaks - 1; a++) {
+                for (int b = a + 1; b < num_peaks; b++) {
+                    if (sorted_salience[a] > sorted_salience[b]) {
+                        int tmp = sorted_salience[a];
+                        sorted_salience[a] = sorted_salience[b];
+                        sorted_salience[b] = tmp;
+                    }
+                }
+            }
+            unique_salience[0] = sorted_salience[0];
+            num_unique = 1;
+            for (int k = 1; k < num_peaks; k++) {
+                if (sorted_salience[k] != sorted_salience[k - 1]) {
+                    unique_salience[num_unique++] = sorted_salience[k];
+                }
+            }
+            free(sorted_salience);
         }
     }
 
     double *norm_salience = (double*)malloc(num_peaks * sizeof(double));
     if (!norm_salience) {
+        if (unique_salience) free(unique_salience);
         free(salience);
         free(peaks);
         return;
     }
 
     for (int i = 0; i < num_peaks; i++) {
-        if (max_salience > 0) {
-            norm_salience[i] = (double)salience[i] / (double)max_salience;
+        if (num_unique > 0 && unique_salience) {
+            int rank = 1;
+            for (int u = 0; u < num_unique; u++) {
+                if (unique_salience[u] == salience[i]) {
+                    rank = u + 1;
+                    break;
+                }
+            }
+            norm_salience[i] = (double)rank / (double)num_unique;
         } else {
             norm_salience[i] = 1.0;
         }
     }
+    if (unique_salience) free(unique_salience);
 
     double *orig_env = (double*)malloc(total_samples * sizeof(double));
     if (orig_env) {
