@@ -1,5 +1,6 @@
 #include "ct_exporter.h"
 #include "dr_wav.h"
+#include "crossfade.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1076,21 +1077,58 @@ static int export_single_stem_assets_from_res(
                     remaining_blank -= write_cnt;
                 }
 
-                // Write pattern audio frames
+                // Initialize crossfade state for dynamic amplitude-based fade in/out
+                t_crossfade_state cf;
+                crossfade_init(&cf, (double)pat_sr, 10.0, 50.0);
+
+                // Pre-warm crossfade state in quiet/silence mode so last_control = 0.0
+                int warm_samples = (int)(pat_sr * 0.050);
+                if (warm_samples < 1) warm_samples = 1;
+                for (int w = 0; w < warm_samples; w++) {
+                    double m1, m2, s_val;
+                    int busy_status;
+                    crossfade_process(&cf, 0.0, 0.0, 0.0, &m1, &m2, &s_val, &busy_status);
+                }
+
+                // Write pattern audio frames with dynamic crossfade (control = 1.0)
                 uint64_t remaining_audio = frame_count;
                 uint64_t curr_smp = start_smp;
                 while (remaining_audio > 0) {
                     uint64_t write_cnt = (remaining_audio < 8192) ? remaining_audio : 8192;
                     for (uint64_t i = 0; i < write_cnt; i++) {
-                        float smp = pat_audio[curr_smp + i];
-                        if (smp > 1.0f) smp = 1.0f;
-                        if (smp < -1.0f) smp = -1.0f;
-                        chunk[i] = (int16_t)(smp * 32767.0f);
+                        float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
+                        double mix1, mix2, sum;
+                        int busy_status;
+                        crossfade_process(&cf, 1.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+
+                        if (sum > 1.0) sum = 1.0;
+                        if (sum < -1.0) sum = -1.0;
+                        chunk[i] = (int16_t)(sum * 32767.0);
+                        curr_smp++;
                     }
                     drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
-                    curr_smp += write_cnt;
                     remaining_audio -= write_cnt;
                 }
+
+                // Fade out back to silence smoothly at the end of pattern segment (control = 0.0)
+                int busy_status = 1;
+                while (busy_status) {
+                    uint64_t chunk_idx = 0;
+                    while (chunk_idx < 8192 && busy_status) {
+                        float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
+                        double mix1, mix2, sum;
+                        crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+
+                        if (sum > 1.0) sum = 1.0;
+                        if (sum < -1.0) sum = -1.0;
+                        chunk[chunk_idx++] = (int16_t)(sum * 32767.0);
+                        curr_smp++;
+                    }
+                    if (chunk_idx > 0) {
+                        drwav_write_pcm_frames(&wav_stem_out, chunk_idx, chunk);
+                    }
+                }
+
                 drwav_uninit(&wav_stem_out);
             }
         }
@@ -3591,20 +3629,58 @@ int export_group_assets_and_html(
                         remaining_blank -= write_cnt;
                     }
 
+                    // Initialize crossfade state for dynamic amplitude-based fade in/out
+                    t_crossfade_state cf;
+                    crossfade_init(&cf, (double)grp_audio_sr, 10.0, 50.0);
+
+                    // Pre-warm crossfade state in quiet/silence mode so last_control = 0.0
+                    int warm_samples = (int)(grp_audio_sr * 0.050);
+                    if (warm_samples < 1) warm_samples = 1;
+                    for (int w = 0; w < warm_samples; w++) {
+                        double m1, m2, s_val;
+                        int busy_status;
+                        crossfade_process(&cf, 0.0, 0.0, 0.0, &m1, &m2, &s_val, &busy_status);
+                    }
+
+                    // Write pattern audio frames with dynamic crossfade (control = 1.0)
                     uint64_t remaining_audio = frame_count;
                     uint64_t curr_smp = start_smp;
                     while (remaining_audio > 0) {
                         uint64_t write_cnt = (remaining_audio < 8192) ? remaining_audio : 8192;
                         for (uint64_t s = 0; s < write_cnt; s++) {
-                            float smp = grp_audio_buf[curr_smp + s];
-                            if (smp > 1.0f) smp = 1.0f;
-                            if (smp < -1.0f) smp = -1.0f;
-                            chunk[s] = (int16_t)(smp * 32767.0f);
+                            float smp = (curr_smp < (uint64_t)grp_audio_len) ? grp_audio_buf[curr_smp] : 0.0f;
+                            double mix1, mix2, sum;
+                            int busy_status;
+                            crossfade_process(&cf, 1.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+
+                            if (sum > 1.0) sum = 1.0;
+                            if (sum < -1.0) sum = -1.0;
+                            chunk[s] = (int16_t)(sum * 32767.0);
+                            curr_smp++;
                         }
                         drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
-                        curr_smp += write_cnt;
                         remaining_audio -= write_cnt;
                     }
+
+                    // Fade out back to silence smoothly at the end of pattern segment (control = 0.0)
+                    int busy_status = 1;
+                    while (busy_status) {
+                        uint64_t chunk_idx = 0;
+                        while (chunk_idx < 8192 && busy_status) {
+                            float smp = (curr_smp < (uint64_t)grp_audio_len) ? grp_audio_buf[curr_smp] : 0.0f;
+                            double mix1, mix2, sum;
+                            crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+
+                            if (sum > 1.0) sum = 1.0;
+                            if (sum < -1.0) sum = -1.0;
+                            chunk[chunk_idx++] = (int16_t)(sum * 32767.0);
+                            curr_smp++;
+                        }
+                        if (chunk_idx > 0) {
+                            drwav_write_pcm_frames(&wav_stem_out, chunk_idx, chunk);
+                        }
+                    }
+
                     drwav_uninit(&wav_stem_out);
                 }
 
