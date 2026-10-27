@@ -12,7 +12,7 @@
  *
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
- * using CPU multithreading).
+ * using CPU multithreading with live per-file console progress bars).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -30,7 +30,11 @@
 #if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
 #include <windows.h>
 #include <direct.h>
+#include <io.h>
 #define MKDIR(dir) _mkdir(dir)
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -94,6 +98,19 @@ const char *NOTE_NAMES[12] = {
 
 double midi_to_frequency(int midi_pitch);
 static const char b64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+void enable_ansi_terminal(void) {
+#if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hOut, dwMode);
+        }
+    }
+#endif
+}
 
 char* encode_base64_bytes(const uint8_t *data, size_t input_len) {
     size_t output_len = 4 * ((input_len + 2) / 3);
@@ -300,6 +317,56 @@ void ensure_dir_exists(const char *path) {
     pthread_mutex_lock(&g_dir_mutex);
     MKDIR(path);
     pthread_mutex_unlock(&g_dir_mutex);
+}
+
+void print_multithreaded_progress(
+    int thread_slot,
+    int num_slots,
+    const char *basename,
+    const char *stage,
+    uint32_t current,
+    uint32_t total,
+    double elapsed_sec
+) {
+    int is_tty = 1;
+#if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+    is_tty = _isatty(_fileno(stdout));
+#else
+    is_tty = isatty(fileno(stdout));
+#endif
+
+    if (!is_tty) {
+        if (current == total || (total > 0 && current % (total > 5 ? (total / 5) : 1) == 0)) {
+            pthread_mutex_lock(&g_console_mutex);
+            printf("[%s] %s %u/%u (%.0f%%) - %.1fs\n",
+                   basename, stage, current, total,
+                   total > 0 ? ((double)current / total * 100.0) : 100.0,
+                   elapsed_sec);
+            fflush(stdout);
+            pthread_mutex_unlock(&g_console_mutex);
+        }
+        return;
+    }
+
+    pthread_mutex_lock(&g_console_mutex);
+
+    int move_up = num_slots - thread_slot;
+    int bar_width = 20;
+    float percentage = (total > 0) ? ((float)current / total) : 1.0f;
+    int pos = (int)(bar_width * percentage);
+
+    printf("\033[%dA", move_up);
+    printf("\033[2K\r[Thread %d | %-16.16s] %-8.8s [", thread_slot + 1, basename, stage);
+    for (int i = 0; i < bar_width; ++i) {
+        if (i < pos) printf("=");
+        else if (i == pos) printf(">");
+        else printf(" ");
+    }
+    printf("] %3d%% (%u/%u) - %.1fs", (int)(percentage * 100.0f), current, total, elapsed_sec);
+    printf("\033[%dB\r", move_up);
+    fflush(stdout);
+
+    pthread_mutex_unlock(&g_console_mutex);
 }
 
 static int find_prev_peak(const double *env, uint32_t n, int start_x) {
@@ -1244,10 +1311,6 @@ void generate_flux_html_report(
     fprintf(f, "</body>\n</html>\n");
 
     fclose(f);
-
-    pthread_mutex_lock(&g_console_mutex);
-    printf("  Flux HTML Report generated: %s/%s_index.html\n", flux_dir, basename);
-    pthread_mutex_unlock(&g_console_mutex);
 }
 
 void generate_master_flux_html_report(
@@ -1414,21 +1477,6 @@ void get_note_name(int midi_pitch, char *buffer, size_t buffer_size) {
 
 double midi_to_frequency(int midi_pitch) {
     return 440.0 * pow(2.0, (midi_pitch - 69.0) / 12.0);
-}
-
-void print_progress_bar(const char *label, uint32_t current, uint32_t total, double elapsed_sec) {
-    int bar_width = 30;
-    float percentage = (total > 0) ? ((float)current / total) : 1.0f;
-    int pos = (int)(bar_width * percentage);
-
-    printf("\r%-26s [", label);
-    for (int i = 0; i < bar_width; ++i) {
-        if (i < pos) printf("=");
-        else if (i == pos) printf(">");
-        else printf(" ");
-    }
-    printf("] %3d%% (%u/%u) - %.1fs", (int)(percentage * 100.0f), current, total, elapsed_sec);
-    fflush(stdout);
 }
 
 /* Optimized FFT implementation using pre-calculated lookup tables */
@@ -1690,7 +1738,7 @@ void get_filepath_components(const char *filepath, char *out_dir, char *out_base
     }
 }
 
-int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int total_batch_files) {
+int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int thread_slot, int num_slots) {
     clock_t start_clock = clock();
 
     init_fft_tables();
@@ -1704,13 +1752,12 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         snprintf(result->basename, sizeof(result->basename), "%s", basename);
     }
 
-    pthread_mutex_lock(&g_console_mutex);
-    printf("[%s] Reading WAV audio file...\n", basename);
-    pthread_mutex_unlock(&g_console_mutex);
+    print_multithreaded_progress(thread_slot, num_slots, basename, "Reading", 0, 100, 0.0);
 
     WAVFile *wav = read_wav(input_path);
     if (!wav) {
         if (result) result->success = 0;
+        print_multithreaded_progress(thread_slot, num_slots, basename, "Failed", 0, 100, 0.0);
         return 0;
     }
 
@@ -1736,18 +1783,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     if (overall_peak < 1e-6) overall_peak = 1e-6;
 
     double noise_floor_threshold = overall_peak * g_noise_floor_ratio;
-
-    if (total_batch_files == 1) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("\nAudio File Properties (%s):\n", basename);
-        printf("  Format:          %s PCM (%u bits)\n", (wav->audio_format == 3) ? "IEEE Float" : "Integer", wav->bits_per_sample);
-        printf("  Sample Rate:     %u Hz\n", wav->sample_rate);
-        printf("  Channels:        %u (%s)\n", wav->num_channels, (wav->num_channels == 1) ? "Mono" : "Stereo");
-        printf("  Total Duration:  %.2f seconds (%u frames per channel)\n", audio_duration, wav->total_samples);
-        printf("  Signal Peak:     %.5f\n", overall_peak);
-        printf("  Noise Floor Threshold: %.5f (19.0%% peak threshold / -14.4 dB, min 99ms active frames)\n\n", noise_floor_threshold);
-        pthread_mutex_unlock(&g_console_mutex);
-    }
 
     uint32_t pad_samples = FFT_SIZE;
     uint32_t padded_total_samples = total_samples + 2 * pad_samples;
@@ -1802,12 +1837,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         pitch_bins[p][pitch_bin_count[p]++] = k;
     }
 
-    if (total_batch_files == 1) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("[%s] Executing STFT COLA Pitch Separation (8192 FFT, 75%% Overlap)...\n", basename);
-        pthread_mutex_unlock(&g_console_mutex);
-    }
-
     size_t num_bins_per_frame = FFT_SIZE / 2 + 1;
     size_t total_stft_entries = (size_t)num_channels * num_frames * num_bins_per_frame;
 
@@ -1840,9 +1869,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             uint32_t offset = m * HOP_SIZE;
 
             current_step++;
-            if (total_batch_files == 1 && (current_step % 100 == 0 || current_step == total_stft_steps)) {
+            if (current_step % 50 == 0 || current_step == total_stft_steps) {
                 double elapsed = (double)(clock() - stft_start_clock) / CLOCKS_PER_SEC;
-                print_progress_bar("Analyzing STFT Frames", current_step, total_stft_steps, elapsed);
+                print_multithreaded_progress(thread_slot, num_slots, basename, "STFT", current_step, total_stft_steps, elapsed);
             }
 
             for (int i = 0; i < FFT_SIZE; i++) {
@@ -1868,9 +1897,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
     }
-    if (total_batch_files == 1) {
-        printf("\n");
-    }
 
     for (uint32_t c = 0; c < num_channels; c++) {
         free(padded_input[c]);
@@ -1884,19 +1910,20 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
     ensure_dir_exists(flux_dir);
 
-    if (total_batch_files == 1) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("[%s] Deriving spectral flux envelopes per pitch stem...\n", basename);
-        pthread_mutex_unlock(&g_console_mutex);
-    }
-
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
     FluxStem *flux_stems = NULL;
     int audible_count = 0;
     int audible_capacity = 0;
 
+    clock_t flux_start_clock = clock();
+
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (p % 16 == 0 || p == NUM_MIDI_PITCHES - 1) {
+            double elapsed = (double)(clock() - flux_start_clock) / CLOCKS_PER_SEC;
+            print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", p + 1, NUM_MIDI_PITCHES, elapsed);
+        }
+
         if (!pitch_active[p] || pitch_bin_count[p] == 0) continue;
 
         double *stem_buf = (double*)calloc((size_t)padded_total_samples * num_channels, sizeof(double));
@@ -2046,15 +2073,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     // Export companion flux WAV files
     int exported_count = 0;
 
-    pthread_mutex_lock(&g_console_mutex);
-    if (total_batch_files == 1) {
-        printf("Spectral Flux Stem Export Table (%s):\n", basename);
-        printf("-----------------------------------------------------------------------------------\n");
-        printf(" MIDI | Note | Freq (Hz)  | Peak Flux | RMS Flux | Peaks | Troughs | Flux Files Exported\n");
-        printf("-----------------------------------------------------------------------------------\n");
-    }
-    pthread_mutex_unlock(&g_console_mutex);
-
     for (int idx = 0; idx < audible_count; idx++) {
         FluxStem *stem = &flux_stems[idx];
         int p = stem->pitch;
@@ -2071,22 +2089,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
                      stem_dir, stem->mod_filename);
             write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, stem->mod_flux);
-
-            if (total_batch_files == 1) {
-                pthread_mutex_lock(&g_console_mutex);
-                printf(" %03d  | %-4s | %8.2f Hz | %9.5f | %8.5f | %5d | %7d | %s_pitch_%03d_%s_[flux|modified_flux].wav\n",
-                       p, stem->note_name, midi_to_frequency(p), stem->max_flux_peak, stem->rms_flux,
-                       stem->num_peaks, stem->num_troughs, basename, p, stem->note_name);
-                pthread_mutex_unlock(&g_console_mutex);
-            }
             exported_count++;
         }
-    }
-
-    if (total_batch_files == 1) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("-----------------------------------------------------------------------------------\n\n");
-        pthread_mutex_unlock(&g_console_mutex);
     }
 
     // Construct Flux HTML report in [flux] directory
@@ -2122,18 +2126,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         result->success = 1;
     }
 
-    pthread_mutex_lock(&g_console_mutex);
-    printf("====================================================\n");
-    printf("               PROCESSING SUMMARY                   \n");
-    printf("====================================================\n");
-    printf("  Input File:          %s\n", basename);
-    printf("  Stems Directory:     %s/\n", stem_dir);
-    printf("  Flux Stems Exported: %d raw/modified flux WAV pairs\n", exported_count);
-    printf("  Total Time Elapsed:  %.2f seconds\n", total_elapsed);
-    printf("  Processing Speed:    %.1fx Real-Time\n", speed_ratio);
-    printf("  Status:              SPECTRAL FLUX DERIVATION COMPLETE\n");
-    printf("====================================================\n\n");
-    pthread_mutex_unlock(&g_console_mutex);
+    print_multithreaded_progress(thread_slot, num_slots, basename, "Complete", 100, 100, total_elapsed);
 
     free(fft_frame);
     free(pitch_frame);
@@ -2154,7 +2147,8 @@ typedef struct {
     FileBatchResult *results;
     int *next_file_idx;
     pthread_mutex_t *queue_mutex;
-    int total_files;
+    int thread_slot;
+    int num_slots;
 } WorkerArgs;
 
 void* worker_thread_func(void *arg) {
@@ -2170,12 +2164,14 @@ void* worker_thread_func(void *arg) {
         if (idx < 0) break;
 
         const char *input_path = wargs->file_list[idx];
-        process_audio(input_path, wargs->stem_dir, &wargs->results[idx], wargs->total_files);
+        process_audio(input_path, wargs->stem_dir, &wargs->results[idx], wargs->thread_slot, wargs->num_slots);
     }
     return NULL;
 }
 
 int main(int argc, char *argv[]) {
+    enable_ansi_terminal();
+
     printf("====================================================\n");
     printf("         SPECTRAL FLUX PITCH STEM SEPARATOR         \n");
     printf("====================================================\n\n");
@@ -2266,37 +2262,54 @@ int main(int argc, char *argv[]) {
     printf("  Worker Threads:    %d\n", num_threads);
     printf("  Output Directory:  %s/\n\n", stem_dir);
 
+    int is_tty = 1;
+#if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+    is_tty = _isatty(_fileno(stdout));
+#else
+    is_tty = isatty(fileno(stdout));
+#endif
+
+    if (is_tty) {
+        for (int t = 0; t < num_threads; t++) {
+            printf("[Thread %d] Initializing worker thread...\n", t + 1);
+        }
+        fflush(stdout);
+    }
+
     FileBatchResult *results = (FileBatchResult*)calloc(num_files, sizeof(FileBatchResult));
     int next_file_idx = 0;
     pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 
     clock_t batch_start_clock = clock();
 
-    if (num_threads > 1 && num_files > 1) {
+    if (num_threads > 1) {
         pthread_t *threads = (pthread_t*)malloc(num_threads * sizeof(pthread_t));
-        WorkerArgs wargs = {
-            .file_list = file_list,
-            .num_files = num_files,
-            .stem_dir = "",
-            .results = results,
-            .next_file_idx = &next_file_idx,
-            .queue_mutex = &queue_mutex,
-            .total_files = num_files
-        };
-        snprintf(wargs.stem_dir, sizeof(wargs.stem_dir), "%s", stem_dir);
+        WorkerArgs *wargs = (WorkerArgs*)malloc(num_threads * sizeof(WorkerArgs));
 
         for (int t = 0; t < num_threads; t++) {
-            pthread_create(&threads[t], NULL, worker_thread_func, &wargs);
+            wargs[t].file_list = file_list;
+            wargs[t].num_files = num_files;
+            snprintf(wargs[t].stem_dir, sizeof(wargs[t].stem_dir), "%s", stem_dir);
+            wargs[t].results = results;
+            wargs[t].next_file_idx = &next_file_idx;
+            wargs[t].queue_mutex = &queue_mutex;
+            wargs[t].thread_slot = t;
+            wargs[t].num_slots = num_threads;
+
+            pthread_create(&threads[t], NULL, worker_thread_func, &wargs[t]);
         }
 
         for (int t = 0; t < num_threads; t++) {
             pthread_join(threads[t], NULL);
         }
         free(threads);
+        free(wargs);
     } else {
-        for (int i = 0; i < num_files; i++) {
-            process_audio(file_list[i], stem_dir, &results[i], num_files);
-        }
+        process_audio(file_list[0], stem_dir, &results[0], 0, 1);
+    }
+
+    if (is_tty) {
+        printf("\n\n");
     }
 
     double total_wall_clock_sec = (double)(clock() - batch_start_clock) / CLOCKS_PER_SEC;
