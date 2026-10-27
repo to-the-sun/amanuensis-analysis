@@ -97,6 +97,184 @@ void print_progress_bar(int current, int total, const char* label) {
     group_mutex_unlock(&g_progress_mutex);
 }
 
+void get_executable_directory(char* out_dir, size_t out_size) {
+    if (!out_dir || out_size == 0) return;
+    char exe_path[4096] = {0};
+#if defined(_WIN32) || defined(_WIN64)
+    if (GetModuleFileNameA(NULL, exe_path, sizeof(exe_path)) > 0) {
+        char* last_slash = strrchr(exe_path, '/');
+        char* last_backslash = strrchr(exe_path, '\\');
+        char* last_sep = (last_backslash && (!last_slash || last_backslash > last_slash)) ? last_backslash : last_slash;
+        if (last_sep) {
+            *last_sep = '\0';
+            strncpy(out_dir, exe_path, out_size - 1);
+            out_dir[out_size - 1] = '\0';
+            return;
+        }
+    }
+#else
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+        char* last_slash = strrchr(exe_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            strncpy(out_dir, exe_path, out_size - 1);
+            out_dir[out_size - 1] = '\0';
+            return;
+        }
+    }
+#endif
+    strncpy(out_dir, ".", out_size - 1);
+    out_dir[out_size - 1] = '\0';
+}
+
+static int get_parent_directory(const char* dir_path, char* out_parent, size_t out_size) {
+    if (!dir_path || dir_path[0] == '\0') {
+        out_parent[0] = '\0';
+        return 0;
+    }
+    char tmp[4096];
+    strncpy(tmp, dir_path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    size_t len = strlen(tmp);
+    while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
+        tmp[len - 1] = '\0';
+        len--;
+    }
+
+    char* last_slash = strrchr(tmp, '/');
+    char* last_backslash = strrchr(tmp, '\\');
+    char* last_sep = (last_backslash && (!last_slash || last_backslash > last_slash)) ? last_backslash : last_slash;
+
+    if (!last_sep) {
+        out_parent[0] = '\0';
+        return 0;
+    }
+
+    if (last_sep == tmp) {
+        snprintf(out_parent, out_size, "/");
+    } else if (last_sep == tmp + 2 && tmp[1] == ':') {
+        snprintf(out_parent, out_size, "%c:\\", tmp[0]);
+    } else {
+        size_t parent_len = (size_t)(last_sep - tmp);
+        if (parent_len >= out_size) parent_len = out_size - 1;
+        strncpy(out_parent, tmp, parent_len);
+        out_parent[parent_len] = '\0';
+    }
+
+    if (strcmp(out_parent, dir_path) == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+static int iequals_ext_func(const char* a, const char* b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static int is_excluded_wav(const char* filename) {
+    if (iequals_ext_func(filename, "preview.wav") || iequals_ext_func(filename, "glued.wav")) {
+        return 1;
+    }
+    return 0;
+}
+
+static int has_wav_ext(const char* filename) {
+    size_t len = strlen(filename);
+    if (len < 4) return 0;
+    return iequals_ext_func(filename + len - 4, ".wav");
+}
+
+static int istarts_with_ext_func(const char* str, const char* prefix) {
+    while (*prefix) {
+        if (!*str || tolower((unsigned char)*str) != tolower((unsigned char)*prefix)) {
+            return 0;
+        }
+        str++;
+        prefix++;
+    }
+    return 1;
+}
+
+int find_original_audio_for_stem(const char* exe_dir, const char* stem_filename, char* out_orig_path, size_t out_size) {
+    if (!exe_dir || !stem_filename || !out_orig_path || out_size == 0) return 0;
+
+    const char* filename = stem_filename;
+    const char* last_slash = strrchr(filename, '/');
+    const char* last_backslash = strrchr(filename, '\\');
+    if (last_slash && last_slash >= filename) filename = last_slash + 1;
+    if (last_backslash && last_backslash >= filename) filename = last_backslash + 1;
+
+    const char* dot = strrchr(filename, '.');
+    size_t stem_len = dot ? (size_t)(dot - filename) : strlen(filename);
+    char stem_name[1024];
+    if (stem_len >= sizeof(stem_name)) stem_len = sizeof(stem_name) - 1;
+    strncpy(stem_name, filename, stem_len);
+    stem_name[stem_len] = '\0';
+
+    const char* target_stem = stem_name;
+    if (istarts_with_ext_func(stem_name, "palette_")) {
+        target_stem = stem_name + 8;
+    } else if (istarts_with_ext_func(stem_name, "palette")) {
+        target_stem = stem_name + 7;
+    }
+
+    char curr_dir[2048];
+    if (!get_parent_directory(exe_dir, curr_dir, sizeof(curr_dir))) {
+        return 0;
+    }
+
+    while (curr_dir[0] != '\0') {
+        DIR* d = opendir(curr_dir);
+        if (d) {
+            struct dirent* entry;
+            char best_match_file[1024] = "";
+            size_t best_match_len = 0;
+
+            while ((entry = readdir(d)) != NULL) {
+                const char* name = entry->d_name;
+                if (!has_wav_ext(name) || is_excluded_wav(name)) continue;
+
+                const char* entry_dot = strrchr(name, '.');
+                size_t cand_len = entry_dot ? (size_t)(entry_dot - name) : strlen(name);
+                char cand_stem[1024];
+                if (cand_len >= sizeof(cand_stem)) cand_len = sizeof(cand_stem) - 1;
+                strncpy(cand_stem, name, cand_len);
+                cand_stem[cand_len] = '\0';
+
+                if (cand_len > 0 && (istarts_with_ext_func(stem_name, cand_stem) || istarts_with_ext_func(target_stem, cand_stem))) {
+                    if (cand_len > best_match_len) {
+                        best_match_len = cand_len;
+                        strncpy(best_match_file, name, sizeof(best_match_file) - 1);
+                        best_match_file[sizeof(best_match_file) - 1] = '\0';
+                    }
+                }
+            }
+            closedir(d);
+
+            if (best_match_len > 0) {
+                snprintf(out_orig_path, out_size, "%s" PATH_SEP_STR "%s", curr_dir, best_match_file);
+                return 1;
+            }
+        }
+
+        char parent_dir[2048];
+        if (!get_parent_directory(curr_dir, parent_dir, sizeof(parent_dir))) {
+            break;
+        }
+        strncpy(curr_dir, parent_dir, sizeof(curr_dir) - 1);
+        curr_dir[sizeof(curr_dir) - 1] = '\0';
+    }
+
+    return 0;
+}
+
 int mkdir_p(const char* path) {
     if (!path || !*path) return 0;
     char tmp[4096];
@@ -3180,72 +3358,28 @@ int export_group_assets_and_html(
     }
 #endif
 
-    // Collect and combine overlapping patterns derived across all individual audio files (stems)
+    // Resolve original audio file for each stem and group overlapping patterns per original audio file
+    char exe_dir[2048];
+    get_executable_directory(exe_dir, sizeof(exe_dir));
+
+    char** stem_orig_paths = (char**)calloc(num_stems, sizeof(char*));
+    for (int i = 0; i < num_stems; i++) {
+        char resolved_path[4096] = "";
+        if (find_original_audio_for_stem(exe_dir, stems[i].audio_filepath, resolved_path, sizeof(resolved_path))) {
+            stem_orig_paths[i] = strdup(resolved_path);
+            printf("[Group Mode] Resolved original audio for stem '%s': %s\n", stems[i].stem_name, resolved_path);
+        } else if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+            stem_orig_paths[i] = strdup(original_audio_filepath);
+        } else {
+            stem_orig_paths[i] = NULL;
+        }
+    }
+
     typedef struct {
         double start_ms;
         double end_ms;
     } GroupPatternInterval;
 
-    GroupPatternInterval raw_intervals[4096];
-    int total_raw_intervals = 0;
-
-    for (int i = 0; i < num_stems; i++) {
-        PatternDef stem_pats[256];
-        int num_p = derive_stem_patterns_and_segments(
-            stems[i].len, stems[i].sr, best_bar_length_ms, &res2_stems[i], NULL, NULL, NULL, stem_pats, 256
-        );
-        for (int p = 0; p < num_p; p++) {
-            if (total_raw_intervals < 4096) {
-                raw_intervals[total_raw_intervals].start_ms = stem_pats[p].start_ms;
-                raw_intervals[total_raw_intervals].end_ms = stem_pats[p].end_ms;
-                total_raw_intervals++;
-            }
-        }
-    }
-
-    // Sort raw pattern intervals by start_ms ascending
-    for (int i = 0; i < total_raw_intervals - 1; i++) {
-        for (int j = i + 1; j < total_raw_intervals; j++) {
-            if (raw_intervals[j].start_ms < raw_intervals[i].start_ms ||
-                (raw_intervals[j].start_ms == raw_intervals[i].start_ms && raw_intervals[j].end_ms < raw_intervals[i].end_ms)) {
-                GroupPatternInterval tmp = raw_intervals[i];
-                raw_intervals[i] = raw_intervals[j];
-                raw_intervals[j] = tmp;
-            }
-        }
-    }
-
-    // Combine overlapping pattern intervals
-    GroupPatternInterval combined_intervals[4096];
-    int num_combined_intervals = 0;
-
-    if (total_raw_intervals > 0) {
-        double curr_start = raw_intervals[0].start_ms;
-        double curr_end = raw_intervals[0].end_ms;
-
-        for (int k = 1; k < total_raw_intervals; k++) {
-            if (raw_intervals[k].start_ms <= curr_end + 1e-3) {
-                if (raw_intervals[k].end_ms > curr_end) {
-                    curr_end = raw_intervals[k].end_ms;
-                }
-            } else {
-                if (num_combined_intervals < 4096) {
-                    combined_intervals[num_combined_intervals].start_ms = curr_start;
-                    combined_intervals[num_combined_intervals].end_ms = curr_end;
-                    num_combined_intervals++;
-                }
-                curr_start = raw_intervals[k].start_ms;
-                curr_end = raw_intervals[k].end_ms;
-            }
-        }
-        if (num_combined_intervals < 4096) {
-            combined_intervals[num_combined_intervals].start_ms = curr_start;
-            combined_intervals[num_combined_intervals].end_ms = curr_end;
-            num_combined_intervals++;
-        }
-    }
-
-    // Write combined pattern WAV files to overall [loops] and [stems]
     char overall_loops_dir[4096];
     snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
     mkdir_p(overall_loops_dir);
@@ -3258,95 +3392,234 @@ int export_group_assets_and_html(
     int total_passes = 0;
     parse_passes_in_dir(group_output_dir, passes, &total_passes);
 
-    printf("\nCombining patterns across %d stem(s): %d raw pattern(s) -> %d merged pattern(s)\n",
-           num_stems, total_raw_intervals, num_combined_intervals);
-    print_progress_bar(0, num_combined_intervals > 0 ? num_combined_intervals : 1, "Generating Merged Pattern WAVs");
+    int* assigned = (int*)calloc(num_stems, sizeof(int));
+    int global_pat_idx = 1;
 
-    for (int p = 0; p < num_combined_intervals; p++) {
-        // 1. Loopable WAV file in [palettes]/[loops]/pattern_N.wav
-        char pat_wav_path[4096];
-        snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, p + 1);
+    for (int i = 0; i < num_stems; i++) {
+        if (assigned[i]) continue;
 
-        uint64_t start_smp = (uint64_t)round((combined_intervals[p].start_ms / 1000.0) * group_audio_sr);
-        uint64_t end_smp = (uint64_t)round((combined_intervals[p].end_ms / 1000.0) * group_audio_sr);
-        if (start_smp >= (uint64_t)group_audio_len) start_smp = group_audio_len - 1;
-        if (end_smp > (uint64_t)group_audio_len) end_smp = group_audio_len;
-        uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+        int group_stem_indices[512];
+        int group_num_stems = 0;
 
-        drwav_data_format format;
-        format.container = drwav_container_riff;
-        format.format = DR_WAVE_FORMAT_PCM;
-        format.channels = 1;
-        format.sampleRate = group_audio_sr;
-        format.bitsPerSample = 16;
-
-        drwav wav_out;
-        if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
-            int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
-            if (pcm16) {
-                for (uint64_t i = 0; i < frame_count; i++) {
-                    float smp = mono_combined[start_smp + i];
-                    if (smp > 1.0f) smp = 1.0f;
-                    if (smp < -1.0f) smp = -1.0f;
-                    pcm16[i] = (int16_t)(smp * 32767.0f);
+        for (int j = i; j < num_stems; j++) {
+            if (assigned[j]) continue;
+            int same = 0;
+            if (stem_orig_paths[i] == NULL && stem_orig_paths[j] == NULL) {
+                same = 1;
+            } else if (stem_orig_paths[i] != NULL && stem_orig_paths[j] != NULL) {
+                if (iequals_ext_func(stem_orig_paths[i], stem_orig_paths[j])) {
+                    same = 1;
                 }
-                drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
-                free(pcm16);
             }
-            drwav_uninit(&wav_out);
-        }
-
-        // 2. Pass-aligned Stem WAV file in [palettes]/[stems]/pattern_N.wav
-        int assigned_pass_idx = 0;
-        for (int i = total_passes - 1; i >= 0; i--) {
-            if (combined_intervals[p].start_ms >= passes[i].loop_point_ms) {
-                assigned_pass_idx = i;
-                break;
+            if (same) {
+                group_stem_indices[group_num_stems++] = j;
+                assigned[j] = 1;
             }
         }
 
-        double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
-        double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
-        double blank_space_ms = (combined_intervals[p].start_ms - pass_lp_ms) + pass_pad_ms;
-        if (blank_space_ms < 0.0) blank_space_ms = 0.0;
+        const char* grp_orig_path = stem_orig_paths[i];
 
-        uint64_t blank_frames = (uint64_t)round((blank_space_ms / 1000.0) * group_audio_sr);
+        GroupPatternInterval grp_raw_intervals[4096];
+        int grp_total_raw = 0;
 
-        char stem_wav_path[4096];
-        snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_stems_dir, p + 1);
-
-        drwav wav_stem_out;
-        if (drwav_init_file_write(&wav_stem_out, stem_wav_path, &format, NULL)) {
-            int16_t chunk[8192];
-            memset(chunk, 0, sizeof(chunk));
-
-            // Write blank frames (silence)
-            uint64_t remaining_blank = blank_frames;
-            while (remaining_blank > 0) {
-                uint64_t write_cnt = (remaining_blank < 8192) ? remaining_blank : 8192;
-                drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
-                remaining_blank -= write_cnt;
-            }
-
-            // Write pattern audio frames
-            uint64_t remaining_audio = frame_count;
-            uint64_t curr_smp = start_smp;
-            while (remaining_audio > 0) {
-                uint64_t write_cnt = (remaining_audio < 8192) ? remaining_audio : 8192;
-                for (uint64_t i = 0; i < write_cnt; i++) {
-                    float smp = mono_combined[curr_smp + i];
-                    if (smp > 1.0f) smp = 1.0f;
-                    if (smp < -1.0f) smp = -1.0f;
-                    chunk[i] = (int16_t)(smp * 32767.0f);
+        for (int k = 0; k < group_num_stems; k++) {
+            int s_idx = group_stem_indices[k];
+            PatternDef stem_pats[256];
+            int num_p = derive_stem_patterns_and_segments(
+                stems[s_idx].len, stems[s_idx].sr, best_bar_length_ms, &res2_stems[s_idx], NULL, NULL, NULL, stem_pats, 256
+            );
+            for (int p = 0; p < num_p; p++) {
+                if (grp_total_raw < 4096) {
+                    grp_raw_intervals[grp_total_raw].start_ms = stem_pats[p].start_ms;
+                    grp_raw_intervals[grp_total_raw].end_ms = stem_pats[p].end_ms;
+                    grp_total_raw++;
                 }
-                drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
-                curr_smp += write_cnt;
-                remaining_audio -= write_cnt;
             }
-            drwav_uninit(&wav_stem_out);
         }
-        print_progress_bar(p + 1, num_combined_intervals, "Generating Merged Pattern WAVs");
+
+        for (int r1 = 0; r1 < grp_total_raw - 1; r1++) {
+            for (int r2 = r1 + 1; r2 < grp_total_raw; r2++) {
+                if (grp_raw_intervals[r2].start_ms < grp_raw_intervals[r1].start_ms ||
+                    (grp_raw_intervals[r2].start_ms == grp_raw_intervals[r1].start_ms && grp_raw_intervals[r2].end_ms < grp_raw_intervals[r1].end_ms)) {
+                    GroupPatternInterval tmp = grp_raw_intervals[r1];
+                    grp_raw_intervals[r1] = grp_raw_intervals[r2];
+                    grp_raw_intervals[r2] = tmp;
+                }
+            }
+        }
+
+        GroupPatternInterval grp_combined[4096];
+        int grp_num_combined = 0;
+
+        if (grp_total_raw > 0) {
+            double c_start = grp_raw_intervals[0].start_ms;
+            double c_end = grp_raw_intervals[0].end_ms;
+
+            for (int k = 1; k < grp_total_raw; k++) {
+                if (grp_raw_intervals[k].start_ms <= c_end + 1e-3) {
+                    if (grp_raw_intervals[k].end_ms > c_end) {
+                        c_end = grp_raw_intervals[k].end_ms;
+                    }
+                } else {
+                    if (grp_num_combined < 4096) {
+                        grp_combined[grp_num_combined].start_ms = c_start;
+                        grp_combined[grp_num_combined].end_ms = c_end;
+                        grp_num_combined++;
+                    }
+                    c_start = grp_raw_intervals[k].start_ms;
+                    c_end = grp_raw_intervals[k].end_ms;
+                }
+            }
+            if (grp_num_combined < 4096) {
+                grp_combined[grp_num_combined].start_ms = c_start;
+                grp_combined[grp_num_combined].end_ms = c_end;
+                grp_num_combined++;
+            }
+        }
+
+        int grp_audio_len = 0;
+        int grp_audio_sr = common_sr;
+        float* grp_audio_buf = NULL;
+
+        if (grp_orig_path && grp_orig_path[0] != '\0') {
+            unsigned int orig_ch = 0, orig_sr = 0;
+            drwav_uint64 orig_frames = 0;
+            float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(grp_orig_path, &orig_ch, &orig_sr, &orig_frames, NULL);
+            if (orig_pcm && orig_frames > 0 && orig_sr > 0) {
+                grp_audio_buf = (float*)malloc(orig_frames * sizeof(float));
+                if (grp_audio_buf) {
+                    grp_audio_len = (int)orig_frames;
+                    grp_audio_sr = (int)orig_sr;
+                    if (orig_ch == 1) {
+                        memcpy(grp_audio_buf, orig_pcm, orig_frames * sizeof(float));
+                    } else {
+                        for (drwav_uint64 f = 0; f < orig_frames; f++) {
+                            double sum = 0.0;
+                            for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
+                                sum += orig_pcm[f * orig_ch + ch_i];
+                            }
+                            grp_audio_buf[f] = (float)(sum / orig_ch);
+                        }
+                    }
+                    float max_abs_val = 0.0f;
+                    for (int s = 0; s < grp_audio_len; s++) {
+                        float abs_smp = fabsf(grp_audio_buf[s]);
+                        if (abs_smp > max_abs_val) max_abs_val = abs_smp;
+                    }
+                    if (max_abs_val > 0.0f) {
+                        float norm_factor = 1.0f / max_abs_val;
+                        for (int s = 0; s < grp_audio_len; s++) grp_audio_buf[s] *= norm_factor;
+                    }
+                }
+                drwav_free(orig_pcm, NULL);
+            }
+        }
+
+        if (!grp_audio_buf) {
+            grp_audio_buf = (float*)malloc(group_audio_len * sizeof(float));
+            if (grp_audio_buf) {
+                memcpy(grp_audio_buf, mono_combined, group_audio_len * sizeof(float));
+                grp_audio_len = group_audio_len;
+                grp_audio_sr = group_audio_sr;
+            }
+        }
+
+        printf("\nCombining patterns for %d stem(s) sharing original audio '%s': %d raw -> %d merged pattern(s)\n",
+               group_num_stems, grp_orig_path ? grp_orig_path : "(none)", grp_total_raw, grp_num_combined);
+
+        if (grp_audio_buf && grp_audio_len > 0 && grp_num_combined > 0) {
+            for (int p = 0; p < grp_num_combined; p++) {
+                char pat_wav_path[4096];
+                snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, global_pat_idx);
+
+                uint64_t start_smp = (uint64_t)round((grp_combined[p].start_ms / 1000.0) * grp_audio_sr);
+                uint64_t end_smp = (uint64_t)round((grp_combined[p].end_ms / 1000.0) * grp_audio_sr);
+                if (start_smp >= (uint64_t)grp_audio_len) start_smp = grp_audio_len - 1;
+                if (end_smp > (uint64_t)grp_audio_len) end_smp = grp_audio_len;
+                uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+
+                drwav_data_format format;
+                format.container = drwav_container_riff;
+                format.format = DR_WAVE_FORMAT_PCM;
+                format.channels = 1;
+                format.sampleRate = grp_audio_sr;
+                format.bitsPerSample = 16;
+
+                drwav wav_out;
+                if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
+                    int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
+                    if (pcm16) {
+                        for (uint64_t s = 0; s < frame_count; s++) {
+                            float smp = grp_audio_buf[start_smp + s];
+                            if (smp > 1.0f) smp = 1.0f;
+                            if (smp < -1.0f) smp = -1.0f;
+                            pcm16[s] = (int16_t)(smp * 32767.0f);
+                        }
+                        drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
+                        free(pcm16);
+                    }
+                    drwav_uninit(&wav_out);
+                }
+
+                int assigned_pass_idx = 0;
+                for (int pass_i = total_passes - 1; pass_i >= 0; pass_i--) {
+                    if (grp_combined[p].start_ms >= passes[pass_i].loop_point_ms) {
+                        assigned_pass_idx = pass_i;
+                        break;
+                    }
+                }
+
+                double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
+                double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
+                double blank_space_ms = (grp_combined[p].start_ms - pass_lp_ms) + pass_pad_ms;
+                if (blank_space_ms < 0.0) blank_space_ms = 0.0;
+
+                uint64_t blank_frames = (uint64_t)round((blank_space_ms / 1000.0) * grp_audio_sr);
+
+                char stem_wav_path[4096];
+                snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_stems_dir, global_pat_idx);
+
+                drwav wav_stem_out;
+                if (drwav_init_file_write(&wav_stem_out, stem_wav_path, &format, NULL)) {
+                    int16_t chunk[8192];
+                    memset(chunk, 0, sizeof(chunk));
+
+                    uint64_t remaining_blank = blank_frames;
+                    while (remaining_blank > 0) {
+                        uint64_t write_cnt = (remaining_blank < 8192) ? remaining_blank : 8192;
+                        drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                        remaining_blank -= write_cnt;
+                    }
+
+                    uint64_t remaining_audio = frame_count;
+                    uint64_t curr_smp = start_smp;
+                    while (remaining_audio > 0) {
+                        uint64_t write_cnt = (remaining_audio < 8192) ? remaining_audio : 8192;
+                        for (uint64_t s = 0; s < write_cnt; s++) {
+                            float smp = grp_audio_buf[curr_smp + s];
+                            if (smp > 1.0f) smp = 1.0f;
+                            if (smp < -1.0f) smp = -1.0f;
+                            chunk[s] = (int16_t)(smp * 32767.0f);
+                        }
+                        drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                        curr_smp += write_cnt;
+                        remaining_audio -= write_cnt;
+                    }
+                    drwav_uninit(&wav_stem_out);
+                }
+
+                global_pat_idx++;
+            }
+        }
+
+        if (grp_audio_buf) free(grp_audio_buf);
     }
+
+    free(assigned);
+    for (int i = 0; i < num_stems; i++) {
+        if (stem_orig_paths[i]) free(stem_orig_paths[i]);
+    }
+    free(stem_orig_paths);
 
     for (int i = 0; i < num_stems; i++) {
         analyzer_free_analysis(&res2_stems[i]);

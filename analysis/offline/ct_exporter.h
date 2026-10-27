@@ -64,6 +64,9 @@ int export_group_assets_and_html(
     const char* original_audio_filepath
 );
 
+void get_executable_directory(char* out_dir, size_t out_size);
+int find_original_audio_for_stem(const char* exe_dir, const char* stem_filename, char* out_orig_path, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif
