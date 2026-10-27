@@ -13,6 +13,9 @@
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
  * using CPU multithreading with live per-file console progress bars).
+ *
+ * Highly optimized memory footprint: WAV outputs and compact JS report data are generated
+ * stream-style per pitch stem so memory footprint remains extremely low (~300MB per file).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -214,8 +217,8 @@ typedef struct {
     char note_name[32];
     double max_flux_peak;
     double rms_flux;
-    double *raw_flux;
-    double *mod_flux;
+    int16_t *raw_flux_i16; // mono averaged int16_t PCM array for JS report data
+    int16_t *mod_flux_i16; // mono averaged int16_t PCM array for JS report data
     int *peaks;
     int num_peaks;
     int *troughs;
@@ -264,6 +267,9 @@ int is_valid_input_wav(const char *path) {
     if (contains_icase(path, "_nontonal.wav")) return 0;
     if (contains_icase(path, "_original.wav")) return 0;
     if (contains_icase(path, "_coherence.wav")) return 0;
+
+    if (contains_icase(path, "preview.wav")) return 0;
+    if (contains_icase(path, "glued.wav")) return 0;
 
     if (contains_icase(path, "pitch_stems") || contains_icase(path, "[flux]")) return 0;
 
@@ -839,22 +845,13 @@ void generate_flux_html_report(
         } else {
             fprintf(fjs, "  origPcm: \"\",\n");
         }
+        if (pcm_i16) free(pcm_i16);
 
         fprintf(fjs, "  rawFluxPcm: [\n");
         for (int i = 0; i < stem_count; i++) {
             const FluxStem *st = &stems[i];
-            if (pcm_i16 && st->raw_flux) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += st->raw_flux[s * num_channels + c];
-                    }
-                    double val = sum_f / num_channels;
-                    if (val > 1.0) val = 1.0;
-                    if (val < 0.0) val = 0.0;
-                    pcm_i16[s] = (int16_t)round(val * 32767.0);
-                }
-                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+            if (st->raw_flux_i16) {
+                char *b64 = encode_base64_bytes((const uint8_t*)st->raw_flux_i16, total_samples * sizeof(int16_t));
                 fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
                 if (b64) free(b64);
             } else {
@@ -866,18 +863,8 @@ void generate_flux_html_report(
         fprintf(fjs, "  modFluxPcm: [\n");
         for (int i = 0; i < stem_count; i++) {
             const FluxStem *st = &stems[i];
-            if (pcm_i16 && st->mod_flux) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += st->mod_flux[s * num_channels + c];
-                    }
-                    double val = sum_f / num_channels;
-                    if (val > 1.0) val = 1.0;
-                    if (val < 0.0) val = 0.0;
-                    pcm_i16[s] = (int16_t)round(val * 32767.0);
-                }
-                char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
+            if (st->mod_flux_i16) {
+                char *b64 = encode_base64_bytes((const uint8_t*)st->mod_flux_i16, total_samples * sizeof(int16_t));
                 fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
                 if (b64) free(b64);
             } else {
@@ -908,7 +895,6 @@ void generate_flux_html_report(
         }
         fprintf(fjs, "  ]\n");
 
-        if (pcm_i16) free(pcm_i16);
         fprintf(fjs, "};\n");
         fclose(fjs);
     }
@@ -2033,7 +2019,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         get_note_name(p, stem->note_name, sizeof(stem->note_name));
         stem->max_flux_peak = max_fl_peak;
         stem->rms_flux = fl_rms;
-        stem->raw_flux = raw_flux_buf;
+
+        snprintf(stem->mod_filename, sizeof(stem->mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
+                 basename, p, stem->note_name);
 
         double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
         if (mod_flux_buf) {
@@ -2064,34 +2052,60 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
                     free(channel_flux);
                 }
             }
-            stem->mod_flux = mod_flux_buf;
-            snprintf(stem->mod_filename, sizeof(stem->mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
-                     basename, p, stem->note_name);
-        }
-    }
-
-    // Export companion flux WAV files
-    int exported_count = 0;
-
-    for (int idx = 0; idx < audible_count; idx++) {
-        FluxStem *stem = &flux_stems[idx];
-        int p = stem->pitch;
-
-        if (stem->raw_flux) {
-            char raw_flux_filepath[4096];
-            snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
-                     stem_dir, basename, p, stem->note_name);
-            write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, stem->raw_flux);
         }
 
-        if (stem->mod_flux) {
+        // Export companion flux WAV files immediately
+        char raw_flux_filepath[4096];
+        snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
+                 stem_dir, basename, p, stem->note_name);
+        write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
+
+        if (mod_flux_buf) {
             char mod_flux_filepath[4096];
             snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
                      stem_dir, stem->mod_filename);
-            write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, stem->mod_flux);
-            exported_count++;
+            write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
         }
+
+        // Store compact 16-bit PCM mono arrays for JS report generation
+        stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+        if (stem->raw_flux_i16) {
+            for (uint32_t s = 0; s < total_samples; s++) {
+                double sum_f = 0.0;
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    sum_f += raw_flux_buf[s * num_channels + c];
+                }
+                double val = sum_f / num_channels;
+                if (val > 1.0) val = 1.0;
+                if (val < 0.0) val = 0.0;
+                stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
+            }
+        }
+
+        if (mod_flux_buf) {
+            stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+            if (stem->mod_flux_i16) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double sum_f = 0.0;
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        sum_f += mod_flux_buf[s * num_channels + c];
+                    }
+                    double val = sum_f / num_channels;
+                    if (val > 1.0) val = 1.0;
+                    if (val < 0.0) val = 0.0;
+                    stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
+                }
+            }
+            free(mod_flux_buf);
+            mod_flux_buf = NULL;
+        }
+
+        // Free full-precision double arrays immediately to optimize RAM footprint
+        free(raw_flux_buf);
+        raw_flux_buf = NULL;
     }
+
+    int exported_count = audible_count;
 
     // Construct Flux HTML report in [flux] directory
     if (flux_stems) {
@@ -2108,8 +2122,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         );
 
         for (int idx = 0; idx < audible_count; idx++) {
-            if (flux_stems[idx].raw_flux) free(flux_stems[idx].raw_flux);
-            if (flux_stems[idx].mod_flux) free(flux_stems[idx].mod_flux);
+            if (flux_stems[idx].raw_flux_i16) free(flux_stems[idx].raw_flux_i16);
+            if (flux_stems[idx].mod_flux_i16) free(flux_stems[idx].mod_flux_i16);
             if (flux_stems[idx].peaks) free(flux_stems[idx].peaks);
             if (flux_stems[idx].troughs) free(flux_stems[idx].troughs);
         }

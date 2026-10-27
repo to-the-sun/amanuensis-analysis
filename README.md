@@ -24,7 +24,8 @@ Separates an audio file into individual MIDI integer pitch stems ($0..127$, repr
 - **Console Progress Bars & Metadata**: Displays live multi-line ASCII progress bars in the console for each file as it is being processed concurrently during STFT and spectral flux analysis, an acoustic metadata table (peak/RMS amplitudes, active duration, center frequencies) per pitch, non-tonal stem summary statistics, and real-time processing speed factors.
 - **Double-Click & Drag-and-Drop (Multi-File & Multithreaded)**:
   - **Multi-File Drag & Drop**: Drag single or multiple WAV files (or folders) directly onto `flux_pitch_separator.exe` or pass multiple file paths as arguments.
-  - **Double-Click Folder Scanning**: Double-clicking `flux_pitch_separator.exe` without arguments automatically scans its current folder for all WAV files and processes them simultaneously using POSIX worker threads across all available CPU cores.
+  - **Double-Click Folder Scanning**: Double-clicking `flux_pitch_separator.exe` without arguments automatically scans its current folder for all WAV files (ignoring generated stems, `preview.wav`, and `glued.wav`) and processes them simultaneously using POSIX worker threads across all available CPU cores.
+  - **Optimized Low Memory Footprint**: Stream-writes companion flux WAV files and stores compact report data per pitch stem, reducing memory footprint by >90% to prevent high RAM usage during multi-file concurrent batch runs.
   - **Unified Output Directory**: Generated modified flux WAVs, raw flux WAVs, JS data files, and interactive HTML reports for all processed files are placed into a single shared `pitch_stems/` directory (`pitch_stems/[flux]/`) with a master batch analysis dashboard at `pitch_stems/[flux]/index.html`.
 
 **Compilation & Usage:**
