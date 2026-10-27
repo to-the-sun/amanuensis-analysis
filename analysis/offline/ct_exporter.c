@@ -1078,11 +1078,13 @@ static int export_single_stem_assets_from_res(
                 }
 
                 // Initialize crossfade state for dynamic amplitude-based fade in/out
+                double crossfade_low_ms = 10.0;
+                double crossfade_high_ms = 4999.0;
                 t_crossfade_state cf;
-                crossfade_init(&cf, (double)pat_sr, 10.0, 50.0);
+                crossfade_init(&cf, (double)pat_sr, crossfade_low_ms, crossfade_high_ms);
 
                 // Pre-warm crossfade state in quiet/silence mode so last_control = 0.0
-                int warm_samples = (int)(pat_sr * 0.050);
+                int warm_samples = (int)(pat_sr * (cf.high_ms / 1000.0));
                 if (warm_samples < 1) warm_samples = 1;
                 for (int w = 0; w < warm_samples; w++) {
                     double m1, m2, s_val;
@@ -3630,11 +3632,13 @@ int export_group_assets_and_html(
                     }
 
                     // Initialize crossfade state for dynamic amplitude-based fade in/out
+                    double crossfade_low_ms = 10.0;
+                    double crossfade_high_ms = 4999.0;
                     t_crossfade_state cf;
-                    crossfade_init(&cf, (double)grp_audio_sr, 10.0, 50.0);
+                    crossfade_init(&cf, (double)grp_audio_sr, crossfade_low_ms, crossfade_high_ms);
 
                     // Pre-warm crossfade state in quiet/silence mode so last_control = 0.0
-                    int warm_samples = (int)(grp_audio_sr * 0.050);
+                    int warm_samples = (int)(grp_audio_sr * (cf.high_ms / 1000.0));
                     if (warm_samples < 1) warm_samples = 1;
                     for (int w = 0; w < warm_samples; w++) {
                         double m1, m2, s_val;
