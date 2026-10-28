@@ -2162,7 +2162,6 @@ static int export_all_assets_and_html_internal(
     int pass1_window_ms,
     SharedTransientBuffer* shared_buffer
 ) {
-    (void)audio_filepath;
     if (!output_dir || !stem_name || !y || len <= 0 || sr <= 0) return 0;
 
     int contour_len = pass1_window_ms + 1;
@@ -2254,6 +2253,49 @@ static int export_all_assets_and_html_internal(
     FullAnalysisResult res2;
     if (!analyzer_batch_analyze_shared(y, len, sr, pass2_win_ms, 1, shared_buffer, &res2, 0)) return 0;
 
+    char orig_path[4096] = "";
+    char exe_dir[2048];
+    get_executable_directory(exe_dir, sizeof(exe_dir));
+
+    float* orig_audio_buf = NULL;
+    int orig_audio_len = 0;
+    int orig_audio_sr = sr;
+
+    if (audio_filepath && audio_filepath[0] != '\0' && find_original_audio_for_stem(exe_dir, audio_filepath, orig_path, sizeof(orig_path))) {
+        unsigned int orig_ch = 0, orig_sr = 0;
+        drwav_uint64 orig_frames = 0;
+        float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(orig_path, &orig_ch, &orig_sr, &orig_frames, NULL);
+        if (orig_pcm && orig_frames > 0 && orig_sr > 0) {
+            orig_audio_buf = (float*)malloc(orig_frames * sizeof(float));
+            if (orig_audio_buf) {
+                orig_audio_len = (int)orig_frames;
+                orig_audio_sr = (int)orig_sr;
+                if (orig_ch == 1) {
+                    memcpy(orig_audio_buf, orig_pcm, orig_frames * sizeof(float));
+                } else {
+                    for (drwav_uint64 f = 0; f < orig_frames; f++) {
+                        double sum = 0.0;
+                        for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
+                            sum += orig_pcm[f * orig_ch + ch_i];
+                        }
+                        orig_audio_buf[f] = (float)(sum / orig_ch);
+                    }
+                }
+                float max_abs_val = 0.0f;
+                for (int s = 0; s < orig_audio_len; s++) {
+                    float abs_smp = fabsf(orig_audio_buf[s]);
+                    if (abs_smp > max_abs_val) max_abs_val = abs_smp;
+                }
+                if (max_abs_val > 0.0f) {
+                    float norm_factor = 1.0f / max_abs_val;
+                    for (int s = 0; s < orig_audio_len; s++) orig_audio_buf[s] *= norm_factor;
+                }
+                printf("\nFound original audio file for pattern slicing: %s\n", orig_path);
+            }
+            drwav_free(orig_pcm, NULL);
+        }
+    }
+
     int ret = export_single_stem_assets_from_res(
         output_dir,
         stem_name,
@@ -2270,14 +2312,15 @@ static int export_all_assets_and_html_internal(
         CONTOUR_EVO_PTS,
         &res2,
         1,
-        NULL,
-        0,
-        0,
+        orig_audio_buf,
+        orig_audio_len,
+        orig_audio_sr,
         NULL,
         NULL,
         NULL
     );
 
+    if (orig_audio_buf) free(orig_audio_buf);
     if (accumulated_contour) free(accumulated_contour);
     if (contour_evo) free(contour_evo);
     analyzer_free_analysis(&res2);
