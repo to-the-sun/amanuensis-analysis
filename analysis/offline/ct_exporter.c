@@ -1119,14 +1119,10 @@ static int export_single_stem_assets_from_res(
                 while (fade_written < max_fade_frames) {
                     uint64_t write_cnt = ((max_fade_frames - fade_written) < 8192) ? (max_fade_frames - fade_written) : 8192;
                     for (uint64_t i = 0; i < write_cnt; i++) {
-                        double sum = 0.0;
-                        if (busy_status) {
-                            float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
-                            double mix1, mix2;
-                            crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
-                        } else {
-                            sum = 0.0;
-                        }
+                        float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
+                        double mix1, mix2, sum;
+                        crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+
                         if (sum > 1.0) sum = 1.0;
                         if (sum < -1.0) sum = -1.0;
                         chunk[i] = (int16_t)(sum * 32767.0);
@@ -3721,14 +3717,10 @@ int export_group_assets_and_html(
                     while (fade_written < max_fade_frames) {
                         uint64_t write_cnt = ((max_fade_frames - fade_written) < 8192) ? (max_fade_frames - fade_written) : 8192;
                         for (uint64_t s = 0; s < write_cnt; s++) {
-                            double sum = 0.0;
-                            if (busy_status) {
-                                float smp = (curr_smp < (uint64_t)grp_audio_len) ? grp_audio_buf[curr_smp] : 0.0f;
-                                double mix1, mix2;
-                                crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
-                            } else {
-                                sum = 0.0;
-                            }
+                            float smp = (curr_smp < (uint64_t)grp_audio_len) ? grp_audio_buf[curr_smp] : 0.0f;
+                            double mix1, mix2, sum;
+                            crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+
                             if (sum > 1.0) sum = 1.0;
                             if (sum < -1.0) sum = -1.0;
                             chunk[s] = (int16_t)(sum * 32767.0);
