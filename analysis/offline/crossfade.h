@@ -1,7 +1,9 @@
 #ifndef _SHARED_CROSSFADE_H_
 #define _SHARED_CROSSFADE_H_
 
+#if __has_include("ext.h")
 #include "ext.h"
+#endif
 
 typedef struct _ramp_state {
     double length;

@@ -5,7 +5,7 @@ LDFLAGS = -lm -lOpenCL -lpthread
 
 TARGET = ct_analyze_headless
 WIN_TARGET = ct_analyze_headless.exe
-SOURCES = ct_analyze_headless.c ct_exporter.c cumulative_transience.c
+SOURCES = ct_analyze_headless.c ct_exporter.c cumulative_transience.c crossfade.c
 OBJECTS = $(SOURCES:.c=.o)
 
 all: $(TARGET) $(WIN_TARGET)
