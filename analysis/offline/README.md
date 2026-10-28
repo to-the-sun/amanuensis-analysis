@@ -21,7 +21,7 @@ The C pipeline operates in two passes without Python dependencies:
 
 When invoked with `--group` (or `-g`), the analyzer executes multi-file grouped stem analysis across all WAV files in a target palette directory, computing shared cross-stem transience metrics while maximizing multi-core CPU and GPU utilization. An optional argument `--original <path>` (or `-o <path>`) allows specifying the absolute or relative path to an original audio file.
 
-When searching for original audio files to extract audio from for creating `[stems]` and `[loops]`, the analyzer inspects parent folders level-by-level starting at the parent directory above the folder containing `ct_analyze_headless.exe`. It looks for a WAV file whose whole name (minus extension) matches the beginning of the stem WAV file in question (case-insensitive). If a match is found in a parent directory level, higher parent directories are forgone.
+When searching for original audio files to extract audio from for creating `[stems]` and `[loops]`, the analyzer inspects parent folders level-by-level starting at the parent directory above the folder containing `ct_analyze_headless.exe`. It looks for a WAV file whose whole name (minus extension) matches the beginning of the stem WAV file in question (case-insensitive). If a match is found in a parent directory level, higher parent directories are forgone. Matching `passes` text files associated with dynamically located original audio files are scanned and copied into destination palette directories.
 
 1. **Parallel Stem WAV Decoding**:
    - Spawns CPU worker threads (`_beginthreadex` on Windows, `pthread_create` on POSIX) to decode PCM audio frames and perform stereo-to-mono downmixing across all stems concurrently.

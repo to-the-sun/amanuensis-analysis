@@ -2258,6 +2258,7 @@ static int export_all_assets_and_html_internal(
     int orig_audio_sr = sr;
 
     if (audio_filepath && audio_filepath[0] != '\0' && find_original_audio_for_stem(exe_dir, audio_filepath, orig_path, sizeof(orig_path))) {
+        copy_passes_files_for_audio(orig_path, output_dir);
         unsigned int orig_ch = 0, orig_sr = 0;
         drwav_uint64 orig_frames = 0;
         float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(orig_path, &orig_ch, &orig_sr, &orig_frames, NULL);
@@ -3451,12 +3452,14 @@ int export_group_assets_and_html(
         char resolved_path[4096] = "";
         if (find_original_audio_for_stem(exe_dir, stems[i].audio_filepath, resolved_path, sizeof(resolved_path))) {
             stem_orig_paths[i] = strdup(resolved_path);
+            copy_passes_files_for_audio(resolved_path, group_output_dir);
             printf("[Group Mode] Resolved original audio for stem '%s': %s\n", stems[i].stem_name, resolved_path);
         } else if (original_audio_filepath && original_audio_filepath[0] != '\0') {
             stem_orig_paths[i] = strdup(original_audio_filepath);
         } else {
             stem_orig_paths[i] = NULL;
         }
+        export_tasks[i].original_audio_filepath = stem_orig_paths[i];
     }
 
     typedef struct {
