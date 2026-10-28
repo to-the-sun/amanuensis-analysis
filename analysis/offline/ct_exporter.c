@@ -1112,23 +1112,28 @@ static int export_single_stem_assets_from_res(
                     remaining_audio -= write_cnt;
                 }
 
-                // Fade out back to silence smoothly at the end of pattern segment (control = 0.0)
+                // Fade out back to silence smoothly at the end of pattern segment (control = 0.0), extending WAV by full max fade out time
+                uint64_t max_fade_frames = (uint64_t)round((cf.high_ms / 1000.0) * pat_sr);
+                uint64_t fade_written = 0;
                 int busy_status = 1;
-                while (busy_status) {
-                    uint64_t chunk_idx = 0;
-                    while (chunk_idx < 8192 && busy_status) {
-                        float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
-                        double mix1, mix2, sum;
-                        crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
-
+                while (fade_written < max_fade_frames) {
+                    uint64_t write_cnt = ((max_fade_frames - fade_written) < 8192) ? (max_fade_frames - fade_written) : 8192;
+                    for (uint64_t i = 0; i < write_cnt; i++) {
+                        double sum = 0.0;
+                        if (busy_status) {
+                            float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
+                            double mix1, mix2;
+                            crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+                        } else {
+                            sum = 0.0;
+                        }
                         if (sum > 1.0) sum = 1.0;
                         if (sum < -1.0) sum = -1.0;
-                        chunk[chunk_idx++] = (int16_t)(sum * 32767.0);
+                        chunk[i] = (int16_t)(sum * 32767.0);
                         curr_smp++;
                     }
-                    if (chunk_idx > 0) {
-                        drwav_write_pcm_frames(&wav_stem_out, chunk_idx, chunk);
-                    }
+                    drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                    fade_written += write_cnt;
                 }
 
                 drwav_uninit(&wav_stem_out);
@@ -3666,23 +3671,28 @@ int export_group_assets_and_html(
                         remaining_audio -= write_cnt;
                     }
 
-                    // Fade out back to silence smoothly at the end of pattern segment (control = 0.0)
+                    // Fade out back to silence smoothly at the end of pattern segment (control = 0.0), extending WAV by full max fade out time
+                    uint64_t max_fade_frames = (uint64_t)round((cf.high_ms / 1000.0) * grp_audio_sr);
+                    uint64_t fade_written = 0;
                     int busy_status = 1;
-                    while (busy_status) {
-                        uint64_t chunk_idx = 0;
-                        while (chunk_idx < 8192 && busy_status) {
-                            float smp = (curr_smp < (uint64_t)grp_audio_len) ? grp_audio_buf[curr_smp] : 0.0f;
-                            double mix1, mix2, sum;
-                            crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
-
+                    while (fade_written < max_fade_frames) {
+                        uint64_t write_cnt = ((max_fade_frames - fade_written) < 8192) ? (max_fade_frames - fade_written) : 8192;
+                        for (uint64_t s = 0; s < write_cnt; s++) {
+                            double sum = 0.0;
+                            if (busy_status) {
+                                float smp = (curr_smp < (uint64_t)grp_audio_len) ? grp_audio_buf[curr_smp] : 0.0f;
+                                double mix1, mix2;
+                                crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+                            } else {
+                                sum = 0.0;
+                            }
                             if (sum > 1.0) sum = 1.0;
                             if (sum < -1.0) sum = -1.0;
-                            chunk[chunk_idx++] = (int16_t)(sum * 32767.0);
+                            chunk[s] = (int16_t)(sum * 32767.0);
                             curr_smp++;
                         }
-                        if (chunk_idx > 0) {
-                            drwav_write_pcm_frames(&wav_stem_out, chunk_idx, chunk);
-                        }
+                        drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+                        fade_written += write_cnt;
                     }
 
                     drwav_uninit(&wav_stem_out);
