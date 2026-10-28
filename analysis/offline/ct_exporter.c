@@ -1077,8 +1077,8 @@ static int export_single_stem_assets_from_res(
                     remaining_blank -= write_cnt;
                 }
 
-                // Initialize crossfade state for dynamic amplitude-based fade in/out
-                double crossfade_low_ms = 10.0;
+                // Initialize crossfade state for dynamic amplitude-based fade in/out (999 samples low)
+                double crossfade_low_ms = (999.0 / (double)pat_sr) * 1000.0;
                 double crossfade_high_ms = 4999.0;
                 t_crossfade_state cf;
                 crossfade_init(&cf, (double)pat_sr, crossfade_low_ms, crossfade_high_ms);
@@ -3636,8 +3636,8 @@ int export_group_assets_and_html(
                         remaining_blank -= write_cnt;
                     }
 
-                    // Initialize crossfade state for dynamic amplitude-based fade in/out
-                    double crossfade_low_ms = 10.0;
+                    // Initialize crossfade state for dynamic amplitude-based fade in/out (999 samples low)
+                    double crossfade_low_ms = (999.0 / (double)grp_audio_sr) * 1000.0;
                     double crossfade_high_ms = 4999.0;
                     t_crossfade_state cf;
                     crossfade_init(&cf, (double)grp_audio_sr, crossfade_low_ms, crossfade_high_ms);
