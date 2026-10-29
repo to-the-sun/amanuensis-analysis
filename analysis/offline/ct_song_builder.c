@@ -43,6 +43,7 @@ typedef struct {
     uint64_t active_length;
     int original_index;
     bool selected;
+    int selection_order;
 
     double judgment_stem_corr_sum;
     double judgment_stem_cap_sum;
@@ -339,9 +340,23 @@ static void generate_correlation_html_report(
     const char* work_dir,
     const PatternInfo* patterns,
     int num_patterns,
+    const int* selected_indices,
     int num_selected,
     double final_correlation
 ) {
+    int* display_order = (int*)malloc((size_t)num_patterns * sizeof(int));
+    if (!display_order) return;
+
+    int order_count = 0;
+    for (int s = 0; s < num_selected; s++) {
+        display_order[order_count++] = selected_indices[s];
+    }
+    for (int i = 0; i < num_patterns; i++) {
+        if (!patterns[i].selected) {
+            display_order[order_count++] = i;
+        }
+    }
+
     char js_path[4096];
     snprintf(js_path, sizeof(js_path), "%.3500s" PATH_SEP_STR "song_correlation_waveform_data.js", work_dir);
 
@@ -362,7 +377,8 @@ static void generate_correlation_html_report(
     if (fjs) {
         fprintf(fjs, "window.WAVEFORM_DATA = {\n");
         fprintf(fjs, "  stemWaveforms: [\n");
-        for (int i = 0; i < num_patterns; i++) {
+        for (int d = 0; d < num_patterns; d++) {
+            int i = display_order[d];
             const PatternInfo* pat = &patterns[i];
             uint64_t total_frames = pat->total_frames;
             int16_t* pcm_stem = (int16_t*)calloc(total_frames, sizeof(int16_t));
@@ -376,14 +392,15 @@ static void generate_correlation_html_report(
                 }
             }
             char* b64 = encode_base64_bytes((const uint8_t*)pcm_stem, total_frames * sizeof(int16_t));
-            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < num_patterns) ? "," : "");
+            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (d + 1 < num_patterns) ? "," : "");
             if (b64) free(b64);
             if (pcm_stem) free(pcm_stem);
         }
         fprintf(fjs, "  ],\n");
 
         fprintf(fjs, "  capacities: [\n");
-        for (int i = 0; i < num_patterns; i++) {
+        for (int d = 0; d < num_patterns; d++) {
+            int i = display_order[d];
             const PatternInfo* pat = &patterns[i];
             uint64_t total_frames = pat->total_frames;
             int16_t* pcm_cap = (int16_t*)calloc(total_frames, sizeof(int16_t));
@@ -395,7 +412,7 @@ static void generate_correlation_html_report(
                 }
             }
             char* b64 = encode_base64_bytes((const uint8_t*)pcm_cap, total_frames * sizeof(int16_t));
-            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < num_patterns) ? "," : "");
+            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (d + 1 < num_patterns) ? "," : "");
             if (b64) free(b64);
             if (pcm_cap) free(pcm_cap);
         }
@@ -478,7 +495,8 @@ static void generate_correlation_html_report(
 
     fprintf(f, "<main>\n");
 
-    for (int i = 0; i < num_patterns; i++) {
+    for (int d = 0; d < num_patterns; d++) {
+        int i = display_order[d];
         const PatternInfo* pat = &patterns[i];
         if (!pat->recombined_samples || pat->total_frames == 0) continue;
 
@@ -508,13 +526,13 @@ static void generate_correlation_html_report(
                 pat->judgment_overall_cap_sum,
                 pat->judgment_overall_corr_pct);
         fprintf(f, "        </div>\n");
-        fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, i);
+        fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, d);
         fprintf(f, "      </div>\n");
         fprintf(f, "    </div>\n");
 
-        fprintf(f, "    <div class=\"canvas-container\" id=\"container-%d\">\n", i);
-        fprintf(f, "      <canvas id=\"canvas-%d\"></canvas>\n", i);
-        fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", i);
+        fprintf(f, "    <div class=\"canvas-container\" id=\"container-%d\">\n", d);
+        fprintf(f, "      <canvas id=\"canvas-%d\"></canvas>\n", d);
+        fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", d);
         fprintf(f, "    </div>\n");
         fprintf(f, "  </div>\n");
     }
@@ -529,20 +547,22 @@ static void generate_correlation_html_report(
     fprintf(f, "  duration: %.6f,\n", max_song_duration);
     fprintf(f, "  stems: [\n");
 
-    for (int i = 0; i < num_patterns; i++) {
+    for (int d = 0; d < num_patterns; d++) {
+        int i = display_order[d];
         const PatternInfo* pat_i = &patterns[i];
         if (!pat_i->recombined_samples || pat_i->total_frames == 0) continue;
 
         double duration_s = pat_i->sample_rate > 0 ? (double)pat_i->total_frames / pat_i->sample_rate : 0.0;
 
         fprintf(f, "    {\n");
-        fprintf(f, "      index: %d,\n", i);
+        fprintf(f, "      index: %d,\n", d);
         fprintf(f, "      filename: \"%s\",\n", pat_i->stem_filename);
         fprintf(f, "      selected: %s,\n", pat_i->selected ? "true" : "false");
+        fprintf(f, "      selectionOrder: %d,\n", pat_i->selection_order);
         fprintf(f, "      duration: %.4f,\n", duration_s);
         fprintf(f, "      sampleRate: %u,\n", pat_i->sample_rate);
         fprintf(f, "      totalSamples: %llu\n", (unsigned long long)pat_i->total_frames);
-        fprintf(f, "    }%s\n", (i + 1 < num_patterns) ? "," : "");
+        fprintf(f, "    }%s\n", (d + 1 < num_patterns) ? "," : "");
     }
 
     fprintf(f, "  ]\n");
@@ -593,7 +613,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "      const st = DATA.stems[i];\n");
     fprintf(f, "      if (!st.capacity) continue;\n");
-    fprintf(f, "      const priorSelected = DATA.stems.filter(p => p.index < st.index && p.selected && p.capacity);\n");
+    fprintf(f, "      const priorSelected = DATA.stems.filter(p => p.selected && p.selectionOrder < st.selectionOrder && p.capacity);\n");
     fprintf(f, "      const corrBuf = new Float32Array(st.capacity.length);\n");
     fprintf(f, "      for (let s = 0; s < st.capacity.length; s++) {\n");
     fprintf(f, "        const cap_i = st.capacity[s];\n");
@@ -922,6 +942,7 @@ static void generate_correlation_html_report(
     fprintf(f, "</script>\n");
     fprintf(f, "</body>\n</html>\n");
 
+    free(display_order);
     fclose(f);
     printf("Successfully generated correlation HTML report: %s\n", html_path);
 }
@@ -1076,56 +1097,126 @@ int main(int argc, char** argv) {
 
     int* test_set = (int*)malloc((size_t)num_patterns * sizeof(int));
 
+    // Step 1: Identify seed pattern (longest pattern with active_length > 0)
+    int seed_idx = -1;
     for (int i = 0; i < num_patterns; i++) {
-        if (patterns[i].active_length == 0) {
+        if (patterns[i].active_length > 0) {
+            seed_idx = i;
+            break;
+        } else {
             printf("[Skip] %s has 0 active length.\n", patterns[i].stem_filename);
             patterns[i].selected = false;
+            patterns[i].selection_order = num_patterns;
             patterns[i].judgment_stem_corr_sum = 0.0;
             patterns[i].judgment_stem_cap_sum = 0.0;
             patterns[i].judgment_stem_corr_pct = 0.0;
             patterns[i].judgment_overall_corr_sum = 0.0;
             patterns[i].judgment_overall_cap_sum = 0.0;
             patterns[i].judgment_overall_corr_pct = 0.0;
-            continue;
         }
+    }
 
-        compute_judgment_time_correlation_samples(&patterns[i], patterns, selected_indices, num_selected);
+    if (seed_idx != -1) {
+        compute_judgment_time_correlation_samples(&patterns[seed_idx], patterns, selected_indices, 0);
 
-        for (int k = 0; k < num_selected; k++) {
-            test_set[k] = selected_indices[k];
-        }
-        test_set[num_selected] = i;
-
+        test_set[0] = seed_idx;
         double overall_corr_sum = 0.0;
         double overall_cap_sum = 0.0;
         double proposed_corr = compute_correlation_ext(
             patterns,
             test_set,
-            num_selected + 1,
+            1,
             &overall_corr_sum,
             &overall_cap_sum
         );
 
-        patterns[i].judgment_overall_corr_sum = overall_corr_sum;
-        patterns[i].judgment_overall_cap_sum = overall_cap_sum;
-        patterns[i].judgment_overall_corr_pct = proposed_corr;
+        patterns[seed_idx].selected = true;
+        patterns[seed_idx].selection_order = num_selected; // 0
+        patterns[seed_idx].judgment_overall_corr_sum = overall_corr_sum;
+        patterns[seed_idx].judgment_overall_cap_sum = overall_cap_sum;
+        patterns[seed_idx].judgment_overall_corr_pct = proposed_corr;
 
-        if (num_selected == 0) {
-            selected_indices[num_selected++] = i;
-            current_song_correlation = proposed_corr;
-            patterns[i].selected = true;
-            printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation: %.2f%%\n",
-                   patterns[i].stem_filename, i + 1, current_song_correlation);
-        } else if (proposed_corr > current_song_correlation) {
-            selected_indices[num_selected++] = i;
-            patterns[i].selected = true;
+        selected_indices[num_selected++] = seed_idx;
+        current_song_correlation = proposed_corr;
+
+        printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation: %.2f%%\n",
+               patterns[seed_idx].stem_filename, seed_idx + 1, current_song_correlation);
+    }
+
+    // Step 2: Iteratively find the unselected candidate pattern that yields highest song correlation increase
+    while (num_selected < num_patterns) {
+        int best_candidate = -1;
+        double best_proposed_corr = current_song_correlation;
+        double best_overall_corr_sum = 0.0;
+        double best_overall_cap_sum = 0.0;
+        double best_stem_corr_sum = 0.0;
+        double best_stem_cap_sum = 0.0;
+        double best_stem_corr_pct = 0.0;
+
+        for (int i = 0; i < num_patterns; i++) {
+            if (patterns[i].selected || patterns[i].active_length == 0) {
+                continue;
+            }
+
+            compute_judgment_time_correlation_samples(&patterns[i], patterns, selected_indices, num_selected);
+
+            for (int k = 0; k < num_selected; k++) {
+                test_set[k] = selected_indices[k];
+            }
+            test_set[num_selected] = i;
+
+            double overall_corr_sum = 0.0;
+            double overall_cap_sum = 0.0;
+            double proposed_corr = compute_correlation_ext(
+                patterns,
+                test_set,
+                num_selected + 1,
+                &overall_corr_sum,
+                &overall_cap_sum
+            );
+
+            patterns[i].judgment_overall_corr_sum = overall_corr_sum;
+            patterns[i].judgment_overall_cap_sum = overall_cap_sum;
+            patterns[i].judgment_overall_corr_pct = proposed_corr;
+
+            if (proposed_corr > best_proposed_corr) {
+                best_candidate = i;
+                best_proposed_corr = proposed_corr;
+                best_overall_corr_sum = overall_corr_sum;
+                best_overall_cap_sum = overall_cap_sum;
+                best_stem_corr_sum = patterns[i].judgment_stem_corr_sum;
+                best_stem_cap_sum = patterns[i].judgment_stem_cap_sum;
+                best_stem_corr_pct = patterns[i].judgment_stem_corr_pct;
+            }
+        }
+
+        if (best_candidate != -1 && best_proposed_corr > current_song_correlation) {
+            patterns[best_candidate].selected = true;
+            patterns[best_candidate].selection_order = num_selected;
+            patterns[best_candidate].judgment_stem_corr_sum = best_stem_corr_sum;
+            patterns[best_candidate].judgment_stem_cap_sum = best_stem_cap_sum;
+            patterns[best_candidate].judgment_stem_corr_pct = best_stem_corr_pct;
+            patterns[best_candidate].judgment_overall_corr_sum = best_overall_corr_sum;
+            patterns[best_candidate].judgment_overall_cap_sum = best_overall_cap_sum;
+            patterns[best_candidate].judgment_overall_corr_pct = best_proposed_corr;
+
+            selected_indices[num_selected++] = best_candidate;
             printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.2f%% -> %.2f%%\n",
-                   patterns[i].stem_filename, i + 1, current_song_correlation, proposed_corr);
-            current_song_correlation = proposed_corr;
+                   patterns[best_candidate].stem_filename, best_candidate + 1, current_song_correlation, best_proposed_corr);
+            current_song_correlation = best_proposed_corr;
         } else {
-            patterns[i].selected = false;
-            printf("[REJECT] %s (Rank %d) proposed correlation %.2f%% <= current %.2f%%\n",
-                   patterns[i].stem_filename, i + 1, proposed_corr, current_song_correlation);
+            break;
+        }
+    }
+
+    // Mark remaining unselected patterns and log rejection
+    for (int i = 0; i < num_patterns; i++) {
+        if (!patterns[i].selected) {
+            patterns[i].selection_order = num_selected;
+            if (patterns[i].active_length > 0) {
+                printf("[REJECT] %s (Rank %d) best proposed correlation %.2f%% <= current %.2f%%\n",
+                       patterns[i].stem_filename, i + 1, patterns[i].judgment_overall_corr_pct, current_song_correlation);
+            }
         }
     }
 
@@ -1141,18 +1232,15 @@ int main(int argc, char** argv) {
         const PatternInfo* pat = &patterns[idx];
 
         char dst_stem[4096];
-        char dst_rec[4096];
         snprintf(dst_stem, sizeof(dst_stem), "%.3500s" PATH_SEP_STR "%.500s", song_dir, pat->stem_filename);
-        snprintf(dst_rec, sizeof(dst_rec), "%.3500s" PATH_SEP_STR "%.500s", song_dir, pat->recombined_filename);
 
         bool ok_stem = copy_file(pat->stem_path, dst_stem);
-        bool ok_rec = copy_file(pat->recombined_path, dst_rec);
 
-        if (ok_stem && ok_rec) {
-            printf("  Copied: %s and %s\n", pat->stem_filename, pat->recombined_filename);
+        if (ok_stem) {
+            printf("  Copied: %s\n", pat->stem_filename);
             copy_success_count++;
         } else {
-            printf("  [Error] Failed copying %s or %s into [song]\n", pat->stem_filename, pat->recombined_filename);
+            printf("  [Error] Failed copying %s into [song]\n", pat->stem_filename);
         }
     }
 
@@ -1161,6 +1249,7 @@ int main(int argc, char** argv) {
         work_dir,
         patterns,
         num_patterns,
+        selected_indices,
         num_selected,
         current_song_correlation
     );
