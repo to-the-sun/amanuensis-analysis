@@ -264,6 +264,7 @@ int is_valid_input_wav(const char *path) {
 
     if (contains_icase(path, "_flux.wav")) return 0;
     if (contains_icase(path, "_modified_flux.wav")) return 0;
+    if (contains_icase(path, "_recombined_modified_flux.wav")) return 0;
     if (contains_icase(path, "_nontonal.wav")) return 0;
     if (contains_icase(path, "_original.wav")) return 0;
     if (contains_icase(path, "_coherence.wav")) return 0;
@@ -1902,6 +1903,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     int audible_count = 0;
     int audible_capacity = 0;
 
+    double *recombined_mod_flux = (double*)calloc(total_channel_samples, sizeof(double));
+
     clock_t flux_start_clock = clock();
 
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
@@ -2052,6 +2055,12 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
                     free(channel_flux);
                 }
             }
+
+            if (recombined_mod_flux) {
+                for (size_t k = 0; k < total_channel_samples; k++) {
+                    recombined_mod_flux[k] += mod_flux_buf[k];
+                }
+            }
         }
 
         // Export companion flux WAV files immediately
@@ -2103,6 +2112,32 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         // Free full-precision double arrays immediately to optimize RAM footprint
         free(raw_flux_buf);
         raw_flux_buf = NULL;
+    }
+
+    if (recombined_mod_flux) {
+        if (audible_count > 0) {
+            double max_rec_peak = 0.0;
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                double abs_val = fabs(recombined_mod_flux[k]);
+                if (abs_val > max_rec_peak) {
+                    max_rec_peak = abs_val;
+                }
+            }
+
+            if (max_rec_peak > 1e-12) {
+                double scale = 1.0 / max_rec_peak;
+                for (size_t k = 0; k < total_channel_samples; k++) {
+                    recombined_mod_flux[k] *= scale;
+                }
+            }
+
+            char recombined_filepath[12288];
+            snprintf(recombined_filepath, sizeof(recombined_filepath), "%s/%s_recombined_modified_flux.wav",
+                     flux_dir, basename);
+            write_wav_16bit(recombined_filepath, sample_rate, num_channels, total_samples, recombined_mod_flux);
+        }
+        free(recombined_mod_flux);
+        recombined_mod_flux = NULL;
     }
 
     int exported_count = audible_count;
