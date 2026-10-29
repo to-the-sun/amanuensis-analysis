@@ -47,6 +47,14 @@ typedef struct {
     bool selected;
 
     double actual_corr_bins[NUM_CORR_BINS];
+
+    double judgment_stem_corr_sum;
+    double judgment_stem_cap_sum;
+    double judgment_stem_corr_pct;
+
+    double judgment_overall_corr_sum;
+    double judgment_overall_cap_sum;
+    double judgment_overall_corr_pct;
 } PatternInfo;
 
 static int mkdir_p(const char* path) {
@@ -98,8 +106,18 @@ static bool copy_file(const char* src_path, const char* dst_path) {
     return true;
 }
 
-static double compute_correlation(const PatternInfo* patterns, const int* candidate_indices, int count) {
-    if (count <= 0) return 0.0;
+static double compute_correlation_ext(
+    const PatternInfo* patterns,
+    const int* candidate_indices,
+    int count,
+    double* out_total_corr,
+    double* out_total_cap
+) {
+    if (count <= 0) {
+        if (out_total_corr) *out_total_corr = 0.0;
+        if (out_total_cap) *out_total_cap = 0.0;
+        return 0.0;
+    }
 
     double total_corr_sum = 0.0;
     double total_cap_sum = 0.0;
@@ -141,6 +159,9 @@ static double compute_correlation(const PatternInfo* patterns, const int* candid
         }
     }
 
+    if (out_total_corr) *out_total_corr = total_corr_sum;
+    if (out_total_cap) *out_total_cap = total_cap_sum;
+
     if (total_cap_sum <= 1e-6) return 0.0;
     return (total_corr_sum / total_cap_sum) * 100.0;
 }
@@ -154,8 +175,45 @@ static void compute_judgment_time_correlation_bins(
     uint64_t total_frames = pat_i->total_frames;
     if (!pat_i->recombined_samples || total_frames == 0) {
         memset(pat_i->actual_corr_bins, 0, sizeof(pat_i->actual_corr_bins));
+        pat_i->judgment_stem_corr_sum = 0.0;
+        pat_i->judgment_stem_cap_sum = 0.0;
+        pat_i->judgment_stem_corr_pct = 0.0;
         return;
     }
+
+    double stem_corr_sum = 0.0;
+    double stem_cap_sum = 0.0;
+
+    for (uint64_t t = 0; t < total_frames; t++) {
+        double cap_i = fabsf(pat_i->recombined_samples[t]);
+        if (cap_i <= 1e-6) continue;
+
+        double sum_other = 0.0;
+        bool has_overlap = false;
+
+        for (int j = 0; j < num_selected; j++) {
+            int idx_j = selected_indices[j];
+            const PatternInfo* pat_j = &patterns[idx_j];
+            if (t < pat_j->total_frames && pat_j->recombined_samples) {
+                double cap_j = fabsf(pat_j->recombined_samples[t]);
+                if (cap_j > 1e-6) {
+                    sum_other += cap_j;
+                    has_overlap = true;
+                }
+            }
+        }
+
+        if (has_overlap) {
+            double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
+
+            stem_corr_sum += corr_mag;
+            stem_cap_sum += cap_i;
+        }
+    }
+
+    pat_i->judgment_stem_corr_sum = stem_corr_sum;
+    pat_i->judgment_stem_cap_sum = stem_cap_sum;
+    pat_i->judgment_stem_corr_pct = (stem_cap_sum > 1e-6) ? (stem_corr_sum / stem_cap_sum) * 100.0 : 0.0;
 
     for (int b = 0; b < NUM_CORR_BINS; b++) {
         uint64_t start_frame = (uint64_t)(((double)b / NUM_CORR_BINS) * total_frames);
@@ -165,6 +223,7 @@ static void compute_judgment_time_correlation_bins(
 
         double max_corr = 0.0;
         for (uint64_t s = start_frame; s < end_frame; s++) {
+            double cap_i = fabsf(pat_i->recombined_samples[s]);
             double sum_other = 0.0;
             for (int j = 0; j < num_selected; j++) {
                 int idx_j = selected_indices[j];
@@ -176,7 +235,8 @@ static void compute_judgment_time_correlation_bins(
                     }
                 }
             }
-            if (sum_other > max_corr) max_corr = sum_other;
+            double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
+            if (corr_mag > max_corr) max_corr = corr_mag;
         }
         pat_i->actual_corr_bins[b] = max_corr;
     }
@@ -325,7 +385,7 @@ static void generate_correlation_html_report(
     fprintf(f, "  .badge { font-size: 0.75rem; padding: 3px 8px; border-radius: 4px; font-weight: 600; text-transform: uppercase; }\n");
     fprintf(f, "  .badge-selected { background: #1b4d2e; color: #4caf50; border: 1px solid #2e7d32; }\n");
     fprintf(f, "  .badge-rejected { background: #4a151b; color: #f44336; border: 1px solid #c62828; }\n");
-    fprintf(f, "  .stem-metrics { font-size: 0.85rem; color: var(--muted); font-family: monospace; display: flex; gap: 15px; }\n");
+    fprintf(f, "  .stem-metrics { font-size: 0.85rem; color: var(--muted); font-family: monospace; display: flex; flex-direction: column; gap: 4px; text-align: right; }\n");
     fprintf(f, "  audio { height: 32px; width: 300px; outline: none; }\n");
     fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 160px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 10px; user-select: none; }\n");
     fprintf(f, "  canvas { width: 100%%; height: 100%%; display: block; cursor: crosshair; }\n");
@@ -356,7 +416,7 @@ static void generate_correlation_html_report(
     fprintf(f, "  <div class=\"legend\">\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: rgba(120,120,150,0.35); border: 1px solid rgba(150,150,180,0.5);\"></span> Output Audio Waveform (Background)</div>\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Stem Correlation Capacity (|S_i(t)|)</div>\n");
-    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Judgment-Time Overlapping Correlation (&sum;<sub>j &lt; i</sub> |S_j(t)|)</div>\n");
+    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Judgment-Time Overlapping Correlation (Min(|S_i(t)|, &sum;<sub>j &lt; i</sub> |S_j(t)|))</div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n");
@@ -389,10 +449,20 @@ static void generate_correlation_html_report(
             fprintf(f, "        <span class=\"badge badge-rejected\">Rejected</span>\n");
         }
         fprintf(f, "      </div>\n");
-        fprintf(f, "      <div style=\"display: flex; align-items: center; gap: 15px;\">\n");
-        fprintf(f, "        <div class=\"stem-metrics\">Duration: %.2fs | Active: %.2fs</div>\n",
+        fprintf(f, "      <div style=\"display: flex; align-items: center; gap: 20px;\">\n");
+        fprintf(f, "        <div class=\"stem-metrics\">\n");
+        fprintf(f, "          <div><strong>Duration:</strong> %.2fs | <strong>Active:</strong> %.2fs</div>\n",
                 duration_s,
                 pat->sample_rate > 0 ? (double)pat->active_length / pat->sample_rate : 0.0);
+        fprintf(f, "          <div><strong>Stem Corr / Cap at Judgment:</strong> %.2f / %.2f (%.2f%%)</div>\n",
+                pat->judgment_stem_corr_sum,
+                pat->judgment_stem_cap_sum,
+                pat->judgment_stem_corr_pct);
+        fprintf(f, "          <div><strong>Overall Song Corr / Cap if Included:</strong> %.2f / %.2f (%.2f%%)</div>\n",
+                pat->judgment_overall_corr_sum,
+                pat->judgment_overall_cap_sum,
+                pat->judgment_overall_corr_pct);
+        fprintf(f, "        </div>\n");
         fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, i);
         fprintf(f, "      </div>\n");
         fprintf(f, "    </div>\n");
@@ -545,7 +615,6 @@ static void generate_correlation_html_report(
     fprintf(f, "  let maxCapCorr = 1.0;\n");
     fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
     fprintf(f, "    if (item.capacity[i] > maxCapCorr) maxCapCorr = item.capacity[i];\n");
-    fprintf(f, "    if (item.actualCorrelation[i] > maxCapCorr) maxCapCorr = item.actualCorrelation[i];\n");
     fprintf(f, "  }\n\n");
 
     fprintf(f, "  // Background Waveform\n");
@@ -586,7 +655,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    const t = (i / (numBins - 1)) * duration;\n");
     fprintf(f, "    if (t < viewStart || t > viewEnd) continue;\n");
     fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const corr = item.actualCorrelation[i];\n");
+    fprintf(f, "    const corr = Math.min(item.capacity[i], item.actualCorrelation[i]);\n");
     fprintf(f, "    const y = height - ((corr / maxCapCorr) * height * 0.88) - 4;\n");
     fprintf(f, "    if (!startedCorr) { ctx.moveTo(x, y); startedCorr = true; } else { ctx.lineTo(x, y); }\n");
     fprintf(f, "  }\n");
@@ -645,7 +714,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    if (activeDrag) activeDrag.currentX = x;\n");
     fprintf(f, "    const binIdx = Math.min(item.capacity.length - 1, Math.max(0, Math.floor((timeS / item.duration) * item.capacity.length)));\n");
     fprintf(f, "    const capVal = item.capacity[binIdx] || 0.0;\n");
-    fprintf(f, "    const corrVal = item.actualCorrelation[binIdx] || 0.0;\n");
+    fprintf(f, "    const corrVal = Math.min(capVal, item.actualCorrelation[binIdx] || 0.0);\n");
     fprintf(f, "    tooltip.style.opacity = '1';\n");
     fprintf(f, "    tooltip.innerHTML = `Time: ${timeS.toFixed(3)}s<br>Capacity: ${capVal.toFixed(3)}<br>Overlap Corr: ${corrVal.toFixed(3)}`;\n");
     fprintf(f, "    renderAll();\n");
@@ -867,6 +936,12 @@ int main(int argc, char** argv) {
             printf("[Skip] %s has 0 active length.\n", patterns[i].stem_filename);
             patterns[i].selected = false;
             memset(patterns[i].actual_corr_bins, 0, sizeof(patterns[i].actual_corr_bins));
+            patterns[i].judgment_stem_corr_sum = 0.0;
+            patterns[i].judgment_stem_cap_sum = 0.0;
+            patterns[i].judgment_stem_corr_pct = 0.0;
+            patterns[i].judgment_overall_corr_sum = 0.0;
+            patterns[i].judgment_overall_cap_sum = 0.0;
+            patterns[i].judgment_overall_corr_pct = 0.0;
             continue;
         }
 
@@ -877,7 +952,19 @@ int main(int argc, char** argv) {
         }
         test_set[num_selected] = i;
 
-        double proposed_corr = compute_correlation(patterns, test_set, num_selected + 1);
+        double overall_corr_sum = 0.0;
+        double overall_cap_sum = 0.0;
+        double proposed_corr = compute_correlation_ext(
+            patterns,
+            test_set,
+            num_selected + 1,
+            &overall_corr_sum,
+            &overall_cap_sum
+        );
+
+        patterns[i].judgment_overall_corr_sum = overall_corr_sum;
+        patterns[i].judgment_overall_cap_sum = overall_cap_sum;
+        patterns[i].judgment_overall_corr_pct = proposed_corr;
 
         if (num_selected == 0) {
             selected_indices[num_selected++] = i;
