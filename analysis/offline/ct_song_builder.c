@@ -46,7 +46,7 @@ typedef struct {
     int original_index;
     bool selected;
 
-    double actual_corr_bins[NUM_CORR_BINS];
+    float* judgment_corr_samples;
 
     double judgment_stem_corr_sum;
     double judgment_stem_cap_sum;
@@ -104,6 +104,34 @@ static bool copy_file(const char* src_path, const char* dst_path) {
     fclose(src);
     fclose(dst);
     return true;
+}
+
+static char* base64_encode_bytes(const uint8_t* data, size_t input_len) {
+    static const char encoding_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t output_len = 4 * ((input_len + 2) / 3);
+    char *encoded_data = (char*)malloc(output_len + 1);
+    if (!encoded_data) return NULL;
+
+    size_t i = 0, j = 0;
+    while (i < input_len) {
+        uint32_t octet_a = i < input_len ? data[i++] : 0;
+        uint32_t octet_b = i < input_len ? data[i++] : 0;
+        uint32_t octet_c = i < input_len ? data[i++] : 0;
+
+        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
+
+        encoded_data[j++] = encoding_table[(triple >> 18) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 12) & 0x3F];
+        encoded_data[j++] = encoding_table[(triple >> 6) & 0x3F];
+        encoded_data[j++] = encoding_table[triple & 0x3F];
+    }
+
+    static const int mod_table[] = {0, 2, 1};
+    for (int k = 0; k < mod_table[input_len % 3]; k++) {
+        encoded_data[output_len - 1 - k] = '=';
+    }
+    encoded_data[output_len] = '\0';
+    return encoded_data;
 }
 
 static double compute_correlation_ext(
@@ -166,7 +194,7 @@ static double compute_correlation_ext(
     return (total_corr_sum / total_cap_sum) * 100.0;
 }
 
-static void compute_judgment_time_correlation_bins(
+static void compute_judgment_time_correlation_samples(
     PatternInfo* pat_i,
     const PatternInfo* patterns,
     const int* selected_indices,
@@ -174,28 +202,31 @@ static void compute_judgment_time_correlation_bins(
 ) {
     uint64_t total_frames = pat_i->total_frames;
     if (!pat_i->recombined_samples || total_frames == 0) {
-        memset(pat_i->actual_corr_bins, 0, sizeof(pat_i->actual_corr_bins));
+        pat_i->judgment_corr_samples = NULL;
         pat_i->judgment_stem_corr_sum = 0.0;
         pat_i->judgment_stem_cap_sum = 0.0;
         pat_i->judgment_stem_corr_pct = 0.0;
         return;
     }
 
+    if (pat_i->judgment_corr_samples) {
+        free(pat_i->judgment_corr_samples);
+    }
+    pat_i->judgment_corr_samples = (float*)malloc(total_frames * sizeof(float));
+
     double stem_corr_sum = 0.0;
     double stem_cap_sum = 0.0;
 
-    for (uint64_t t = 0; t < total_frames; t++) {
-        double cap_i = fabsf(pat_i->recombined_samples[t]);
-        if (cap_i <= 1e-6) continue;
-
+    for (uint64_t s = 0; s < total_frames; s++) {
+        double cap_i = fabsf(pat_i->recombined_samples[s]);
         double sum_other = 0.0;
         bool has_overlap = false;
 
         for (int j = 0; j < num_selected; j++) {
             int idx_j = selected_indices[j];
             const PatternInfo* pat_j = &patterns[idx_j];
-            if (t < pat_j->total_frames && pat_j->recombined_samples) {
-                double cap_j = fabsf(pat_j->recombined_samples[t]);
+            if (s < pat_j->total_frames && pat_j->recombined_samples) {
+                double cap_j = fabsf(pat_j->recombined_samples[s]);
                 if (cap_j > 1e-6) {
                     sum_other += cap_j;
                     has_overlap = true;
@@ -203,43 +234,19 @@ static void compute_judgment_time_correlation_bins(
             }
         }
 
-        if (has_overlap) {
+        if (cap_i > 1e-6 && has_overlap) {
             double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
-
             stem_corr_sum += corr_mag;
             stem_cap_sum += cap_i;
         }
+
+        double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
+        pat_i->judgment_corr_samples[s] = (float)corr_mag;
     }
 
     pat_i->judgment_stem_corr_sum = stem_corr_sum;
     pat_i->judgment_stem_cap_sum = stem_cap_sum;
     pat_i->judgment_stem_corr_pct = (stem_cap_sum > 1e-6) ? (stem_corr_sum / stem_cap_sum) * 100.0 : 0.0;
-
-    for (int b = 0; b < NUM_CORR_BINS; b++) {
-        uint64_t start_frame = (uint64_t)(((double)b / NUM_CORR_BINS) * total_frames);
-        uint64_t end_frame = (uint64_t)(((double)(b + 1) / NUM_CORR_BINS) * total_frames);
-        if (end_frame <= start_frame) end_frame = start_frame + 1;
-        if (end_frame > total_frames) end_frame = total_frames;
-
-        double max_corr = 0.0;
-        for (uint64_t s = start_frame; s < end_frame; s++) {
-            double cap_i = fabsf(pat_i->recombined_samples[s]);
-            double sum_other = 0.0;
-            for (int j = 0; j < num_selected; j++) {
-                int idx_j = selected_indices[j];
-                const PatternInfo* pat_j = &patterns[idx_j];
-                if (s < pat_j->total_frames && pat_j->recombined_samples) {
-                    double cap_j = fabsf(pat_j->recombined_samples[s]);
-                    if (cap_j > 1e-6) {
-                        sum_other += cap_j;
-                    }
-                }
-            }
-            double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
-            if (corr_mag > max_corr) max_corr = corr_mag;
-        }
-        pat_i->actual_corr_bins[b] = max_corr;
-    }
 }
 
 static int compare_patterns_by_length_desc(const void* a, const void* b) {
@@ -387,7 +394,7 @@ static void generate_correlation_html_report(
     fprintf(f, "  .badge-rejected { background: #4a151b; color: #f44336; border: 1px solid #c62828; }\n");
     fprintf(f, "  .stem-metrics { font-size: 0.85rem; color: var(--muted); font-family: monospace; display: flex; flex-direction: column; gap: 4px; text-align: right; }\n");
     fprintf(f, "  audio { height: 32px; width: 300px; outline: none; }\n");
-    fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 160px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 10px; user-select: none; }\n");
+    fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 180px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 10px; user-select: none; }\n");
     fprintf(f, "  canvas { width: 100%%; height: 100%%; display: block; cursor: crosshair; }\n");
     fprintf(f, "  .tooltip { position: absolute; top: 8px; right: 12px; background: rgba(10, 10, 15, 0.9); border: 1px solid #333344; padding: 6px 10px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; color: #fff; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 10; }\n");
     fprintf(f, "  .instructions { font-size: 0.8rem; color: var(--muted); margin-top: 10px; font-style: italic; }\n");
@@ -418,12 +425,11 @@ static void generate_correlation_html_report(
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Stem Correlation Capacity (|S_i(t)|)</div>\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Judgment-Time Overlapping Correlation (Min(|S_i(t)|, &sum;<sub>j &lt; i</sub> |S_j(t)|))</div>\n");
     fprintf(f, "  </div>\n");
-    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
+    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in (supports zoom down to individual sample points). Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n");
 
     fprintf(f, "<main>\n");
 
-    int target_bins = NUM_CORR_BINS;
     double max_song_duration = 0.0;
 
     for (int i = 0; i < num_patterns; i++) {
@@ -484,6 +490,15 @@ static void generate_correlation_html_report(
     fprintf(f, "let activeDrag = null;\n");
     fprintf(f, "let hoverState = null;\n\n");
 
+    fprintf(f, "function base64ToInt16(b64) {\n");
+    fprintf(f, "  if (!b64) return new Int16Array(0);\n");
+    fprintf(f, "  const binaryString = atob(b64);\n");
+    fprintf(f, "  const len = binaryString.length;\n");
+    fprintf(f, "  const bytes = new Uint8Array(len);\n");
+    fprintf(f, "  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);\n");
+    fprintf(f, "  return new Int16Array(bytes.buffer, 0, Math.floor(len / 2));\n");
+    fprintf(f, "}\n\n");
+
     fprintf(f, "const patternsData = [\n");
 
     for (int i = 0; i < num_patterns; i++) {
@@ -493,71 +508,67 @@ static void generate_correlation_html_report(
         uint64_t total_frames = pat_i->total_frames;
         double duration_s = pat_i->sample_rate > 0 ? (double)total_frames / pat_i->sample_rate : 0.0;
 
+        // 1. Encode Stem Waveform Samples
+        int16_t* pcm_stem = (int16_t*)calloc(total_frames, sizeof(int16_t));
+        if (pat_i->stem_samples && pcm_stem) {
+            uint64_t copy_len = pat_i->stem_total_frames < total_frames ? pat_i->stem_total_frames : total_frames;
+            for (uint64_t s = 0; s < copy_len; s++) {
+                float val = pat_i->stem_samples[s];
+                if (val > 1.0f) val = 1.0f;
+                if (val < -1.0f) val = -1.0f;
+                pcm_stem[s] = (int16_t)(val * 32767.0f);
+            }
+        }
+        char* b64_stem = base64_encode_bytes((const uint8_t*)pcm_stem, total_frames * sizeof(int16_t));
+        free(pcm_stem);
+
+        // 2. Encode Recombined Capacity Samples
+        int16_t* pcm_cap = (int16_t*)calloc(total_frames, sizeof(int16_t));
+        if (pat_i->recombined_samples && pcm_cap) {
+            for (uint64_t s = 0; s < total_frames; s++) {
+                float val = fabsf(pat_i->recombined_samples[s]);
+                if (val > 1.0f) val = 1.0f;
+                pcm_cap[s] = (int16_t)(val * 32767.0f);
+            }
+        }
+        char* b64_cap = base64_encode_bytes((const uint8_t*)pcm_cap, total_frames * sizeof(int16_t));
+        free(pcm_cap);
+
+        // 3. Encode Judgment-Time Correlation Samples
+        int16_t* pcm_corr = (int16_t*)calloc(total_frames, sizeof(int16_t));
+        if (pat_i->judgment_corr_samples && pcm_corr) {
+            for (uint64_t s = 0; s < total_frames; s++) {
+                float val = pat_i->judgment_corr_samples[s];
+                if (val > 1.0f) val = 1.0f;
+                pcm_corr[s] = (int16_t)(val * 32767.0f);
+            }
+        }
+        char* b64_corr = base64_encode_bytes((const uint8_t*)pcm_corr, total_frames * sizeof(int16_t));
+        free(pcm_corr);
+
         fprintf(f, "  {\n");
         fprintf(f, "    index: %d,\n", i);
         fprintf(f, "    filename: \"%s\",\n", pat_i->stem_filename);
         fprintf(f, "    duration: %.4f,\n", duration_s);
+        fprintf(f, "    sampleRate: %u,\n", pat_i->sample_rate);
+        fprintf(f, "    totalSamples: %llu,\n", (unsigned long long)total_frames);
+        fprintf(f, "    b64Stem: \"%s\",\n", b64_stem ? b64_stem : "");
+        fprintf(f, "    b64Cap: \"%s\",\n", b64_cap ? b64_cap : "");
+        fprintf(f, "    b64Corr: \"%s\"\n", b64_corr ? b64_corr : "");
+        fprintf(f, "  }%s\n", (i < num_patterns - 1) ? "," : "");
 
-        fprintf(f, "    waveformMin: [");
-        for (int b = 0; b < target_bins; b++) {
-            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
-            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
-            if (end_frame <= start_frame) end_frame = start_frame + 1;
-            if (end_frame > pat_i->stem_total_frames && pat_i->stem_samples) end_frame = pat_i->stem_total_frames;
-
-            float min_val = 0.0f;
-            if (pat_i->stem_samples && start_frame < pat_i->stem_total_frames) {
-                min_val = pat_i->stem_samples[start_frame];
-                for (uint64_t s = start_frame; s < end_frame; s++) {
-                    if (pat_i->stem_samples[s] < min_val) min_val = pat_i->stem_samples[s];
-                }
-            }
-            fprintf(f, "%.4f%s", min_val, (b < target_bins - 1) ? "," : "");
-        }
-        fprintf(f, "],\n");
-
-        fprintf(f, "    waveformMax: [");
-        for (int b = 0; b < target_bins; b++) {
-            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
-            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
-            if (end_frame <= start_frame) end_frame = start_frame + 1;
-            if (end_frame > pat_i->stem_total_frames && pat_i->stem_samples) end_frame = pat_i->stem_total_frames;
-
-            float max_val = 0.0f;
-            if (pat_i->stem_samples && start_frame < pat_i->stem_total_frames) {
-                max_val = pat_i->stem_samples[start_frame];
-                for (uint64_t s = start_frame; s < end_frame; s++) {
-                    if (pat_i->stem_samples[s] > max_val) max_val = pat_i->stem_samples[s];
-                }
-            }
-            fprintf(f, "%.4f%s", max_val, (b < target_bins - 1) ? "," : "");
-        }
-        fprintf(f, "],\n");
-
-        fprintf(f, "    capacity: [");
-        for (int b = 0; b < target_bins; b++) {
-            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
-            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
-            if (end_frame <= start_frame) end_frame = start_frame + 1;
-            if (end_frame > total_frames) end_frame = total_frames;
-
-            double max_cap = 0.0;
-            for (uint64_t s = start_frame; s < end_frame; s++) {
-                double cap = fabsf(pat_i->recombined_samples[s]);
-                if (cap > max_cap) max_cap = cap;
-            }
-            fprintf(f, "%.4f%s", max_cap, (b < target_bins - 1) ? "," : "");
-        }
-        fprintf(f, "],\n");
-
-        fprintf(f, "    actualCorrelation: [");
-        for (int b = 0; b < target_bins; b++) {
-            fprintf(f, "%.4f%s", pat_i->actual_corr_bins[b], (b < target_bins - 1) ? "," : "");
-        }
-        fprintf(f, "]\n  }%s\n", (i < num_patterns - 1) ? "," : "");
+        if (b64_stem) free(b64_stem);
+        if (b64_cap) free(b64_cap);
+        if (b64_corr) free(b64_corr);
     }
 
     fprintf(f, "];\n\n");
+
+    fprintf(f, "patternsData.forEach(item => {\n");
+    fprintf(f, "  item.stemWaveform = base64ToInt16(item.b64Stem);\n");
+    fprintf(f, "  item.capacity = base64ToInt16(item.b64Cap);\n");
+    fprintf(f, "  item.actualCorrelation = base64ToInt16(item.b64Corr);\n");
+    fprintf(f, "});\n\n");
 
     fprintf(f, "function timeToX(t, width) {\n");
     fprintf(f, "  return ((t - viewStart) / (viewEnd - viewStart)) * width;\n");
@@ -568,7 +579,7 @@ static void generate_correlation_html_report(
 
     fprintf(f, "function updateViewInfo() {\n");
     fprintf(f, "  const dur = viewEnd - viewStart;\n");
-    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${viewStart.toFixed(2)}s &ndash; ${viewEnd.toFixed(2)}s (Duration: ${dur.toFixed(2)}s)`;\n");
+    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${viewStart.toFixed(3)}s &ndash; ${viewEnd.toFixed(3)}s (Duration: ${dur.toFixed(3)}s)`;\n");
     fprintf(f, "}\n\n");
 
     fprintf(f, "function resetZoom() {\n");
@@ -607,61 +618,149 @@ static void generate_correlation_html_report(
     fprintf(f, "  ctx.scale(dpr, dpr);\n");
     fprintf(f, "  ctx.clearRect(0, 0, width, height);\n\n");
 
-    fprintf(f, "  const numBins = item.capacity.length;\n");
+    fprintf(f, "  const sr = item.sampleRate;\n");
+    fprintf(f, "  const totalN = item.totalSamples;\n");
     fprintf(f, "  const duration = item.duration;\n");
     fprintf(f, "  const midY = height / 2;\n\n");
 
-    fprintf(f, "  // Find peak correlation for robust Y-axis scaling\n");
-    fprintf(f, "  let maxCapCorr = 1.0;\n");
-    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
-    fprintf(f, "    if (item.capacity[i] > maxCapCorr) maxCapCorr = item.capacity[i];\n");
-    fprintf(f, "  }\n\n");
+    fprintf(f, "  const sStart = Math.max(0, Math.floor(viewStart * sr));\n");
+    fprintf(f, "  const sEnd = Math.min(totalN, Math.ceil(viewEnd * sr));\n");
+    fprintf(f, "  const visCount = sEnd - sStart;\n");
+    fprintf(f, "  if (visCount <= 0) { ctx.restore(); return; }\n\n");
 
-    fprintf(f, "  // Background Waveform\n");
+    fprintf(f, "  const maxCapCorr = 1.0;\n\n");
+
+    fprintf(f, "  // --- 1. Background Audio Waveform ---\n");
     fprintf(f, "  ctx.fillStyle = 'rgba(120, 120, 160, 0.28)';\n");
-    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
-    fprintf(f, "    const t = (i / numBins) * duration;\n");
-    fprintf(f, "    if (t < viewStart || t > viewEnd) continue;\n");
-    fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const binW = Math.max(1.5, ((duration / numBins) / (viewEnd - viewStart)) * width);\n");
-    fprintf(f, "    const minVal = item.waveformMin[i];\n");
-    fprintf(f, "    const maxVal = item.waveformMax[i];\n");
-    fprintf(f, "    const y1 = midY - (maxVal * (height / 2) * 0.85);\n");
-    fprintf(f, "    const y2 = midY - (minVal * (height / 2) * 0.85);\n");
-    fprintf(f, "    ctx.fillRect(x, y1, binW, Math.max(1, y2 - y1));\n");
+    fprintf(f, "  if (visCount > width * 3) {\n");
+    fprintf(f, "    for (let px = 0; px < width; px++) {\n");
+    fprintf(f, "      const idx1 = Math.floor(sStart + (px / width) * visCount);\n");
+    fprintf(f, "      const idx2 = Math.min(totalN, Math.floor(sStart + ((px + 1) / width) * visCount));\n");
+    fprintf(f, "      if (idx2 <= idx1) continue;\n");
+    fprintf(f, "      let minV = 0, maxV = 0;\n");
+    fprintf(f, "      if (item.stemWaveform.length > 0) {\n");
+    fprintf(f, "        minV = item.stemWaveform[idx1] / 32767.0;\n");
+    fprintf(f, "        maxV = minV;\n");
+    fprintf(f, "        for (let s = idx1; s < idx2; s++) {\n");
+    fprintf(f, "          const v = item.stemWaveform[s] / 32767.0;\n");
+    fprintf(f, "          if (v < minV) minV = v;\n");
+    fprintf(f, "          if (v > maxV) maxV = v;\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      const y1 = midY - (maxV * midY * 0.85);\n");
+    fprintf(f, "      const y2 = midY - (minV * midY * 0.85);\n");
+    fprintf(f, "      ctx.fillRect(px, y1, 1.5, Math.max(1, y2 - y1));\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  } else if (item.stemWaveform.length > 0) {\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = 'rgba(140, 140, 180, 0.5)';\n");
+    fprintf(f, "    ctx.lineWidth = 1.5;\n");
+    fprintf(f, "    let started = false;\n");
+    fprintf(f, "    for (let s = sStart; s < sEnd; s++) {\n");
+    fprintf(f, "      const x = timeToX(s / sr, width);\n");
+    fprintf(f, "      const v = item.stemWaveform[s] / 32767.0;\n");
+    fprintf(f, "      const y = midY - (v * midY * 0.85);\n");
+    fprintf(f, "      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "    if (visCount < width * 0.6) {\n");
+    fprintf(f, "      ctx.fillStyle = '#82aaff';\n");
+    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
+    fprintf(f, "        const x = timeToX(s / sr, width);\n");
+    fprintf(f, "        const v = item.stemWaveform[s] / 32767.0;\n");
+    fprintf(f, "        const y = midY - (v * midY * 0.85);\n");
+    fprintf(f, "        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // Correlation Capacity Envelope (Orange)\n");
-    fprintf(f, "  ctx.beginPath();\n");
-    fprintf(f, "  ctx.strokeStyle = '#ff9800';\n");
-    fprintf(f, "  ctx.lineWidth = 2;\n");
-    fprintf(f, "  let startedCap = false;\n");
-    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
-    fprintf(f, "    const t = (i / (numBins - 1)) * duration;\n");
-    fprintf(f, "    if (t < viewStart || t > viewEnd) continue;\n");
-    fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const cap = item.capacity[i];\n");
-    fprintf(f, "    const y = height - ((cap / maxCapCorr) * height * 0.88) - 4;\n");
-    fprintf(f, "    if (!startedCap) { ctx.moveTo(x, y); startedCap = true; } else { ctx.lineTo(x, y); }\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  ctx.stroke();\n\n");
+    fprintf(f, "  // --- 2. Correlation Capacity Envelope (Orange) ---\n");
+    fprintf(f, "  if (item.capacity.length > 0) {\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = '#ff9800';\n");
+    fprintf(f, "    ctx.lineWidth = 2;\n");
+    fprintf(f, "    if (visCount > width * 3) {\n");
+    fprintf(f, "      let started = false;\n");
+    fprintf(f, "      for (let px = 0; px < width; px++) {\n");
+    fprintf(f, "        const idx1 = Math.floor(sStart + (px / width) * visCount);\n");
+    fprintf(f, "        const idx2 = Math.min(totalN, Math.floor(sStart + ((px + 1) / width) * visCount));\n");
+    fprintf(f, "        if (idx2 <= idx1) continue;\n");
+    fprintf(f, "        let maxCap = 0;\n");
+    fprintf(f, "        for (let s = idx1; s < idx2; s++) {\n");
+    fprintf(f, "          const c = item.capacity[s] / 32767.0;\n");
+    fprintf(f, "          if (c > maxCap) maxCap = c;\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "        const y = height - (maxCap * height * 0.88) - 4;\n");
+    fprintf(f, "        if (!started) { ctx.moveTo(px, y); started = true; } else { ctx.lineTo(px, y); }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      let started = false;\n");
+    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
+    fprintf(f, "        const x = timeToX(s / sr, width);\n");
+    fprintf(f, "        const cap = item.capacity[s] / 32767.0;\n");
+    fprintf(f, "        const y = height - (cap * height * 0.88) - 4;\n");
+    fprintf(f, "        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "    if (visCount < width * 0.6 && visCount <= width * 3) {\n");
+    fprintf(f, "      ctx.fillStyle = '#ff9800';\n");
+    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
+    fprintf(f, "        const x = timeToX(s / sr, width);\n");
+    fprintf(f, "        const cap = item.capacity[s] / 32767.0;\n");
+    fprintf(f, "        const y = height - (cap * height * 0.88) - 4;\n");
+    fprintf(f, "        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // Actual Overlapping Correlation Envelope (Green)\n");
-    fprintf(f, "  ctx.beginPath();\n");
-    fprintf(f, "  ctx.strokeStyle = '#00e676';\n");
-    fprintf(f, "  ctx.lineWidth = 2;\n");
-    fprintf(f, "  let startedCorr = false;\n");
-    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
-    fprintf(f, "    const t = (i / (numBins - 1)) * duration;\n");
-    fprintf(f, "    if (t < viewStart || t > viewEnd) continue;\n");
-    fprintf(f, "    const x = timeToX(t, width);\n");
-    fprintf(f, "    const corr = Math.min(item.capacity[i], item.actualCorrelation[i]);\n");
-    fprintf(f, "    const y = height - ((corr / maxCapCorr) * height * 0.88) - 4;\n");
-    fprintf(f, "    if (!startedCorr) { ctx.moveTo(x, y); startedCorr = true; } else { ctx.lineTo(x, y); }\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  ctx.stroke();\n\n");
+    fprintf(f, "  // --- 3. Actual Overlapping Correlation Envelope (Green) ---\n");
+    fprintf(f, "  if (item.actualCorrelation.length > 0) {\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = '#00e676';\n");
+    fprintf(f, "    ctx.lineWidth = 2;\n");
+    fprintf(f, "    if (visCount > width * 3) {\n");
+    fprintf(f, "      let started = false;\n");
+    fprintf(f, "      for (let px = 0; px < width; px++) {\n");
+    fprintf(f, "        const idx1 = Math.floor(sStart + (px / width) * visCount);\n");
+    fprintf(f, "        const idx2 = Math.min(totalN, Math.floor(sStart + ((px + 1) / width) * visCount));\n");
+    fprintf(f, "        if (idx2 <= idx1) continue;\n");
+    fprintf(f, "        let maxCorr = 0;\n");
+    fprintf(f, "        for (let s = idx1; s < idx2; s++) {\n");
+    fprintf(f, "          const cap = item.capacity[s] / 32767.0;\n");
+    fprintf(f, "          const corr = item.actualCorrelation[s] / 32767.0;\n");
+    fprintf(f, "          const v = Math.min(cap, corr);\n");
+    fprintf(f, "          if (v > maxCorr) maxCorr = v;\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "        const y = height - (maxCorr * height * 0.88) - 4;\n");
+    fprintf(f, "        if (!started) { ctx.moveTo(px, y); started = true; } else { ctx.lineTo(px, y); }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      let started = false;\n");
+    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
+    fprintf(f, "        const x = timeToX(s / sr, width);\n");
+    fprintf(f, "        const cap = item.capacity[s] / 32767.0;\n");
+    fprintf(f, "        const corr = item.actualCorrelation[s] / 32767.0;\n");
+    fprintf(f, "        const v = Math.min(cap, corr);\n");
+    fprintf(f, "        const y = height - (v * height * 0.88) - 4;\n");
+    fprintf(f, "        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "    if (visCount < width * 0.6 && visCount <= width * 3) {\n");
+    fprintf(f, "      ctx.fillStyle = '#00e676';\n");
+    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
+    fprintf(f, "        const x = timeToX(s / sr, width);\n");
+    fprintf(f, "        const cap = item.capacity[s] / 32767.0;\n");
+    fprintf(f, "        const corr = item.actualCorrelation[s] / 32767.0;\n");
+    fprintf(f, "        const v = Math.min(cap, corr);\n");
+    fprintf(f, "        const y = height - (v * height * 0.88) - 4;\n");
+    fprintf(f, "        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // Audio Playhead\n");
+    fprintf(f, "  // --- 4. Audio Playhead ---\n");
     fprintf(f, "  if (audio && duration > 0 && audio.currentTime >= viewStart && audio.currentTime <= viewEnd) {\n");
     fprintf(f, "    const playX = timeToX(audio.currentTime, width);\n");
     fprintf(f, "    ctx.strokeStyle = '#ffffff';\n");
@@ -672,7 +771,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    ctx.stroke();\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // Hover Line\n");
+    fprintf(f, "  // --- 5. Hover Line ---\n");
     fprintf(f, "  if (hoverState && hoverState.index === item.index) {\n");
     fprintf(f, "    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';\n");
     fprintf(f, "    ctx.lineWidth = 1;\n");
@@ -682,7 +781,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    ctx.stroke();\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // Active Drag Selection Overlay\n");
+    fprintf(f, "  // --- 6. Active Drag Selection Overlay ---\n");
     fprintf(f, "  if (activeDrag && activeDrag.index === item.index) {\n");
     fprintf(f, "    const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
     fprintf(f, "    const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
@@ -712,11 +811,12 @@ static void generate_correlation_html_report(
     fprintf(f, "    const timeS = xToTime(x, rect.width);\n");
     fprintf(f, "    hoverState = { index: item.index, x: x, timeS: timeS };\n");
     fprintf(f, "    if (activeDrag) activeDrag.currentX = x;\n");
-    fprintf(f, "    const binIdx = Math.min(item.capacity.length - 1, Math.max(0, Math.floor((timeS / item.duration) * item.capacity.length)));\n");
-    fprintf(f, "    const capVal = item.capacity[binIdx] || 0.0;\n");
-    fprintf(f, "    const corrVal = Math.min(capVal, item.actualCorrelation[binIdx] || 0.0);\n");
+    fprintf(f, "    const sIdx = Math.min(item.totalSamples - 1, Math.max(0, Math.round(timeS * item.sampleRate)));\n");
+    fprintf(f, "    const capVal = item.capacity.length > 0 ? (item.capacity[sIdx] / 32767.0) : 0.0;\n");
+    fprintf(f, "    const corrVal = item.actualCorrelation.length > 0 ? Math.min(capVal, item.actualCorrelation[sIdx] / 32767.0) : 0.0;\n");
+    fprintf(f, "    const waveVal = item.stemWaveform.length > 0 ? (item.stemWaveform[sIdx] / 32767.0) : 0.0;\n");
     fprintf(f, "    tooltip.style.opacity = '1';\n");
-    fprintf(f, "    tooltip.innerHTML = `Time: ${timeS.toFixed(3)}s<br>Capacity: ${capVal.toFixed(3)}<br>Overlap Corr: ${corrVal.toFixed(3)}`;\n");
+    fprintf(f, "    tooltip.innerHTML = `Time: ${timeS.toFixed(4)}s (Smp ${sIdx})<br>Capacity: ${capVal.toFixed(3)}<br>Overlap Corr: ${corrVal.toFixed(3)}<br>Waveform: ${waveVal.toFixed(3)}`;\n");
     fprintf(f, "    renderAll();\n");
     fprintf(f, "  });\n\n");
 
@@ -754,7 +854,7 @@ static void generate_correlation_html_report(
     fprintf(f, "      if (x2 - x1 > 8) {\n");
     fprintf(f, "        const t1 = Math.max(0, xToTime(x1, rect.width));\n");
     fprintf(f, "        const t2 = Math.min(maxSongDuration, xToTime(x2, rect.width));\n");
-    fprintf(f, "        if (t2 - t1 > 0.05) {\n");
+    fprintf(f, "        if (t2 - t1 > 0.0001) {\n");
     fprintf(f, "          zoomHistory.push({ start: viewStart, end: viewEnd });\n");
     fprintf(f, "          viewStart = t1;\n");
     fprintf(f, "          viewEnd = t2;\n");
@@ -935,7 +1035,7 @@ int main(int argc, char** argv) {
         if (patterns[i].active_length == 0) {
             printf("[Skip] %s has 0 active length.\n", patterns[i].stem_filename);
             patterns[i].selected = false;
-            memset(patterns[i].actual_corr_bins, 0, sizeof(patterns[i].actual_corr_bins));
+            patterns[i].judgment_corr_samples = NULL;
             patterns[i].judgment_stem_corr_sum = 0.0;
             patterns[i].judgment_stem_cap_sum = 0.0;
             patterns[i].judgment_stem_corr_pct = 0.0;
@@ -945,7 +1045,7 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        compute_judgment_time_correlation_bins(&patterns[i], patterns, selected_indices, num_selected);
+        compute_judgment_time_correlation_samples(&patterns[i], patterns, selected_indices, num_selected);
 
         for (int k = 0; k < num_selected; k++) {
             test_set[k] = selected_indices[k];
@@ -1036,6 +1136,9 @@ int main(int argc, char** argv) {
         }
         if (patterns[i].stem_samples) {
             drwav_free(patterns[i].stem_samples, NULL);
+        }
+        if (patterns[i].judgment_corr_samples) {
+            free(patterns[i].judgment_corr_samples);
         }
     }
     free(patterns);
