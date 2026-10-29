@@ -24,8 +24,6 @@
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
-#define NUM_CORR_BINS 1000
-
 typedef struct {
     char stem_filename[512];
     char recombined_filename[512];
@@ -104,7 +102,7 @@ static bool copy_file(const char* src_path, const char* dst_path) {
     return true;
 }
 
-static char* base64_encode_bytes(const uint8_t* data, size_t input_len) {
+static char* encode_base64_bytes(const uint8_t* data, size_t input_len) {
     static const char encoding_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     size_t output_len = 4 * ((input_len + 2) / 3);
     char *encoded_data = (char*)malloc(output_len + 1);
@@ -344,6 +342,68 @@ static void generate_correlation_html_report(
     int num_selected,
     double final_correlation
 ) {
+    char js_path[4096];
+    snprintf(js_path, sizeof(js_path), "%.3500s" PATH_SEP_STR "song_correlation_waveform_data.js", work_dir);
+
+    double max_song_duration = 0.0;
+    uint32_t sample_rate = 44100;
+    uint64_t max_total_samples = 0;
+
+    for (int i = 0; i < num_patterns; i++) {
+        if (patterns[i].recombined_samples && patterns[i].sample_rate > 0) {
+            double d = (double)patterns[i].total_frames / patterns[i].sample_rate;
+            if (d > max_song_duration) max_song_duration = d;
+            if (patterns[i].sample_rate > 0) sample_rate = patterns[i].sample_rate;
+            if (patterns[i].total_frames > max_total_samples) max_total_samples = patterns[i].total_frames;
+        }
+    }
+
+    FILE* fjs = fopen(js_path, "w");
+    if (fjs) {
+        fprintf(fjs, "window.WAVEFORM_DATA = {\n");
+        fprintf(fjs, "  stemWaveforms: [\n");
+        for (int i = 0; i < num_patterns; i++) {
+            const PatternInfo* pat = &patterns[i];
+            uint64_t total_frames = pat->total_frames;
+            int16_t* pcm_stem = (int16_t*)calloc(total_frames, sizeof(int16_t));
+            if (pat->stem_samples && pcm_stem) {
+                uint64_t copy_len = pat->stem_total_frames < total_frames ? pat->stem_total_frames : total_frames;
+                for (uint64_t s = 0; s < copy_len; s++) {
+                    float val = pat->stem_samples[s];
+                    if (val > 1.0f) val = 1.0f;
+                    if (val < -1.0f) val = -1.0f;
+                    pcm_stem[s] = (int16_t)round(val * 32767.0f);
+                }
+            }
+            char* b64 = encode_base64_bytes((const uint8_t*)pcm_stem, total_frames * sizeof(int16_t));
+            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < num_patterns) ? "," : "");
+            if (b64) free(b64);
+            if (pcm_stem) free(pcm_stem);
+        }
+        fprintf(fjs, "  ],\n");
+
+        fprintf(fjs, "  capacities: [\n");
+        for (int i = 0; i < num_patterns; i++) {
+            const PatternInfo* pat = &patterns[i];
+            uint64_t total_frames = pat->total_frames;
+            int16_t* pcm_cap = (int16_t*)calloc(total_frames, sizeof(int16_t));
+            if (pat->recombined_samples && pcm_cap) {
+                for (uint64_t s = 0; s < total_frames; s++) {
+                    float val = fabsf(pat->recombined_samples[s]);
+                    if (val > 1.0f) val = 1.0f;
+                    pcm_cap[s] = (int16_t)round(val * 32767.0f);
+                }
+            }
+            char* b64 = encode_base64_bytes((const uint8_t*)pcm_cap, total_frames * sizeof(int16_t));
+            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < num_patterns) ? "," : "");
+            if (b64) free(b64);
+            if (pcm_cap) free(pcm_cap);
+        }
+        fprintf(fjs, "  ]\n");
+        fprintf(fjs, "};\n");
+        fclose(fjs);
+    }
+
     char html_path[4096];
     snprintf(html_path, sizeof(html_path), "%.3500s" PATH_SEP_STR "song_correlation_report.html", work_dir);
 
@@ -406,26 +466,17 @@ static void generate_correlation_html_report(
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"toolbar\">\n");
     fprintf(f, "    <button class=\"btn\" onclick=\"resetZoom()\">Reset Zoom</button>\n");
-    fprintf(f, "    <span class=\"view-info\" id=\"viewInfo\">Visible: Full Duration</span>\n");
+    fprintf(f, "    <span class=\"view-info\" id=\"viewInfo\">Visible: 0.000s &ndash; %.3fs (Duration: %.3fs)</span>\n", max_song_duration, max_song_duration);
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"legend\">\n");
-    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: rgba(120,120,150,0.35); border: 1px solid rgba(150,150,180,0.5);\"></span> Output Audio Waveform (Background)</div>\n");
+    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: rgba(120,120,160,0.35); border: 1px solid rgba(150,150,180,0.5);\"></span> Output Audio Waveform (Background)</div>\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Stem Correlation Capacity (|S_i(t)|)</div>\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Judgment-Time Overlapping Correlation (Min(|S_i(t)|, &sum;<sub>j &lt; i</sub> |S_j(t)|))</div>\n");
     fprintf(f, "  </div>\n");
-    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in (supports zoom down to individual sample points). Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
+    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n");
 
     fprintf(f, "<main>\n");
-
-    double max_song_duration = 0.0;
-
-    for (int i = 0; i < num_patterns; i++) {
-        if (patterns[i].recombined_samples && patterns[i].sample_rate > 0) {
-            double d = (double)patterns[i].total_frames / patterns[i].sample_rate;
-            if (d > max_song_duration) max_song_duration = d;
-        }
-    }
 
     for (int i = 0; i < num_patterns; i++) {
         const PatternInfo* pat = &patterns[i];
@@ -470,150 +521,100 @@ static void generate_correlation_html_report(
 
     fprintf(f, "</main>\n");
 
+    fprintf(f, "<script src=\"song_correlation_waveform_data.js\"></script>\n");
     fprintf(f, "<script>\n");
-    fprintf(f, "const maxSongDuration = %.4f;\n", max_song_duration);
-    fprintf(f, "let viewStart = 0.0;\n");
-    fprintf(f, "let viewEnd = maxSongDuration;\n");
-    fprintf(f, "let zoomHistory = [];\n");
-    fprintf(f, "let activeDrag = null;\n");
-    fprintf(f, "let hoverState = null;\n");
-    fprintf(f, "let audioCtx = null;\n");
-    fprintf(f, "function getAudioCtx() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); return audioCtx; }\n\n");
-
-    fprintf(f, "function base64ToInt16(b64) {\n");
-    fprintf(f, "  if (!b64) return new Int16Array(0);\n");
-    fprintf(f, "  const binaryString = atob(b64);\n");
-    fprintf(f, "  const len = binaryString.length;\n");
-    fprintf(f, "  const bytes = new Uint8Array(len);\n");
-    fprintf(f, "  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);\n");
-    fprintf(f, "  return new Int16Array(bytes.buffer, 0, Math.floor(len / 2));\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "const patternsData = [\n");
+    fprintf(f, "const DATA = {\n");
+    fprintf(f, "  sampleRate: %u,\n", sample_rate);
+    fprintf(f, "  totalSamples: %llu,\n", (unsigned long long)max_total_samples);
+    fprintf(f, "  duration: %.6f,\n", max_song_duration);
+    fprintf(f, "  stems: [\n");
 
     for (int i = 0; i < num_patterns; i++) {
         const PatternInfo* pat_i = &patterns[i];
         if (!pat_i->recombined_samples || pat_i->total_frames == 0) continue;
 
-        uint64_t total_frames = pat_i->total_frames;
-        double duration_s = pat_i->sample_rate > 0 ? (double)total_frames / pat_i->sample_rate : 0.0;
+        double duration_s = pat_i->sample_rate > 0 ? (double)pat_i->total_frames / pat_i->sample_rate : 0.0;
 
-        // Compute 1,000-bin L0 Overview Arrays for 0ms Instant Page Rendering
-        float ov_wmin[NUM_CORR_BINS];
-        float ov_wmax[NUM_CORR_BINS];
-        float ov_cap[NUM_CORR_BINS];
-        float ov_corr[NUM_CORR_BINS];
-
-        for (int b = 0; b < NUM_CORR_BINS; b++) {
-            uint64_t start_f = (uint64_t)(((double)b / NUM_CORR_BINS) * total_frames);
-            uint64_t end_f = (uint64_t)(((double)(b + 1) / NUM_CORR_BINS) * total_frames);
-            if (end_f <= start_f) end_f = start_f + 1;
-            if (end_f > total_frames) end_f = total_frames;
-
-            float min_v = 0.0f, max_v = 0.0f;
-            if (pat_i->stem_samples && start_f < pat_i->stem_total_frames) {
-                uint64_t stem_end = end_f < pat_i->stem_total_frames ? end_f : pat_i->stem_total_frames;
-                min_v = pat_i->stem_samples[start_f];
-                max_v = min_v;
-                for (uint64_t s = start_f; s < stem_end; s++) {
-                    if (pat_i->stem_samples[s] < min_v) min_v = pat_i->stem_samples[s];
-                    if (pat_i->stem_samples[s] > max_v) max_v = pat_i->stem_samples[s];
-                }
-            }
-            ov_wmin[b] = min_v;
-            ov_wmax[b] = max_v;
-
-            double max_c = 0.0;
-            for (uint64_t s = start_f; s < end_f; s++) {
-                double c = fabsf(pat_i->recombined_samples[s]);
-                if (c > max_c) max_c = c;
-            }
-            ov_cap[b] = (float)max_c;
-
-            double max_cr = 0.0;
-            for (uint64_t s = start_f; s < end_f; s++) {
-                double cap_i = fabsf(pat_i->recombined_samples[s]);
-                double sum_other = 0.0;
-                for (int j = 0; j < i; j++) {
-                    if (!patterns[j].selected) continue;
-                    const PatternInfo* pat_j = &patterns[j];
-                    if (s < pat_j->total_frames && pat_j->recombined_samples) {
-                        double cap_j = fabsf(pat_j->recombined_samples[s]);
-                        if (cap_j > 1e-6) sum_other += cap_j;
-                    }
-                }
-                double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
-                if (corr_mag > max_cr) max_cr = corr_mag;
-            }
-            ov_corr[b] = (float)max_cr;
-        }
-
-        // Encode Base64 Fallback Sample Arrays for file:// protocol or offline fallback
-        int16_t* pcm_stem = (int16_t*)calloc(total_frames, sizeof(int16_t));
-        if (pat_i->stem_samples && pcm_stem) {
-            uint64_t copy_len = pat_i->stem_total_frames < total_frames ? pat_i->stem_total_frames : total_frames;
-            for (uint64_t s = 0; s < copy_len; s++) {
-                float val = pat_i->stem_samples[s];
-                if (val > 1.0f) val = 1.0f;
-                if (val < -1.0f) val = -1.0f;
-                pcm_stem[s] = (int16_t)(val * 32767.0f);
-            }
-        }
-        char* b64_stem = base64_encode_bytes((const uint8_t*)pcm_stem, total_frames * sizeof(int16_t));
-        free(pcm_stem);
-
-        int16_t* pcm_cap = (int16_t*)calloc(total_frames, sizeof(int16_t));
-        if (pat_i->recombined_samples && pcm_cap) {
-            for (uint64_t s = 0; s < total_frames; s++) {
-                float val = fabsf(pat_i->recombined_samples[s]);
-                if (val > 1.0f) val = 1.0f;
-                pcm_cap[s] = (int16_t)(val * 32767.0f);
-            }
-        }
-        char* b64_cap = base64_encode_bytes((const uint8_t*)pcm_cap, total_frames * sizeof(int16_t));
-        free(pcm_cap);
-
-        fprintf(f, "  {\n");
-        fprintf(f, "    index: %d,\n", i);
-        fprintf(f, "    filename: \"%s\",\n", pat_i->stem_filename);
-        fprintf(f, "    recombinedFilename: \"%s\",\n", pat_i->recombined_filename);
-        fprintf(f, "    selected: %s,\n", pat_i->selected ? "true" : "false");
-        fprintf(f, "    duration: %.4f,\n", duration_s);
-        fprintf(f, "    sampleRate: %u,\n", pat_i->sample_rate);
-        fprintf(f, "    totalSamples: %llu,\n", (unsigned long long)total_frames);
-        fprintf(f, "    judgmentStemCorrSum: %.4f,\n", pat_i->judgment_stem_corr_sum);
-        fprintf(f, "    judgmentStemCapSum: %.4f,\n", pat_i->judgment_stem_cap_sum);
-        fprintf(f, "    judgmentStemCorrPct: %.4f,\n", pat_i->judgment_stem_corr_pct);
-        fprintf(f, "    judgmentOverallCorrSum: %.4f,\n", pat_i->judgment_overall_corr_sum);
-        fprintf(f, "    judgmentOverallCapSum: %.4f,\n", pat_i->judgment_overall_cap_sum);
-        fprintf(f, "    judgmentOverallCorrPct: %.4f,\n", pat_i->judgment_overall_corr_pct);
-
-        fprintf(f, "    ovWaveformMin: [");
-        for (int b = 0; b < NUM_CORR_BINS; b++) fprintf(f, "%.4f%s", ov_wmin[b], (b < NUM_CORR_BINS - 1) ? "," : "");
-        fprintf(f, "],\n");
-
-        fprintf(f, "    ovWaveformMax: [");
-        for (int b = 0; b < NUM_CORR_BINS; b++) fprintf(f, "%.4f%s", ov_wmax[b], (b < NUM_CORR_BINS - 1) ? "," : "");
-        fprintf(f, "],\n");
-
-        fprintf(f, "    ovCapacity: [");
-        for (int b = 0; b < NUM_CORR_BINS; b++) fprintf(f, "%.4f%s", ov_cap[b], (b < NUM_CORR_BINS - 1) ? "," : "");
-        fprintf(f, "],\n");
-
-        fprintf(f, "    ovCorrelation: [");
-        for (int b = 0; b < NUM_CORR_BINS; b++) fprintf(f, "%.4f%s", ov_corr[b], (b < NUM_CORR_BINS - 1) ? "," : "");
-        fprintf(f, "],\n");
-
-        fprintf(f, "    b64Stem: \"%s\",\n", b64_stem ? b64_stem : "");
-        fprintf(f, "    b64Cap: \"%s\",\n", b64_cap ? b64_cap : "");
-        fprintf(f, "    highResLoaded: false\n");
-        fprintf(f, "  }%s\n", (i < num_patterns - 1) ? "," : "");
-
-        if (b64_stem) free(b64_stem);
-        if (b64_cap) free(b64_cap);
+        fprintf(f, "    {\n");
+        fprintf(f, "      index: %d,\n", i);
+        fprintf(f, "      filename: \"%s\",\n", pat_i->stem_filename);
+        fprintf(f, "      selected: %s,\n", pat_i->selected ? "true" : "false");
+        fprintf(f, "      duration: %.4f,\n", duration_s);
+        fprintf(f, "      sampleRate: %u,\n", pat_i->sample_rate);
+        fprintf(f, "      totalSamples: %llu\n", (unsigned long long)pat_i->total_frames);
+        fprintf(f, "    }%s\n", (i + 1 < num_patterns) ? "," : "");
     }
 
-    fprintf(f, "];\n\n");
+    fprintf(f, "  ]\n");
+    fprintf(f, "};\n\n");
+
+    fprintf(f, "function base64ToFloat32(b64, targetLen) {\n");
+    fprintf(f, "  if (!b64) return new Float32Array(targetLen);\n");
+    fprintf(f, "  const binaryString = atob(b64);\n");
+    fprintf(f, "  const len = binaryString.length;\n");
+    fprintf(f, "  const bytes = new Uint8Array(len);\n");
+    fprintf(f, "  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);\n");
+    fprintf(f, "  const i16 = new Int16Array(bytes.buffer, 0, Math.floor(len / 2));\n");
+    fprintf(f, "  const f32 = new Float32Array(i16.length);\n");
+    fprintf(f, "  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32767.0;\n");
+    fprintf(f, "  return f32;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function formatMSSPrecise(sec) {\n");
+    fprintf(f, "  if (isNaN(sec) || sec < 0) sec = 0;\n");
+    fprintf(f, "  const m = Math.floor(sec / 60);\n");
+    fprintf(f, "  const s = sec %% 60;\n");
+    fprintf(f, "  const sStr = s < 10 ? '0' + s.toFixed(3) : s.toFixed(3);\n");
+    fprintf(f, "  return `${m}:${sStr}`;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function formatMSS(sec) {\n");
+    fprintf(f, "  if (isNaN(sec) || sec < 0) sec = 0;\n");
+    fprintf(f, "  const m = Math.floor(sec / 60);\n");
+    fprintf(f, "  const s = sec %% 60;\n");
+    fprintf(f, "  const sInt = Math.floor(s);\n");
+    fprintf(f, "  const sStr = sInt < 10 ? '0' + sInt : '' + sInt;\n");
+    fprintf(f, "  return `${m}:${sStr}`;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function initAudioData() {\n");
+    fprintf(f, "  if (window.WAVEFORM_DATA) {\n");
+    fprintf(f, "    for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "      const st = DATA.stems[i];\n");
+    fprintf(f, "      const n = st.totalSamples;\n");
+    fprintf(f, "      if (window.WAVEFORM_DATA.stemWaveforms && window.WAVEFORM_DATA.stemWaveforms[i]) {\n");
+    fprintf(f, "        st.stemWaveform = base64ToFloat32(window.WAVEFORM_DATA.stemWaveforms[i], n);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      if (window.WAVEFORM_DATA.capacities && window.WAVEFORM_DATA.capacities[i]) {\n");
+    fprintf(f, "        st.capacity = base64ToFloat32(window.WAVEFORM_DATA.capacities[i], n);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    // Compute judgment-time overlapping correlation against earlier selected stems\n");
+    fprintf(f, "    for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "      const st = DATA.stems[i];\n");
+    fprintf(f, "      if (!st.capacity) continue;\n");
+    fprintf(f, "      const priorSelected = DATA.stems.filter(p => p.index < st.index && p.selected && p.capacity);\n");
+    fprintf(f, "      const corrBuf = new Float32Array(st.capacity.length);\n");
+    fprintf(f, "      for (let s = 0; s < st.capacity.length; s++) {\n");
+    fprintf(f, "        const cap_i = st.capacity[s];\n");
+    fprintf(f, "        let sum_other = 0.0;\n");
+    fprintf(f, "        for (const prior of priorSelected) {\n");
+    fprintf(f, "          if (s < prior.capacity.length) sum_other += prior.capacity[s];\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "        corrBuf[s] = Math.min(cap_i, sum_other);\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      st.actualCorrelation = corrBuf;\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "initAudioData();\n\n");
+
+    fprintf(f, "let viewStart = 0.0;\n");
+    fprintf(f, "let viewEnd = DATA.duration;\n");
+    fprintf(f, "let zoomHistory = [];\n");
+    fprintf(f, "let activeDrag = null;\n");
+    fprintf(f, "let hoverState = null;\n\n");
 
     fprintf(f, "function timeToX(t, width) {\n");
     fprintf(f, "  return ((t - viewStart) / (viewEnd - viewStart)) * width;\n");
@@ -624,13 +625,13 @@ static void generate_correlation_html_report(
 
     fprintf(f, "function updateViewInfo() {\n");
     fprintf(f, "  const dur = viewEnd - viewStart;\n");
-    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${viewStart.toFixed(3)}s &ndash; ${viewEnd.toFixed(3)}s (Duration: ${dur.toFixed(3)}s)`;\n");
+    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${formatMSSPrecise(viewStart)} &ndash; ${formatMSSPrecise(viewEnd)} (Duration: ${formatMSSPrecise(dur)})`;\n");
     fprintf(f, "}\n\n");
 
     fprintf(f, "function resetZoom() {\n");
     fprintf(f, "  zoomHistory = [];\n");
     fprintf(f, "  viewStart = 0.0;\n");
-    fprintf(f, "  viewEnd = maxSongDuration;\n");
+    fprintf(f, "  viewEnd = DATA.duration;\n");
     fprintf(f, "  updateViewInfo();\n");
     fprintf(f, "  renderAll();\n");
     fprintf(f, "}\n\n");
@@ -645,72 +646,9 @@ static void generate_correlation_html_report(
     fprintf(f, "  }\n");
     fprintf(f, "}\n\n");
 
-    fprintf(f, "function computeItemCorr(item) {\n");
-    fprintf(f, "  if (!item.capacity) return null;\n");
-    fprintf(f, "  const corrBuf = new Float32Array(item.capacity.length);\n");
-    fprintf(f, "  const priorSelectedStems = patternsData.filter(p => p.index < item.index && p.selected && p.highResLoaded && p.capacity);\n");
-    fprintf(f, "  for (let s = 0; s < item.capacity.length; s++) {\n");
-    fprintf(f, "    const cap_i = item.capacity[s];\n");
-    fprintf(f, "    let sum_other = 0.0;\n");
-    fprintf(f, "    for (const prior of priorSelectedStems) {\n");
-    fprintf(f, "      if (s < prior.capacity.length) sum_other += prior.capacity[s];\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    corrBuf[s] = Math.min(cap_i, sum_other);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  return corrBuf;\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "function recomputeAllCorrelations() {\n");
-    fprintf(f, "  patternsData.forEach(item => {\n");
-    fprintf(f, "    if (item.highResLoaded && item.capacity) {\n");
-    fprintf(f, "      item.actualCorrelation = computeItemCorr(item);\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  });\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "async function ensureHighResData(item) {\n");
-    fprintf(f, "  if (item.highResLoaded || item.highResLoading) return;\n");
-    fprintf(f, "  item.highResLoading = true;\n");
-    fprintf(f, "  try {\n");
-    fprintf(f, "    // 1. Attempt lazy Web Audio fetch & decode from local WAV files\n");
-    fprintf(f, "    const ctx = getAudioCtx();\n");
-    fprintf(f, "    const resStem = await fetch(item.filename);\n");
-    fprintf(f, "    const arrayBufStem = await resStem.arrayBuffer();\n");
-    fprintf(f, "    const audioBufStem = await ctx.decodeAudioData(arrayBufStem);\n");
-    fprintf(f, "    item.stemWaveform = audioBufStem.getChannelData(0);\n");
-    fprintf(f, "    item.sampleRate = audioBufStem.sampleRate;\n");
-    fprintf(f, "    item.totalSamples = audioBufStem.length;\n\n");
-
-    fprintf(f, "    const resRec = await fetch(item.recombinedFilename);\n");
-    fprintf(f, "    const arrayBufRec = await resRec.arrayBuffer();\n");
-    fprintf(f, "    const audioBufRec = await ctx.decodeAudioData(arrayBufRec);\n");
-    fprintf(f, "    const recData = audioBufRec.getChannelData(0);\n");
-    fprintf(f, "    item.capacity = new Float32Array(recData.length);\n");
-    fprintf(f, "    for (let i = 0; i < recData.length; i++) item.capacity[i] = Math.abs(recData[i]);\n");
-    fprintf(f, "    item.highResLoaded = true;\n");
-    fprintf(f, "    recomputeAllCorrelations();\n");
-    fprintf(f, "    renderAll();\n");
-    fprintf(f, "  } catch (err) {\n");
-    fprintf(f, "    // 2. Seamless Base64 fallback if fetch fails (e.g. file:// protocol CORS restriction)\n");
-    fprintf(f, "    if (item.b64Stem && item.b64Cap) {\n");
-    fprintf(f, "      const i16Stem = base64ToInt16(item.b64Stem);\n");
-    fprintf(f, "      const i16Cap = base64ToInt16(item.b64Cap);\n");
-    fprintf(f, "      item.stemWaveform = new Float32Array(i16Stem.length);\n");
-    fprintf(f, "      for (let i = 0; i < i16Stem.length; i++) item.stemWaveform[i] = i16Stem[i] / 32767.0;\n");
-    fprintf(f, "      item.capacity = new Float32Array(i16Cap.length);\n");
-    fprintf(f, "      for (let i = 0; i < i16Cap.length; i++) item.capacity[i] = i16Cap[i] / 32767.0;\n");
-    fprintf(f, "      item.highResLoaded = true;\n");
-    fprintf(f, "      recomputeAllCorrelations();\n");
-    fprintf(f, "      renderAll();\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  } finally {\n");
-    fprintf(f, "    item.highResLoading = false;\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "function renderCanvas(item) {\n");
-    fprintf(f, "  const canvas = document.getElementById('canvas-' + item.index);\n");
-    fprintf(f, "  const audio = document.getElementById('audio-' + item.index);\n");
+    fprintf(f, "function renderCanvas(index) {\n");
+    fprintf(f, "  const canvas = document.getElementById(`canvas-${index}`);\n");
+    fprintf(f, "  const audio = document.getElementById(`audio-${index}`);\n");
     fprintf(f, "  if (!canvas) return;\n");
     fprintf(f, "  const ctx = canvas.getContext('2d');\n");
     fprintf(f, "  const rect = canvas.getBoundingClientRect();\n");
@@ -726,169 +664,174 @@ static void generate_correlation_html_report(
     fprintf(f, "  ctx.scale(dpr, dpr);\n");
     fprintf(f, "  ctx.clearRect(0, 0, width, height);\n\n");
 
-    fprintf(f, "  const sr = item.sampleRate;\n");
-    fprintf(f, "  const totalN = item.totalSamples;\n");
-    fprintf(f, "  const duration = item.duration;\n");
+    fprintf(f, "  const stem = DATA.stems[index];\n");
+    fprintf(f, "  if (!stem) { ctx.restore(); return; }\n");
+    fprintf(f, "  const sr = stem.sampleRate;\n");
+    fprintf(f, "  const totalN = stem.totalSamples;\n");
+    fprintf(f, "  const duration = stem.duration;\n");
     fprintf(f, "  const midY = height / 2;\n\n");
 
-    fprintf(f, "  const sStart = Math.max(0, Math.floor(viewStart * sr));\n");
-    fprintf(f, "  const sEnd = Math.min(totalN, Math.ceil(viewEnd * sr));\n");
-    fprintf(f, "  const visCount = sEnd - sStart;\n");
+    fprintf(f, "  const sampleStart = Math.max(0, Math.floor(viewStart * sr));\n");
+    fprintf(f, "  const sampleEnd = Math.min(totalN - 1, Math.ceil(viewEnd * sr));\n");
+    fprintf(f, "  const visCount = sampleEnd - sampleStart + 1;\n");
     fprintf(f, "  if (visCount <= 0) { ctx.restore(); return; }\n\n");
 
-    fprintf(f, "  // Trigger high-res sample loading if user zooms in close\n");
-    fprintf(f, "  if (visCount < totalN * 0.8 && !item.highResLoaded) {\n");
-    fprintf(f, "    ensureHighResData(item);\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  const maxCapCorr = 1.0;\n\n");
-
-    fprintf(f, "  // --- 1. Background Audio Waveform ---\n");
-    fprintf(f, "  ctx.fillStyle = 'rgba(120, 120, 160, 0.28)';\n");
-    fprintf(f, "  if (item.highResLoaded && visCount <= width * 3) {\n");
-    fprintf(f, "    ctx.beginPath();\n");
-    fprintf(f, "    ctx.strokeStyle = 'rgba(140, 140, 180, 0.5)';\n");
-    fprintf(f, "    ctx.lineWidth = 1.5;\n");
-    fprintf(f, "    let started = false;\n");
-    fprintf(f, "    for (let s = sStart; s < sEnd; s++) {\n");
-    fprintf(f, "      const x = timeToX(s / sr, width);\n");
-    fprintf(f, "      const v = item.stemWaveform[s];\n");
-    fprintf(f, "      const y = midY - (v * midY * 0.85);\n");
-    fprintf(f, "      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    ctx.stroke();\n");
-    fprintf(f, "    if (visCount < width * 0.6) {\n");
-    fprintf(f, "      ctx.fillStyle = '#82aaff';\n");
-    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
-    fprintf(f, "        const x = timeToX(s / sr, width);\n");
-    fprintf(f, "        const v = item.stemWaveform[s];\n");
+    fprintf(f, "  // --- 0. Draw Background Audio Waveform ---\n");
+    fprintf(f, "  if (stem.stemWaveform) {\n");
+    fprintf(f, "    ctx.fillStyle = 'rgba(120, 120, 160, 0.28)';\n");
+    fprintf(f, "    if (visCount <= width * 3) {\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      ctx.strokeStyle = 'rgba(140, 140, 180, 0.5)';\n");
+    fprintf(f, "      ctx.lineWidth = 1.5;\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / sr;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const v = stem.stemWaveform[s];\n");
     fprintf(f, "        const y = midY - (v * midY * 0.85);\n");
-    fprintf(f, "        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
     fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  } else {\n");
-    fprintf(f, "    // Instant Overview Rendering\n");
-    fprintf(f, "    const nBins = item.ovWaveformMin.length;\n");
-    fprintf(f, "    for (let i = 0; i < nBins; i++) {\n");
-    fprintf(f, "      const t = (i / nBins) * duration;\n");
-    fprintf(f, "      if (t < viewStart || t > viewEnd) continue;\n");
-    fprintf(f, "      const x = timeToX(t, width);\n");
-    fprintf(f, "      const binW = Math.max(1.5, ((duration / nBins) / (viewEnd - viewStart)) * width);\n");
-    fprintf(f, "      const minV = item.ovWaveformMin[i];\n");
-    fprintf(f, "      const maxV = item.ovWaveformMax[i];\n");
-    fprintf(f, "      const y1 = midY - (maxV * midY * 0.85);\n");
-    fprintf(f, "      const y2 = midY - (minV * midY * 0.85);\n");
-    fprintf(f, "      ctx.fillRect(x, y1, binW, Math.max(1, y2 - y1));\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "      if (visCount < width * 0.6) {\n");
+    fprintf(f, "        ctx.fillStyle = '#82aaff';\n");
+    fprintf(f, "        for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "          const x = timeToX(s / sr, width);\n");
+    fprintf(f, "          const v = stem.stemWaveform[s];\n");
+    fprintf(f, "          const y = midY - (v * midY * 0.85);\n");
+    fprintf(f, "          ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * sr));\n");
+    fprintf(f, "        const s2 = Math.min(totalN - 1, Math.ceil(t2 * sr));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < totalN) {\n");
+    fprintf(f, "          let minV = stem.stemWaveform[s1], maxV = stem.stemWaveform[s1];\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            const v = stem.stemWaveform[s];\n");
+    fprintf(f, "            if (v < minV) minV = v;\n");
+    fprintf(f, "            if (v > maxV) maxV = v;\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          const y1 = midY - (maxV * midY * 0.85);\n");
+    fprintf(f, "          const y2 = midY - (minV * midY * 0.85);\n");
+    fprintf(f, "          ctx.fillRect(px, y1, 1.5, Math.max(1, y2 - y1));\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
     fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 2. Correlation Capacity Envelope (Orange) ---\n");
-    fprintf(f, "  ctx.beginPath();\n");
-    fprintf(f, "  ctx.strokeStyle = '#ff9800';\n");
-    fprintf(f, "  ctx.lineWidth = 2;\n");
-    fprintf(f, "  if (item.highResLoaded && visCount <= width * 3) {\n");
-    fprintf(f, "    let started = false;\n");
-    fprintf(f, "    for (let s = sStart; s < sEnd; s++) {\n");
-    fprintf(f, "      const x = timeToX(s / sr, width);\n");
-    fprintf(f, "      const cap = item.capacity[s];\n");
-    fprintf(f, "      const y = height - (cap * height * 0.88) - 4;\n");
-    fprintf(f, "      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    ctx.stroke();\n");
-    fprintf(f, "    if (visCount < width * 0.6) {\n");
-    fprintf(f, "      ctx.fillStyle = '#ff9800';\n");
-    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
-    fprintf(f, "        const x = timeToX(s / sr, width);\n");
-    fprintf(f, "        const cap = item.capacity[s];\n");
+    fprintf(f, "  // --- 1. Draw Stem Capacity Envelope (Orange) ---\n");
+    fprintf(f, "  if (stem.capacity) {\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = '#ff9800';\n");
+    fprintf(f, "    ctx.lineWidth = 2;\n");
+    fprintf(f, "    if (visCount <= width * 3) {\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / sr;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const cap = stem.capacity[s];\n");
     fprintf(f, "        const y = height - (cap * height * 0.88) - 4;\n");
-    fprintf(f, "        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
     fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "      if (visCount < width * 0.6) {\n");
+    fprintf(f, "        ctx.fillStyle = '#ff9800';\n");
+    fprintf(f, "        for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "          const x = timeToX(s / sr, width);\n");
+    fprintf(f, "          const cap = stem.capacity[s];\n");
+    fprintf(f, "          const y = height - (cap * height * 0.88) - 4;\n");
+    fprintf(f, "          ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * sr));\n");
+    fprintf(f, "        const s2 = Math.min(totalN - 1, Math.ceil(t2 * sr));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < totalN) {\n");
+    fprintf(f, "          let maxC = stem.capacity[s1];\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            if (stem.capacity[s] > maxC) maxC = stem.capacity[s];\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          const y = height - (maxC * height * 0.88) - 4;\n");
+    fprintf(f, "          if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
     fprintf(f, "    }\n");
-    fprintf(f, "  } else {\n");
-    fprintf(f, "    const nBins = item.ovCapacity.length;\n");
-    fprintf(f, "    let started = false;\n");
-    fprintf(f, "    for (let i = 0; i < nBins; i++) {\n");
-    fprintf(f, "      const t = (i / (nBins - 1)) * duration;\n");
-    fprintf(f, "      if (t < viewStart || t > viewEnd) continue;\n");
-    fprintf(f, "      const x = timeToX(t, width);\n");
-    fprintf(f, "      const cap = item.ovCapacity[i];\n");
-    fprintf(f, "      const y = height - (cap * height * 0.88) - 4;\n");
-    fprintf(f, "      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    ctx.stroke();\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 3. Actual Overlapping Correlation Envelope (Green) ---\n");
-    fprintf(f, "  ctx.beginPath();\n");
-    fprintf(f, "  ctx.strokeStyle = '#00e676';\n");
-    fprintf(f, "  ctx.lineWidth = 2;\n");
-    fprintf(f, "  if (item.highResLoaded && visCount <= width * 3 && item.actualCorrelation) {\n");
-    fprintf(f, "    let started = false;\n");
-    fprintf(f, "    for (let s = sStart; s < sEnd; s++) {\n");
-    fprintf(f, "      const x = timeToX(s / sr, width);\n");
-    fprintf(f, "      const cap = item.capacity[s];\n");
-    fprintf(f, "      const corr = item.actualCorrelation[s];\n");
-    fprintf(f, "      const v = Math.min(cap, corr);\n");
-    fprintf(f, "      const y = height - (v * height * 0.88) - 4;\n");
-    fprintf(f, "      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    ctx.stroke();\n");
-    fprintf(f, "    if (visCount < width * 0.6) {\n");
-    fprintf(f, "      ctx.fillStyle = '#00e676';\n");
-    fprintf(f, "      for (let s = sStart; s < sEnd; s++) {\n");
-    fprintf(f, "        const x = timeToX(s / sr, width);\n");
-    fprintf(f, "        const cap = item.capacity[s];\n");
-    fprintf(f, "        const corr = item.actualCorrelation[s];\n");
-    fprintf(f, "        const v = Math.min(cap, corr);\n");
-    fprintf(f, "        const y = height - (v * height * 0.88) - 4;\n");
-    fprintf(f, "        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "  // --- 2. Draw Judgment-Time Correlation Envelope (Green) ---\n");
+    fprintf(f, "  if (stem.actualCorrelation) {\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = '#00e676';\n");
+    fprintf(f, "    ctx.lineWidth = 2;\n");
+    fprintf(f, "    if (visCount <= width * 3) {\n");
+    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "        const t = s / sr;\n");
+    fprintf(f, "        const x = timeToX(t, width);\n");
+    fprintf(f, "        const corr = stem.actualCorrelation[s];\n");
+    fprintf(f, "        const y = height - (corr * height * 0.88) - 4;\n");
+    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
     fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "      if (visCount < width * 0.6) {\n");
+    fprintf(f, "        ctx.fillStyle = '#00e676';\n");
+    fprintf(f, "        for (let s = sampleStart; s <= sampleEnd; s++) {\n");
+    fprintf(f, "          const x = timeToX(s / sr, width);\n");
+    fprintf(f, "          const corr = stem.actualCorrelation[s];\n");
+    fprintf(f, "          const y = height - (corr * height * 0.88) - 4;\n");
+    fprintf(f, "          ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else {\n");
+    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "        const t1 = xToTime(px, width);\n");
+    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
+    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * sr));\n");
+    fprintf(f, "        const s2 = Math.min(totalN - 1, Math.ceil(t2 * sr));\n");
+    fprintf(f, "        if (s1 <= s2 && s1 < totalN) {\n");
+    fprintf(f, "          let maxCr = stem.actualCorrelation[s1];\n");
+    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
+    fprintf(f, "            if (stem.actualCorrelation[s] > maxCr) maxCr = stem.actualCorrelation[s];\n");
+    fprintf(f, "          }\n");
+    fprintf(f, "          const y = height - (maxCr * height * 0.88) - 4;\n");
+    fprintf(f, "          if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      ctx.stroke();\n");
     fprintf(f, "    }\n");
-    fprintf(f, "  } else {\n");
-    fprintf(f, "    const nBins = item.ovCorrelation.length;\n");
-    fprintf(f, "    let started = false;\n");
-    fprintf(f, "    for (let i = 0; i < nBins; i++) {\n");
-    fprintf(f, "      const t = (i / (nBins - 1)) * duration;\n");
-    fprintf(f, "      if (t < viewStart || t > viewEnd) continue;\n");
-    fprintf(f, "      const x = timeToX(t, width);\n");
-    fprintf(f, "      const cap = item.ovCapacity[i];\n");
-    fprintf(f, "      const corr = item.ovCorrelation[i];\n");
-    fprintf(f, "      const v = Math.min(cap, corr);\n");
-    fprintf(f, "      const y = height - (v * height * 0.88) - 4;\n");
-    fprintf(f, "      if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    ctx.stroke();\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 4. Audio Playhead ---\n");
+    fprintf(f, "  // --- 3. Audio Playhead ---\n");
     fprintf(f, "  if (audio && duration > 0 && audio.currentTime >= viewStart && audio.currentTime <= viewEnd) {\n");
     fprintf(f, "    const playX = timeToX(audio.currentTime, width);\n");
     fprintf(f, "    ctx.strokeStyle = '#ffffff';\n");
     fprintf(f, "    ctx.lineWidth = 1.5;\n");
-    fprintf(f, "    ctx.beginPath();\n");
-    fprintf(f, "    ctx.moveTo(playX, 0);\n");
-    fprintf(f, "    ctx.lineTo(playX, height);\n");
-    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "    ctx.beginPath(); ctx.moveTo(playX, 0); ctx.lineTo(playX, height); ctx.stroke();\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 5. Hover Line ---\n");
-    fprintf(f, "  if (hoverState && hoverState.index === item.index) {\n");
-    fprintf(f, "    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';\n");
-    fprintf(f, "    ctx.lineWidth = 1;\n");
-    fprintf(f, "    ctx.beginPath();\n");
-    fprintf(f, "    ctx.moveTo(hoverState.x, 0);\n");
-    fprintf(f, "    ctx.lineTo(hoverState.x, height);\n");
-    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "  // --- 4. Hover Crosshair ---\n");
+    fprintf(f, "  if (hoverState && hoverState.index === index) {\n");
+    fprintf(f, "    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';\n");
+    fprintf(f, "    ctx.setLineDash([4, 4]);\n");
+    fprintf(f, "    ctx.beginPath(); ctx.moveTo(hoverState.mouseX, 0); ctx.lineTo(hoverState.mouseX, height); ctx.stroke();\n");
+    fprintf(f, "    ctx.setLineDash([]);\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 6. Active Drag Selection Overlay ---\n");
-    fprintf(f, "  if (activeDrag && activeDrag.index === item.index) {\n");
+    fprintf(f, "  // --- 5. Active Drag Selection Highlight ---\n");
+    fprintf(f, "  if (activeDrag && activeDrag.index === index) {\n");
     fprintf(f, "    const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
     fprintf(f, "    const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
-    fprintf(f, "    ctx.fillStyle = 'rgba(33, 150, 243, 0.3)';\n");
+    fprintf(f, "    ctx.fillStyle = 'rgba(33, 150, 243, 0.25)';\n");
     fprintf(f, "    ctx.fillRect(x1, 0, x2 - x1, height);\n");
     fprintf(f, "    ctx.strokeStyle = '#2196f3';\n");
-    fprintf(f, "    ctx.lineWidth = 1;\n");
+    fprintf(f, "    ctx.lineWidth = 1.5;\n");
     fprintf(f, "    ctx.strokeRect(x1, 0, x2 - x1, height);\n");
     fprintf(f, "  }\n\n");
 
@@ -896,87 +839,80 @@ static void generate_correlation_html_report(
     fprintf(f, "}\n\n");
 
     fprintf(f, "function renderAll() {\n");
-    fprintf(f, "  patternsData.forEach(item => renderCanvas(item));\n");
+    fprintf(f, "  for (let i = 0; i < DATA.stems.length; i++) {\n");
+    fprintf(f, "    renderCanvas(i);\n");
+    fprintf(f, "  }\n");
     fprintf(f, "}\n\n");
 
-    fprintf(f, "patternsData.forEach(item => {\n");
-    fprintf(f, "  const canvas = document.getElementById('canvas-' + item.index);\n");
-    fprintf(f, "  const tooltip = document.getElementById('tooltip-' + item.index);\n");
-    fprintf(f, "  const audio = document.getElementById('audio-' + item.index);\n");
-    fprintf(f, "  if (!canvas || !audio) return;\n\n");
-
-    fprintf(f, "  canvas.addEventListener('mousemove', (e) => {\n");
-    fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "    const x = e.clientX - rect.left;\n");
-    fprintf(f, "    const timeS = xToTime(x, rect.width);\n");
-    fprintf(f, "    hoverState = { index: item.index, x: x, timeS: timeS };\n");
-    fprintf(f, "    if (activeDrag) activeDrag.currentX = x;\n");
-    fprintf(f, "    if (item.highResLoaded) {\n");
-    fprintf(f, "      const sIdx = Math.min(item.totalSamples - 1, Math.max(0, Math.round(timeS * item.sampleRate)));\n");
-    fprintf(f, "      const capVal = item.capacity ? item.capacity[sIdx] : 0.0;\n");
-    fprintf(f, "      const corrVal = item.actualCorrelation ? Math.min(capVal, item.actualCorrelation[sIdx]) : 0.0;\n");
-    fprintf(f, "      const waveVal = item.stemWaveform ? item.stemWaveform[sIdx] : 0.0;\n");
-    fprintf(f, "      tooltip.style.opacity = '1';\n");
-    fprintf(f, "      tooltip.innerHTML = `Time: ${timeS.toFixed(4)}s (Smp ${sIdx})<br>Capacity: ${capVal.toFixed(3)}<br>Overlap Corr: ${corrVal.toFixed(3)}<br>Waveform: ${waveVal.toFixed(3)}`;\n");
-    fprintf(f, "    } else {\n");
-    fprintf(f, "      const bIdx = Math.min(item.ovCapacity.length - 1, Math.max(0, Math.floor((timeS / item.duration) * item.ovCapacity.length)));\n");
-    fprintf(f, "      const capVal = item.ovCapacity[bIdx];\n");
-    fprintf(f, "      const corrVal = Math.min(capVal, item.ovCorrelation[bIdx]);\n");
-    fprintf(f, "      const waveVal = (item.ovWaveformMin[bIdx] + item.ovWaveformMax[bIdx]) / 2;\n");
-    fprintf(f, "      tooltip.style.opacity = '1';\n");
-    fprintf(f, "      tooltip.innerHTML = `Time: ${timeS.toFixed(3)}s<br>Capacity: ${capVal.toFixed(3)}<br>Overlap Corr: ${corrVal.toFixed(3)}<br>Waveform: ${waveVal.toFixed(3)}`;\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    renderAll();\n");
-    fprintf(f, "  });\n\n");
-
-    fprintf(f, "  canvas.addEventListener('mouseleave', () => {\n");
-    fprintf(f, "    hoverState = null;\n");
-    fprintf(f, "    tooltip.style.opacity = '0';\n");
-    fprintf(f, "    renderAll();\n");
-    fprintf(f, "  });\n\n");
+    fprintf(f, "DATA.stems.forEach((stem, idx) => {\n");
+    fprintf(f, "  const canvas = document.getElementById(`canvas-${idx}`);\n");
+    fprintf(f, "  const tooltip = document.getElementById(`tooltip-${idx}`);\n");
+    fprintf(f, "  const audio = document.getElementById(`audio-${idx}`);\n");
+    fprintf(f, "  if (!canvas) return;\n\n");
 
     fprintf(f, "  canvas.addEventListener('mousedown', (e) => {\n");
     fprintf(f, "    if (e.button === 0) {\n");
     fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
     fprintf(f, "      const x = e.clientX - rect.left;\n");
-    fprintf(f, "      activeDrag = { index: item.index, startX: x, currentX: x };\n");
+    fprintf(f, "      activeDrag = { index: idx, startX: x, currentX: x };\n");
+    fprintf(f, "      renderCanvas(idx);\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  });\n\n");
+
+    fprintf(f, "  canvas.addEventListener('mousemove', (e) => {\n");
+    fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));\n");
+    fprintf(f, "    hoverState = { index: idx, mouseX: x };\n");
+    fprintf(f, "    if (activeDrag) activeDrag.currentX = x;\n");
+    fprintf(f, "    renderCanvas(idx);\n\n");
+
+    fprintf(f, "    const t = xToTime(x, rect.width);\n");
+    fprintf(f, "    const s = Math.min(stem.totalSamples - 1, Math.max(0, Math.round(t * stem.sampleRate)));\n");
+    fprintf(f, "    const capVal = (stem.capacity && stem.capacity.length > s) ? stem.capacity[s] : 0;\n");
+    fprintf(f, "    const corrVal = (stem.actualCorrelation && stem.actualCorrelation.length > s) ? stem.actualCorrelation[s] : 0;\n");
+    fprintf(f, "    const waveVal = (stem.stemWaveform && stem.stemWaveform.length > s) ? stem.stemWaveform[s] : 0;\n");
+    fprintf(f, "    tooltip.style.opacity = '1';\n");
+    fprintf(f, "    tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Cap: ${capVal.toFixed(4)} | Overlap Corr: ${corrVal.toFixed(4)} | Waveform: ${waveVal.toFixed(4)}`;\n");
+    fprintf(f, "  });\n\n");
+
+    fprintf(f, "  canvas.addEventListener('mouseleave', () => {\n");
+    fprintf(f, "    if (activeDrag && activeDrag.index === idx) activeDrag = null;\n");
+    fprintf(f, "    hoverState = null;\n");
+    fprintf(f, "    tooltip.style.opacity = '0';\n");
+    fprintf(f, "    renderCanvas(idx);\n");
+    fprintf(f, "  });\n\n");
+
+    fprintf(f, "  canvas.addEventListener('mouseup', (e) => {\n");
+    fprintf(f, "    if (activeDrag && activeDrag.index === idx) {\n");
+    fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "      const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
+    fprintf(f, "      const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
+    fprintf(f, "      activeDrag = null;\n");
+    fprintf(f, "      if (x2 - x1 > 4) {\n");
+    fprintf(f, "        const t1 = xToTime(x1, rect.width);\n");
+    fprintf(f, "        const t2 = xToTime(x2, rect.width);\n");
+    fprintf(f, "        zoomHistory.push({ start: viewStart, end: viewEnd });\n");
+    fprintf(f, "        viewStart = Math.max(0, t1);\n");
+    fprintf(f, "        viewEnd = Math.min(DATA.duration, t2);\n");
+    fprintf(f, "        updateViewInfo();\n");
+    fprintf(f, "        renderAll();\n");
+    fprintf(f, "      } else {\n");
+    fprintf(f, "        const clickTime = xToTime(x1, rect.width);\n");
+    fprintf(f, "        if (audio) audio.currentTime = clickTime;\n");
+    fprintf(f, "        renderCanvas(idx);\n");
+    fprintf(f, "      }\n");
     fprintf(f, "    }\n");
     fprintf(f, "  });\n\n");
 
     fprintf(f, "  canvas.addEventListener('contextmenu', (e) => {\n");
     fprintf(f, "    e.preventDefault();\n");
     fprintf(f, "    zoomOut();\n");
-    fprintf(f, "  });\n\n");
+    fprintf(f, "  });\n");
 
-    fprintf(f, "  audio.addEventListener('timeupdate', renderAll);\n");
-    fprintf(f, "  audio.addEventListener('play', renderAll);\n");
-    fprintf(f, "  audio.addEventListener('pause', renderAll);\n");
-    fprintf(f, "});\n\n");
-
-    fprintf(f, "window.addEventListener('mouseup', (e) => {\n");
-    fprintf(f, "  if (activeDrag) {\n");
-    fprintf(f, "    const canvas = document.getElementById('canvas-' + activeDrag.index);\n");
-    fprintf(f, "    if (canvas) {\n");
-    fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "      const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
-    fprintf(f, "      const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
-    fprintf(f, "      if (x2 - x1 > 8) {\n");
-    fprintf(f, "        const t1 = Math.max(0, xToTime(x1, rect.width));\n");
-    fprintf(f, "        const t2 = Math.min(maxSongDuration, xToTime(x2, rect.width));\n");
-    fprintf(f, "        if (t2 - t1 > 0.0001) {\n");
-    fprintf(f, "          zoomHistory.push({ start: viewStart, end: viewEnd });\n");
-    fprintf(f, "          viewStart = t1;\n");
-    fprintf(f, "          viewEnd = t2;\n");
-    fprintf(f, "          updateViewInfo();\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      } else {\n");
-    fprintf(f, "        const clickTime = xToTime(activeDrag.startX, rect.width);\n");
-    fprintf(f, "        const audio = document.getElementById('audio-' + activeDrag.index);\n");
-    fprintf(f, "        if (audio) audio.currentTime = clickTime;\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    activeDrag = null;\n");
-    fprintf(f, "    renderAll();\n");
+    fprintf(f, "  if (audio) {\n");
+    fprintf(f, "    audio.addEventListener('timeupdate', renderAll);\n");
+    fprintf(f, "    audio.addEventListener('play', renderAll);\n");
+    fprintf(f, "    audio.addEventListener('pause', renderAll);\n");
     fprintf(f, "  }\n");
     fprintf(f, "});\n\n");
 
