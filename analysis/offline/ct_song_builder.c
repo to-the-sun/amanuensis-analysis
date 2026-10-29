@@ -272,6 +272,10 @@ static void generate_correlation_html_report(
     fprintf(f, "  .stat-card { background: rgba(0,0,0,0.2); padding: 12px 16px; border-radius: 6px; border: 1px solid var(--border); }\n");
     fprintf(f, "  .stat-label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }\n");
     fprintf(f, "  .stat-value { font-size: 1.4rem; font-weight: bold; color: #fff; margin-top: 4px; }\n");
+    fprintf(f, "  .toolbar { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--border); }\n");
+    fprintf(f, "  .btn { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; text-decoration: none; display: inline-block; }\n");
+    fprintf(f, "  .btn:hover { opacity: 0.9; }\n");
+    fprintf(f, "  .view-info { font-size: 0.85rem; color: #4caf50; font-family: monospace; font-weight: bold; }\n");
     fprintf(f, "  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 15px; font-size: 0.85rem; padding-top: 12px; border-top: 1px solid var(--border); }\n");
     fprintf(f, "  .legend-item { display: flex; align-items: center; gap: 8px; }\n");
     fprintf(f, "  .legend-color { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }\n");
@@ -286,6 +290,7 @@ static void generate_correlation_html_report(
     fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 160px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 10px; user-select: none; }\n");
     fprintf(f, "  canvas { width: 100%%; height: 100%%; display: block; cursor: crosshair; }\n");
     fprintf(f, "  .tooltip { position: absolute; top: 8px; right: 12px; background: rgba(10, 10, 15, 0.9); border: 1px solid #333344; padding: 6px 10px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; color: #fff; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 10; }\n");
+    fprintf(f, "  .instructions { font-size: 0.8rem; color: var(--muted); margin-top: 10px; font-style: italic; }\n");
     fprintf(f, "</style>\n</head>\n<body>\n");
 
     fprintf(f, "<header>\n");
@@ -304,16 +309,29 @@ static void generate_correlation_html_report(
     fprintf(f, "      <div class=\"stat-value\" style=\"color: #2196f3;\">%.2f%%</div>\n", final_correlation);
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
+    fprintf(f, "  <div class=\"toolbar\">\n");
+    fprintf(f, "    <button class=\"btn\" onclick=\"resetZoom()\">Reset Zoom</button>\n");
+    fprintf(f, "    <span class=\"view-info\" id=\"viewInfo\">Visible: Full Duration</span>\n");
+    fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"legend\">\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: rgba(120,120,150,0.35); border: 1px solid rgba(150,150,180,0.5);\"></span> Output Audio Waveform (Background)</div>\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Stem Correlation Capacity (|S_i(t)|)</div>\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Actual Overlapping Correlation (&sum;<sub>j &ne; i</sub> |S_j(t)|)</div>\n");
     fprintf(f, "  </div>\n");
+    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n");
 
     fprintf(f, "<main>\n");
 
     int target_bins = 1000;
+    double max_song_duration = 0.0;
+
+    for (int i = 0; i < num_patterns; i++) {
+        if (patterns[i].recombined_samples && patterns[i].sample_rate > 0) {
+            double d = (double)patterns[i].total_frames / patterns[i].sample_rate;
+            if (d > max_song_duration) max_song_duration = d;
+        }
+    }
 
     for (int i = 0; i < num_patterns; i++) {
         const PatternInfo* pat = &patterns[i];
@@ -349,6 +367,13 @@ static void generate_correlation_html_report(
     fprintf(f, "</main>\n");
 
     fprintf(f, "<script>\n");
+    fprintf(f, "const maxSongDuration = %.4f;\n", max_song_duration);
+    fprintf(f, "let viewStart = 0.0;\n");
+    fprintf(f, "let viewEnd = maxSongDuration;\n");
+    fprintf(f, "let zoomHistory = [];\n");
+    fprintf(f, "let activeDrag = null;\n");
+    fprintf(f, "let hoverState = null;\n\n");
+
     fprintf(f, "const patternsData = [\n");
 
     for (int i = 0; i < num_patterns; i++) {
@@ -445,106 +470,222 @@ static void generate_correlation_html_report(
 
     fprintf(f, "];\n\n");
 
+    fprintf(f, "function timeToX(t, width) {\n");
+    fprintf(f, "  return ((t - viewStart) / (viewEnd - viewStart)) * width;\n");
+    fprintf(f, "}\n");
+    fprintf(f, "function xToTime(x, width) {\n");
+    fprintf(f, "  return viewStart + (x / width) * (viewEnd - viewStart);\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function updateViewInfo() {\n");
+    fprintf(f, "  const dur = viewEnd - viewStart;\n");
+    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${viewStart.toFixed(2)}s &ndash; ${viewEnd.toFixed(2)}s (Duration: ${dur.toFixed(2)}s)`;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function resetZoom() {\n");
+    fprintf(f, "  zoomHistory = [];\n");
+    fprintf(f, "  viewStart = 0.0;\n");
+    fprintf(f, "  viewEnd = maxSongDuration;\n");
+    fprintf(f, "  updateViewInfo();\n");
+    fprintf(f, "  renderAll();\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function zoomOut() {\n");
+    fprintf(f, "  if (zoomHistory.length > 0) {\n");
+    fprintf(f, "    const prev = zoomHistory.pop();\n");
+    fprintf(f, "    viewStart = prev.start;\n");
+    fprintf(f, "    viewEnd = prev.end;\n");
+    fprintf(f, "    updateViewInfo();\n");
+    fprintf(f, "    renderAll();\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function renderCanvas(item) {\n");
+    fprintf(f, "  const canvas = document.getElementById('canvas-' + item.index);\n");
+    fprintf(f, "  const audio = document.getElementById('audio-' + item.index);\n");
+    fprintf(f, "  if (!canvas) return;\n");
+    fprintf(f, "  const ctx = canvas.getContext('2d');\n");
+    fprintf(f, "  const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "  const dpr = window.devicePixelRatio || 1;\n");
+    fprintf(f, "  const width = rect.width;\n");
+    fprintf(f, "  const height = rect.height;\n");
+    fprintf(f, "  if (width === 0 || height === 0) return;\n");
+    fprintf(f, "  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {\n");
+    fprintf(f, "    canvas.width = Math.floor(width * dpr);\n");
+    fprintf(f, "    canvas.height = Math.floor(height * dpr);\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  ctx.save();\n");
+    fprintf(f, "  ctx.scale(dpr, dpr);\n");
+    fprintf(f, "  ctx.clearRect(0, 0, width, height);\n\n");
+
+    fprintf(f, "  const numBins = item.capacity.length;\n");
+    fprintf(f, "  const duration = item.duration;\n");
+    fprintf(f, "  const midY = height / 2;\n\n");
+
+    fprintf(f, "  // Find peak correlation for robust Y-axis scaling\n");
+    fprintf(f, "  let maxCapCorr = 1.0;\n");
+    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
+    fprintf(f, "    if (item.capacity[i] > maxCapCorr) maxCapCorr = item.capacity[i];\n");
+    fprintf(f, "    if (item.actualCorrelation[i] > maxCapCorr) maxCapCorr = item.actualCorrelation[i];\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // Background Waveform\n");
+    fprintf(f, "  ctx.fillStyle = 'rgba(120, 120, 160, 0.28)';\n");
+    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
+    fprintf(f, "    const t = (i / numBins) * duration;\n");
+    fprintf(f, "    if (t < viewStart || t > viewEnd) continue;\n");
+    fprintf(f, "    const x = timeToX(t, width);\n");
+    fprintf(f, "    const binW = Math.max(1.5, ((duration / numBins) / (viewEnd - viewStart)) * width);\n");
+    fprintf(f, "    const minVal = item.waveformMin[i];\n");
+    fprintf(f, "    const maxVal = item.waveformMax[i];\n");
+    fprintf(f, "    const y1 = midY - (maxVal * (height / 2) * 0.85);\n");
+    fprintf(f, "    const y2 = midY - (minVal * (height / 2) * 0.85);\n");
+    fprintf(f, "    ctx.fillRect(x, y1, binW, Math.max(1, y2 - y1));\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // Correlation Capacity Envelope (Orange)\n");
+    fprintf(f, "  ctx.beginPath();\n");
+    fprintf(f, "  ctx.strokeStyle = '#ff9800';\n");
+    fprintf(f, "  ctx.lineWidth = 2;\n");
+    fprintf(f, "  let startedCap = false;\n");
+    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
+    fprintf(f, "    const t = (i / (numBins - 1)) * duration;\n");
+    fprintf(f, "    if (t < viewStart || t > viewEnd) continue;\n");
+    fprintf(f, "    const x = timeToX(t, width);\n");
+    fprintf(f, "    const cap = item.capacity[i];\n");
+    fprintf(f, "    const y = height - ((cap / maxCapCorr) * height * 0.88) - 4;\n");
+    fprintf(f, "    if (!startedCap) { ctx.moveTo(x, y); startedCap = true; } else { ctx.lineTo(x, y); }\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  ctx.stroke();\n\n");
+
+    fprintf(f, "  // Actual Overlapping Correlation Envelope (Green)\n");
+    fprintf(f, "  ctx.beginPath();\n");
+    fprintf(f, "  ctx.strokeStyle = '#00e676';\n");
+    fprintf(f, "  ctx.lineWidth = 2;\n");
+    fprintf(f, "  let startedCorr = false;\n");
+    fprintf(f, "  for (let i = 0; i < numBins; i++) {\n");
+    fprintf(f, "    const t = (i / (numBins - 1)) * duration;\n");
+    fprintf(f, "    if (t < viewStart || t > viewEnd) continue;\n");
+    fprintf(f, "    const x = timeToX(t, width);\n");
+    fprintf(f, "    const corr = item.actualCorrelation[i];\n");
+    fprintf(f, "    const y = height - ((corr / maxCapCorr) * height * 0.88) - 4;\n");
+    fprintf(f, "    if (!startedCorr) { ctx.moveTo(x, y); startedCorr = true; } else { ctx.lineTo(x, y); }\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  ctx.stroke();\n\n");
+
+    fprintf(f, "  // Audio Playhead\n");
+    fprintf(f, "  if (audio && duration > 0 && audio.currentTime >= viewStart && audio.currentTime <= viewEnd) {\n");
+    fprintf(f, "    const playX = timeToX(audio.currentTime, width);\n");
+    fprintf(f, "    ctx.strokeStyle = '#ffffff';\n");
+    fprintf(f, "    ctx.lineWidth = 1.5;\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.moveTo(playX, 0);\n");
+    fprintf(f, "    ctx.lineTo(playX, height);\n");
+    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // Hover Line\n");
+    fprintf(f, "  if (hoverState && hoverState.index === item.index) {\n");
+    fprintf(f, "    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';\n");
+    fprintf(f, "    ctx.lineWidth = 1;\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.moveTo(hoverState.x, 0);\n");
+    fprintf(f, "    ctx.lineTo(hoverState.x, height);\n");
+    fprintf(f, "    ctx.stroke();\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  // Active Drag Selection Overlay\n");
+    fprintf(f, "  if (activeDrag && activeDrag.index === item.index) {\n");
+    fprintf(f, "    const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
+    fprintf(f, "    const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
+    fprintf(f, "    ctx.fillStyle = 'rgba(33, 150, 243, 0.3)';\n");
+    fprintf(f, "    ctx.fillRect(x1, 0, x2 - x1, height);\n");
+    fprintf(f, "    ctx.strokeStyle = '#2196f3';\n");
+    fprintf(f, "    ctx.lineWidth = 1;\n");
+    fprintf(f, "    ctx.strokeRect(x1, 0, x2 - x1, height);\n");
+    fprintf(f, "  }\n\n");
+
+    fprintf(f, "  ctx.restore();\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function renderAll() {\n");
+    fprintf(f, "  patternsData.forEach(item => renderCanvas(item));\n");
+    fprintf(f, "}\n\n");
+
     fprintf(f, "patternsData.forEach(item => {\n");
     fprintf(f, "  const canvas = document.getElementById('canvas-' + item.index);\n");
     fprintf(f, "  const tooltip = document.getElementById('tooltip-' + item.index);\n");
     fprintf(f, "  const audio = document.getElementById('audio-' + item.index);\n");
     fprintf(f, "  if (!canvas || !audio) return;\n\n");
-    fprintf(f, "  const ctx = canvas.getContext('2d');\n");
-    fprintf(f, "  let mouseX = -1;\n\n");
-    fprintf(f, "  function resize() {\n");
-    fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "    canvas.width = rect.width * window.devicePixelRatio;\n");
-    fprintf(f, "    canvas.height = rect.height * window.devicePixelRatio;\n");
-    fprintf(f, "    render();\n");
-    fprintf(f, "  }\n\n");
-    fprintf(f, "  function render() {\n");
-    fprintf(f, "    const w = canvas.width;\n");
-    fprintf(f, "    const h = canvas.height;\n");
-    fprintf(f, "    ctx.clearRect(0, 0, w, h);\n\n");
-    fprintf(f, "    // Background Waveform\n");
-    fprintf(f, "    ctx.fillStyle = 'rgba(120, 120, 160, 0.28)';\n");
-    fprintf(f, "    const midY = h / 2;\n");
-    fprintf(f, "    const numBins = item.waveformMin.length;\n");
-    fprintf(f, "    for (let i = 0; i < numBins; i++) {\n");
-    fprintf(f, "      const x = (i / numBins) * w;\n");
-    fprintf(f, "      const binW = Math.max(1, w / numBins);\n");
-    fprintf(f, "      const minVal = item.waveformMin[i];\n");
-    fprintf(f, "      const maxVal = item.waveformMax[i];\n");
-    fprintf(f, "      const y1 = midY - (maxVal * (h / 2) * 0.85);\n");
-    fprintf(f, "      const y2 = midY - (minVal * (h / 2) * 0.85);\n");
-    fprintf(f, "      ctx.fillRect(x, y1, binW, Math.max(1, y2 - y1));\n");
-    fprintf(f, "    }\n\n");
-    fprintf(f, "    // Correlation Capacity Envelope (Orange)\n");
-    fprintf(f, "    ctx.beginPath();\n");
-    fprintf(f, "    ctx.strokeStyle = '#ff9800';\n");
-    fprintf(f, "    ctx.lineWidth = 2 * window.devicePixelRatio;\n");
-    fprintf(f, "    for (let i = 0; i < numBins; i++) {\n");
-    fprintf(f, "      const x = (i / (numBins - 1)) * w;\n");
-    fprintf(f, "      const cap = item.capacity[i];\n");
-    fprintf(f, "      const y = h - (cap * h * 0.88) - (4 * window.devicePixelRatio);\n");
-    fprintf(f, "      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    ctx.stroke();\n\n");
-    fprintf(f, "    // Actual Overlapping Correlation Envelope (Green)\n");
-    fprintf(f, "    ctx.beginPath();\n");
-    fprintf(f, "    ctx.strokeStyle = '#00e676';\n");
-    fprintf(f, "    ctx.lineWidth = 2 * window.devicePixelRatio;\n");
-    fprintf(f, "    for (let i = 0; i < numBins; i++) {\n");
-    fprintf(f, "      const x = (i / (numBins - 1)) * w;\n");
-    fprintf(f, "      const corr = item.actualCorrelation[i];\n");
-    fprintf(f, "      const y = h - (corr * h * 0.88) - (4 * window.devicePixelRatio);\n");
-    fprintf(f, "      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    ctx.stroke();\n\n");
-    fprintf(f, "    // Audio Playhead\n");
-    fprintf(f, "    if (item.duration > 0 && audio.currentTime > 0) {\n");
-    fprintf(f, "      const playX = (audio.currentTime / item.duration) * w;\n");
-    fprintf(f, "      ctx.strokeStyle = '#ffffff';\n");
-    fprintf(f, "      ctx.lineWidth = 1.5 * window.devicePixelRatio;\n");
-    fprintf(f, "      ctx.beginPath();\n");
-    fprintf(f, "      ctx.moveTo(playX, 0);\n");
-    fprintf(f, "      ctx.lineTo(playX, h);\n");
-    fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    }\n\n");
-    fprintf(f, "    // Hover Line & Tooltip\n");
-    fprintf(f, "    if (mouseX >= 0) {\n");
-    fprintf(f, "      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';\n");
-    fprintf(f, "      ctx.lineWidth = 1 * window.devicePixelRatio;\n");
-    fprintf(f, "      ctx.beginPath();\n");
-    fprintf(f, "      ctx.moveTo(mouseX, 0);\n");
-    fprintf(f, "      ctx.lineTo(mouseX, h);\n");
-    fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  }\n\n");
+
     fprintf(f, "  canvas.addEventListener('mousemove', (e) => {\n");
     fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "    const xRatio = (e.clientX - rect.left) / rect.width;\n");
-    fprintf(f, "    mouseX = xRatio * canvas.width;\n");
-    fprintf(f, "    const timeS = xRatio * item.duration;\n");
-    fprintf(f, "    const binIdx = Math.min(item.capacity.length - 1, Math.max(0, Math.floor(xRatio * item.capacity.length)));\n");
-    fprintf(f, "    const capVal = item.capacity[binIdx];\n");
-    fprintf(f, "    const corrVal = item.actualCorrelation[binIdx];\n");
+    fprintf(f, "    const x = e.clientX - rect.left;\n");
+    fprintf(f, "    const timeS = xToTime(x, rect.width);\n");
+    fprintf(f, "    hoverState = { index: item.index, x: x, timeS: timeS };\n");
+    fprintf(f, "    if (activeDrag) activeDrag.currentX = x;\n");
+    fprintf(f, "    const binIdx = Math.min(item.capacity.length - 1, Math.max(0, Math.floor((timeS / item.duration) * item.capacity.length)));\n");
+    fprintf(f, "    const capVal = item.capacity[binIdx] || 0.0;\n");
+    fprintf(f, "    const corrVal = item.actualCorrelation[binIdx] || 0.0;\n");
     fprintf(f, "    tooltip.style.opacity = '1';\n");
     fprintf(f, "    tooltip.innerHTML = `Time: ${timeS.toFixed(3)}s<br>Capacity: ${capVal.toFixed(3)}<br>Overlap Corr: ${corrVal.toFixed(3)}`;\n");
-    fprintf(f, "    render();\n");
+    fprintf(f, "    renderAll();\n");
     fprintf(f, "  });\n\n");
+
     fprintf(f, "  canvas.addEventListener('mouseleave', () => {\n");
-    fprintf(f, "    mouseX = -1;\n");
+    fprintf(f, "    hoverState = null;\n");
     fprintf(f, "    tooltip.style.opacity = '0';\n");
-    fprintf(f, "    render();\n");
+    fprintf(f, "    renderAll();\n");
     fprintf(f, "  });\n\n");
-    fprintf(f, "  canvas.addEventListener('click', (e) => {\n");
-    fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "    const xRatio = (e.clientX - rect.left) / rect.width;\n");
-    fprintf(f, "    audio.currentTime = xRatio * item.duration;\n");
+
+    fprintf(f, "  canvas.addEventListener('mousedown', (e) => {\n");
+    fprintf(f, "    if (e.button === 0) {\n");
+    fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "      const x = e.clientX - rect.left;\n");
+    fprintf(f, "      activeDrag = { index: item.index, startX: x, currentX: x };\n");
+    fprintf(f, "    }\n");
     fprintf(f, "  });\n\n");
-    fprintf(f, "  audio.addEventListener('timeupdate', render);\n");
-    fprintf(f, "  audio.addEventListener('play', render);\n");
-    fprintf(f, "  audio.addEventListener('pause', render);\n");
-    fprintf(f, "  window.addEventListener('resize', resize);\n");
-    fprintf(f, "  resize();\n");
-    fprintf(f, "});\n");
+
+    fprintf(f, "  canvas.addEventListener('contextmenu', (e) => {\n");
+    fprintf(f, "    e.preventDefault();\n");
+    fprintf(f, "    zoomOut();\n");
+    fprintf(f, "  });\n\n");
+
+    fprintf(f, "  audio.addEventListener('timeupdate', renderAll);\n");
+    fprintf(f, "  audio.addEventListener('play', renderAll);\n");
+    fprintf(f, "  audio.addEventListener('pause', renderAll);\n");
+    fprintf(f, "});\n\n");
+
+    fprintf(f, "window.addEventListener('mouseup', (e) => {\n");
+    fprintf(f, "  if (activeDrag) {\n");
+    fprintf(f, "    const canvas = document.getElementById('canvas-' + activeDrag.index);\n");
+    fprintf(f, "    if (canvas) {\n");
+    fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "      const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
+    fprintf(f, "      const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
+    fprintf(f, "      if (x2 - x1 > 8) {\n");
+    fprintf(f, "        const t1 = Math.max(0, xToTime(x1, rect.width));\n");
+    fprintf(f, "        const t2 = Math.min(maxSongDuration, xToTime(x2, rect.width));\n");
+    fprintf(f, "        if (t2 - t1 > 0.05) {\n");
+    fprintf(f, "          zoomHistory.push({ start: viewStart, end: viewEnd });\n");
+    fprintf(f, "          viewStart = t1;\n");
+    fprintf(f, "          viewEnd = t2;\n");
+    fprintf(f, "          updateViewInfo();\n");
+    fprintf(f, "        }\n");
+    fprintf(f, "      } else {\n");
+    fprintf(f, "        const clickTime = xToTime(activeDrag.startX, rect.width);\n");
+    fprintf(f, "        const audio = document.getElementById('audio-' + activeDrag.index);\n");
+    fprintf(f, "        if (audio) audio.currentTime = clickTime;\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    activeDrag = null;\n");
+    fprintf(f, "    renderAll();\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "});\n\n");
+
+    fprintf(f, "window.addEventListener('resize', renderAll);\n");
+    fprintf(f, "updateViewInfo();\n");
+    fprintf(f, "renderAll();\n");
     fprintf(f, "</script>\n");
     fprintf(f, "</body>\n</html>\n");
 
