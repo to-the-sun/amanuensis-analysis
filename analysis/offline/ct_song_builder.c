@@ -393,18 +393,15 @@ int main(int argc, char** argv) {
         const PatternInfo* pat = &patterns[idx];
 
         char dst_stem[4096];
-        char dst_rec[4096];
         snprintf(dst_stem, sizeof(dst_stem), "%.3500s" PATH_SEP_STR "%.500s", song_dir, pat->stem_filename);
-        snprintf(dst_rec, sizeof(dst_rec), "%.3500s" PATH_SEP_STR "%.500s", song_dir, pat->recombined_filename);
 
         bool ok_stem = copy_file(pat->stem_path, dst_stem);
-        bool ok_rec = copy_file(pat->recombined_path, dst_rec);
 
-        if (ok_stem && ok_rec) {
-            printf("  Copied: %s and %s\n", pat->stem_filename, pat->recombined_filename);
+        if (ok_stem) {
+            printf("  Copied: %s\n", pat->stem_filename);
             copy_success_count++;
         } else {
-            printf("  [Error] Failed copying %s or %s into [song]\n", pat->stem_filename, pat->recombined_filename);
+            printf("  [Error] Failed copying %s into [song]\n", pat->stem_filename);
         }
     }
 
