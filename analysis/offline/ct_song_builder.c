@@ -34,10 +34,15 @@ typedef struct {
     uint64_t total_frames;
     unsigned int sample_rate;
 
+    float* stem_samples;
+    uint64_t stem_total_frames;
+    unsigned int stem_sample_rate;
+
     uint64_t true_start;
     uint64_t true_end;
     uint64_t active_length;
     int original_index;
+    bool selected;
 } PatternInfo;
 
 static int mkdir_p(const char* path) {
@@ -236,6 +241,317 @@ static int collect_patterns(const char* dir_path, PatternInfo** out_patterns) {
     return count;
 }
 
+static void generate_correlation_html_report(
+    const char* work_dir,
+    const PatternInfo* patterns,
+    int num_patterns,
+    const int* selected_indices,
+    int num_selected,
+    double final_correlation
+) {
+    char html_path[4096];
+    snprintf(html_path, sizeof(html_path), "%.3500s" PATH_SEP_STR "song_correlation_report.html", work_dir);
+
+    FILE* f = fopen(html_path, "w");
+    if (!f) {
+        printf("[Warning] Could not create HTML report file: %s\n", html_path);
+        return;
+    }
+
+    fprintf(f, "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
+    fprintf(f, "<meta charset=\"UTF-8\">\n");
+    fprintf(f, "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
+    fprintf(f, "<title>CT Song Correlation Analysis Report</title>\n");
+    fprintf(f, "<style>\n");
+    fprintf(f, "  :root { --bg: #121216; --card-bg: #1a1a22; --border: #2a2a36; --text: #e1e1e6; --muted: #a0a0b0; --accent: #2196f3; }\n");
+    fprintf(f, "  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }\n");
+    fprintf(f, "  body { background: var(--bg); color: var(--text); padding: 20px; line-height: 1.5; }\n");
+    fprintf(f, "  header { background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 20px; }\n");
+    fprintf(f, "  h1 { font-size: 1.6rem; color: #fff; margin-bottom: 8px; }\n");
+    fprintf(f, "  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 15px; }\n");
+    fprintf(f, "  .stat-card { background: rgba(0,0,0,0.2); padding: 12px 16px; border-radius: 6px; border: 1px solid var(--border); }\n");
+    fprintf(f, "  .stat-label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }\n");
+    fprintf(f, "  .stat-value { font-size: 1.4rem; font-weight: bold; color: #fff; margin-top: 4px; }\n");
+    fprintf(f, "  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 15px; font-size: 0.85rem; padding-top: 12px; border-top: 1px solid var(--border); }\n");
+    fprintf(f, "  .legend-item { display: flex; align-items: center; gap: 8px; }\n");
+    fprintf(f, "  .legend-color { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }\n");
+    fprintf(f, "  .stem-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 20px; }\n");
+    fprintf(f, "  .stem-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }\n");
+    fprintf(f, "  .stem-title { font-size: 1.1rem; font-weight: bold; color: #fff; display: flex; align-items: center; gap: 10px; }\n");
+    fprintf(f, "  .badge { font-size: 0.75rem; padding: 3px 8px; border-radius: 4px; font-weight: 600; text-transform: uppercase; }\n");
+    fprintf(f, "  .badge-selected { background: #1b4d2e; color: #4caf50; border: 1px solid #2e7d32; }\n");
+    fprintf(f, "  .badge-rejected { background: #4a151b; color: #f44336; border: 1px solid #c62828; }\n");
+    fprintf(f, "  .stem-metrics { font-size: 0.85rem; color: var(--muted); font-family: monospace; display: flex; gap: 15px; }\n");
+    fprintf(f, "  audio { height: 32px; width: 300px; outline: none; }\n");
+    fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 160px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 10px; user-select: none; }\n");
+    fprintf(f, "  canvas { width: 100%%; height: 100%%; display: block; cursor: crosshair; }\n");
+    fprintf(f, "  .tooltip { position: absolute; top: 8px; right: 12px; background: rgba(10, 10, 15, 0.9); border: 1px solid #333344; padding: 6px 10px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; color: #fff; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 10; }\n");
+    fprintf(f, "</style>\n</head>\n<body>\n");
+
+    fprintf(f, "<header>\n");
+    fprintf(f, "  <h1>CT Song Correlation Analysis Report</h1>\n");
+    fprintf(f, "  <div class=\"summary-grid\">\n");
+    fprintf(f, "    <div class=\"stat-card\">\n");
+    fprintf(f, "      <div class=\"stat-label\">Candidate Patterns</div>\n");
+    fprintf(f, "      <div class=\"stat-value\">%d</div>\n", num_patterns);
+    fprintf(f, "    </div>\n");
+    fprintf(f, "    <div class=\"stat-card\">\n");
+    fprintf(f, "      <div class=\"stat-label\">Selected Song Stems</div>\n");
+    fprintf(f, "      <div class=\"stat-value\">%d</div>\n", num_selected);
+    fprintf(f, "    </div>\n");
+    fprintf(f, "    <div class=\"stat-card\">\n");
+    fprintf(f, "      <div class=\"stat-label\">Final Song Correlation</div>\n");
+    fprintf(f, "      <div class=\"stat-value\" style=\"color: #2196f3;\">%.2f%%</div>\n", final_correlation);
+    fprintf(f, "    </div>\n");
+    fprintf(f, "  </div>\n");
+    fprintf(f, "  <div class=\"legend\">\n");
+    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: rgba(120,120,150,0.35); border: 1px solid rgba(150,150,180,0.5);\"></span> Output Audio Waveform (Background)</div>\n");
+    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Stem Correlation Capacity (|S_i(t)|)</div>\n");
+    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Actual Overlapping Correlation (&sum;<sub>j &ne; i</sub> |S_j(t)|)</div>\n");
+    fprintf(f, "  </div>\n");
+    fprintf(f, "</header>\n");
+
+    fprintf(f, "<main>\n");
+
+    int target_bins = 1000;
+
+    for (int i = 0; i < num_patterns; i++) {
+        const PatternInfo* pat = &patterns[i];
+        if (!pat->recombined_samples || pat->total_frames == 0) continue;
+
+        double duration_s = pat->sample_rate > 0 ? (double)pat->total_frames / pat->sample_rate : 0.0;
+
+        fprintf(f, "  <div class=\"stem-card\">\n");
+        fprintf(f, "    <div class=\"stem-header\">\n");
+        fprintf(f, "      <div class=\"stem-title\">\n");
+        fprintf(f, "        <span>%s</span>\n", pat->stem_filename);
+        if (pat->selected) {
+            fprintf(f, "        <span class=\"badge badge-selected\">Selected in Song</span>\n");
+        } else {
+            fprintf(f, "        <span class=\"badge badge-rejected\">Rejected</span>\n");
+        }
+        fprintf(f, "      </div>\n");
+        fprintf(f, "      <div style=\"display: flex; align-items: center; gap: 15px;\">\n");
+        fprintf(f, "        <div class=\"stem-metrics\">Duration: %.2fs | Active: %.2fs</div>\n",
+                duration_s,
+                pat->sample_rate > 0 ? (double)pat->active_length / pat->sample_rate : 0.0);
+        fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, i);
+        fprintf(f, "      </div>\n");
+        fprintf(f, "    </div>\n");
+
+        fprintf(f, "    <div class=\"canvas-container\" id=\"container-%d\">\n", i);
+        fprintf(f, "      <canvas id=\"canvas-%d\"></canvas>\n", i);
+        fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", i);
+        fprintf(f, "    </div>\n");
+        fprintf(f, "  </div>\n");
+    }
+
+    fprintf(f, "</main>\n");
+
+    fprintf(f, "<script>\n");
+    fprintf(f, "const patternsData = [\n");
+
+    for (int i = 0; i < num_patterns; i++) {
+        const PatternInfo* pat_i = &patterns[i];
+        if (!pat_i->recombined_samples || pat_i->total_frames == 0) continue;
+
+        uint64_t total_frames = pat_i->total_frames;
+        double duration_s = pat_i->sample_rate > 0 ? (double)total_frames / pat_i->sample_rate : 0.0;
+
+        fprintf(f, "  {\n");
+        fprintf(f, "    index: %d,\n", i);
+        fprintf(f, "    filename: \"%s\",\n", pat_i->stem_filename);
+        fprintf(f, "    duration: %.4f,\n", duration_s);
+
+        fprintf(f, "    waveformMin: [");
+        for (int b = 0; b < target_bins; b++) {
+            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
+            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
+            if (end_frame <= start_frame) end_frame = start_frame + 1;
+            if (end_frame > pat_i->stem_total_frames && pat_i->stem_samples) end_frame = pat_i->stem_total_frames;
+
+            float min_val = 0.0f;
+            if (pat_i->stem_samples && start_frame < pat_i->stem_total_frames) {
+                min_val = pat_i->stem_samples[start_frame];
+                for (uint64_t s = start_frame; s < end_frame; s++) {
+                    if (pat_i->stem_samples[s] < min_val) min_val = pat_i->stem_samples[s];
+                }
+            }
+            fprintf(f, "%.4f%s", min_val, (b < target_bins - 1) ? "," : "");
+        }
+        fprintf(f, "],\n");
+
+        fprintf(f, "    waveformMax: [");
+        for (int b = 0; b < target_bins; b++) {
+            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
+            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
+            if (end_frame <= start_frame) end_frame = start_frame + 1;
+            if (end_frame > pat_i->stem_total_frames && pat_i->stem_samples) end_frame = pat_i->stem_total_frames;
+
+            float max_val = 0.0f;
+            if (pat_i->stem_samples && start_frame < pat_i->stem_total_frames) {
+                max_val = pat_i->stem_samples[start_frame];
+                for (uint64_t s = start_frame; s < end_frame; s++) {
+                    if (pat_i->stem_samples[s] > max_val) max_val = pat_i->stem_samples[s];
+                }
+            }
+            fprintf(f, "%.4f%s", max_val, (b < target_bins - 1) ? "," : "");
+        }
+        fprintf(f, "],\n");
+
+        fprintf(f, "    capacity: [");
+        for (int b = 0; b < target_bins; b++) {
+            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
+            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
+            if (end_frame <= start_frame) end_frame = start_frame + 1;
+            if (end_frame > total_frames) end_frame = total_frames;
+
+            double max_cap = 0.0;
+            for (uint64_t s = start_frame; s < end_frame; s++) {
+                double cap = fabsf(pat_i->recombined_samples[s]);
+                if (cap > max_cap) max_cap = cap;
+            }
+            fprintf(f, "%.4f%s", max_cap, (b < target_bins - 1) ? "," : "");
+        }
+        fprintf(f, "],\n");
+
+        fprintf(f, "    actualCorrelation: [");
+        for (int b = 0; b < target_bins; b++) {
+            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
+            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
+            if (end_frame <= start_frame) end_frame = start_frame + 1;
+            if (end_frame > total_frames) end_frame = total_frames;
+
+            double max_corr = 0.0;
+            for (uint64_t s = start_frame; s < end_frame; s++) {
+                double sum_other = 0.0;
+                for (int j = 0; j < num_selected; j++) {
+                    int idx_j = selected_indices[j];
+                    if (idx_j == i) continue;
+                    const PatternInfo* pat_j = &patterns[idx_j];
+                    if (s < pat_j->total_frames && pat_j->recombined_samples) {
+                        double cap_j = fabsf(pat_j->recombined_samples[s]);
+                        if (cap_j > 1e-6) {
+                            sum_other += cap_j;
+                        }
+                    }
+                }
+                if (sum_other > max_corr) max_corr = sum_other;
+            }
+            fprintf(f, "%.4f%s", max_corr, (b < target_bins - 1) ? "," : "");
+        }
+        fprintf(f, "]\n  }%s\n", (i < num_patterns - 1) ? "," : "");
+    }
+
+    fprintf(f, "];\n\n");
+
+    fprintf(f, "patternsData.forEach(item => {\n");
+    fprintf(f, "  const canvas = document.getElementById('canvas-' + item.index);\n");
+    fprintf(f, "  const tooltip = document.getElementById('tooltip-' + item.index);\n");
+    fprintf(f, "  const audio = document.getElementById('audio-' + item.index);\n");
+    fprintf(f, "  if (!canvas || !audio) return;\n\n");
+    fprintf(f, "  const ctx = canvas.getContext('2d');\n");
+    fprintf(f, "  let mouseX = -1;\n\n");
+    fprintf(f, "  function resize() {\n");
+    fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "    canvas.width = rect.width * window.devicePixelRatio;\n");
+    fprintf(f, "    canvas.height = rect.height * window.devicePixelRatio;\n");
+    fprintf(f, "    render();\n");
+    fprintf(f, "  }\n\n");
+    fprintf(f, "  function render() {\n");
+    fprintf(f, "    const w = canvas.width;\n");
+    fprintf(f, "    const h = canvas.height;\n");
+    fprintf(f, "    ctx.clearRect(0, 0, w, h);\n\n");
+    fprintf(f, "    // Background Waveform\n");
+    fprintf(f, "    ctx.fillStyle = 'rgba(120, 120, 160, 0.28)';\n");
+    fprintf(f, "    const midY = h / 2;\n");
+    fprintf(f, "    const numBins = item.waveformMin.length;\n");
+    fprintf(f, "    for (let i = 0; i < numBins; i++) {\n");
+    fprintf(f, "      const x = (i / numBins) * w;\n");
+    fprintf(f, "      const binW = Math.max(1, w / numBins);\n");
+    fprintf(f, "      const minVal = item.waveformMin[i];\n");
+    fprintf(f, "      const maxVal = item.waveformMax[i];\n");
+    fprintf(f, "      const y1 = midY - (maxVal * (h / 2) * 0.85);\n");
+    fprintf(f, "      const y2 = midY - (minVal * (h / 2) * 0.85);\n");
+    fprintf(f, "      ctx.fillRect(x, y1, binW, Math.max(1, y2 - y1));\n");
+    fprintf(f, "    }\n\n");
+    fprintf(f, "    // Correlation Capacity Envelope (Orange)\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = '#ff9800';\n");
+    fprintf(f, "    ctx.lineWidth = 2 * window.devicePixelRatio;\n");
+    fprintf(f, "    for (let i = 0; i < numBins; i++) {\n");
+    fprintf(f, "      const x = (i / (numBins - 1)) * w;\n");
+    fprintf(f, "      const cap = item.capacity[i];\n");
+    fprintf(f, "      const y = h - (cap * h * 0.88) - (4 * window.devicePixelRatio);\n");
+    fprintf(f, "      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n\n");
+    fprintf(f, "    // Actual Overlapping Correlation Envelope (Green)\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    ctx.strokeStyle = '#00e676';\n");
+    fprintf(f, "    ctx.lineWidth = 2 * window.devicePixelRatio;\n");
+    fprintf(f, "    for (let i = 0; i < numBins; i++) {\n");
+    fprintf(f, "      const x = (i / (numBins - 1)) * w;\n");
+    fprintf(f, "      const corr = item.actualCorrelation[i];\n");
+    fprintf(f, "      const y = h - (corr * h * 0.88) - (4 * window.devicePixelRatio);\n");
+    fprintf(f, "      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n\n");
+    fprintf(f, "    // Audio Playhead\n");
+    fprintf(f, "    if (item.duration > 0 && audio.currentTime > 0) {\n");
+    fprintf(f, "      const playX = (audio.currentTime / item.duration) * w;\n");
+    fprintf(f, "      ctx.strokeStyle = '#ffffff';\n");
+    fprintf(f, "      ctx.lineWidth = 1.5 * window.devicePixelRatio;\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      ctx.moveTo(playX, 0);\n");
+    fprintf(f, "      ctx.lineTo(playX, h);\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "    }\n\n");
+    fprintf(f, "    // Hover Line & Tooltip\n");
+    fprintf(f, "    if (mouseX >= 0) {\n");
+    fprintf(f, "      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';\n");
+    fprintf(f, "      ctx.lineWidth = 1 * window.devicePixelRatio;\n");
+    fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      ctx.moveTo(mouseX, 0);\n");
+    fprintf(f, "      ctx.lineTo(mouseX, h);\n");
+    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n\n");
+    fprintf(f, "  canvas.addEventListener('mousemove', (e) => {\n");
+    fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "    const xRatio = (e.clientX - rect.left) / rect.width;\n");
+    fprintf(f, "    mouseX = xRatio * canvas.width;\n");
+    fprintf(f, "    const timeS = xRatio * item.duration;\n");
+    fprintf(f, "    const binIdx = Math.min(item.capacity.length - 1, Math.max(0, Math.floor(xRatio * item.capacity.length)));\n");
+    fprintf(f, "    const capVal = item.capacity[binIdx];\n");
+    fprintf(f, "    const corrVal = item.actualCorrelation[binIdx];\n");
+    fprintf(f, "    tooltip.style.opacity = '1';\n");
+    fprintf(f, "    tooltip.innerHTML = `Time: ${timeS.toFixed(3)}s<br>Capacity: ${capVal.toFixed(3)}<br>Overlap Corr: ${corrVal.toFixed(3)}`;\n");
+    fprintf(f, "    render();\n");
+    fprintf(f, "  });\n\n");
+    fprintf(f, "  canvas.addEventListener('mouseleave', () => {\n");
+    fprintf(f, "    mouseX = -1;\n");
+    fprintf(f, "    tooltip.style.opacity = '0';\n");
+    fprintf(f, "    render();\n");
+    fprintf(f, "  });\n\n");
+    fprintf(f, "  canvas.addEventListener('click', (e) => {\n");
+    fprintf(f, "    const rect = canvas.getBoundingClientRect();\n");
+    fprintf(f, "    const xRatio = (e.clientX - rect.left) / rect.width;\n");
+    fprintf(f, "    audio.currentTime = xRatio * item.duration;\n");
+    fprintf(f, "  });\n\n");
+    fprintf(f, "  audio.addEventListener('timeupdate', render);\n");
+    fprintf(f, "  audio.addEventListener('play', render);\n");
+    fprintf(f, "  audio.addEventListener('pause', render);\n");
+    fprintf(f, "  window.addEventListener('resize', resize);\n");
+    fprintf(f, "  resize();\n");
+    fprintf(f, "});\n");
+    fprintf(f, "</script>\n");
+    fprintf(f, "</body>\n</html>\n");
+
+    fclose(f);
+    printf("Successfully generated correlation HTML report: %s\n", html_path);
+}
+
 int main(int argc, char** argv) {
     const char* work_dir = ".";
     if (argc > 1 && argv[1][0] != '\0') {
@@ -282,48 +598,82 @@ int main(int argc, char** argv) {
             pat->true_start = 0;
             pat->true_end = 0;
             pat->active_length = 0;
-            continue;
-        }
-
-        if (channels > 1) {
-            float* mono_data = (float*)malloc(total_pcm_frames * sizeof(float));
-            for (drwav_uint64 f = 0; f < total_pcm_frames; f++) {
-                float sum = 0.0f;
-                for (unsigned int c = 0; c < channels; c++) {
-                    sum += sample_data[f * channels + c];
-                }
-                mono_data[f] = sum / (float)channels;
-            }
-            drwav_free(sample_data, NULL);
-            sample_data = mono_data;
-        }
-
-        pat->recombined_samples = sample_data;
-        pat->total_frames = total_pcm_frames;
-        pat->sample_rate = sample_rate;
-
-        bool found_start = false;
-        uint64_t t_start = 0;
-        uint64_t t_end = 0;
-
-        for (uint64_t s = 0; s < total_pcm_frames; s++) {
-            if (fabsf(sample_data[s]) > 1e-6f) {
-                if (!found_start) {
-                    t_start = s;
-                    found_start = true;
-                }
-                t_end = s;
-            }
-        }
-
-        if (found_start) {
-            pat->true_start = t_start;
-            pat->true_end = t_end;
-            pat->active_length = t_end - t_start + 1;
         } else {
-            pat->true_start = 0;
-            pat->true_end = 0;
-            pat->active_length = 0;
+            if (channels > 1) {
+                float* mono_data = (float*)malloc(total_pcm_frames * sizeof(float));
+                for (drwav_uint64 f = 0; f < total_pcm_frames; f++) {
+                    float sum = 0.0f;
+                    for (unsigned int c = 0; c < channels; c++) {
+                        sum += sample_data[f * channels + c];
+                    }
+                    mono_data[f] = sum / (float)channels;
+                }
+                drwav_free(sample_data, NULL);
+                sample_data = mono_data;
+            }
+
+            pat->recombined_samples = sample_data;
+            pat->total_frames = total_pcm_frames;
+            pat->sample_rate = sample_rate;
+
+            bool found_start = false;
+            uint64_t t_start = 0;
+            uint64_t t_end = 0;
+
+            for (uint64_t s = 0; s < total_pcm_frames; s++) {
+                if (fabsf(sample_data[s]) > 1e-6f) {
+                    if (!found_start) {
+                        t_start = s;
+                        found_start = true;
+                    }
+                    t_end = s;
+                }
+            }
+
+            if (found_start) {
+                pat->true_start = t_start;
+                pat->true_end = t_end;
+                pat->active_length = t_end - t_start + 1;
+            } else {
+                pat->true_start = 0;
+                pat->true_end = 0;
+                pat->active_length = 0;
+            }
+        }
+
+        // Load Stem WAV Audio Data for Waveform Display
+        drwav_uint64 stem_pcm_frames = 0;
+        unsigned int stem_channels = 0;
+        unsigned int stem_sr = 0;
+
+        float* stem_data = drwav_open_file_and_read_pcm_frames_f32(
+            pat->stem_path,
+            &stem_channels,
+            &stem_sr,
+            &stem_pcm_frames,
+            NULL
+        );
+
+        if (stem_data && stem_pcm_frames > 0) {
+            if (stem_channels > 1) {
+                float* mono_stem = (float*)malloc(stem_pcm_frames * sizeof(float));
+                for (drwav_uint64 f = 0; f < stem_pcm_frames; f++) {
+                    float sum = 0.0f;
+                    for (unsigned int c = 0; c < stem_channels; c++) {
+                        sum += stem_data[f * stem_channels + c];
+                    }
+                    mono_stem[f] = sum / (float)stem_channels;
+                }
+                drwav_free(stem_data, NULL);
+                stem_data = mono_stem;
+            }
+            pat->stem_samples = stem_data;
+            pat->stem_total_frames = stem_pcm_frames;
+            pat->stem_sample_rate = stem_sr;
+        } else {
+            pat->stem_samples = NULL;
+            pat->stem_total_frames = 0;
+            pat->stem_sample_rate = 0;
         }
 
         printf("  [%d] %s\n", i + 1, pat->stem_filename);
@@ -355,6 +705,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < num_patterns; i++) {
         if (patterns[i].active_length == 0) {
             printf("[Skip] %s has 0 active length.\n", patterns[i].stem_filename);
+            patterns[i].selected = false;
             continue;
         }
 
@@ -368,14 +719,17 @@ int main(int argc, char** argv) {
         if (num_selected == 0) {
             selected_indices[num_selected++] = i;
             current_song_correlation = proposed_corr;
+            patterns[i].selected = true;
             printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation: %.2f%%\n",
                    patterns[i].stem_filename, i + 1, current_song_correlation);
         } else if (proposed_corr > current_song_correlation) {
             selected_indices[num_selected++] = i;
+            patterns[i].selected = true;
             printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.2f%% -> %.2f%%\n",
                    patterns[i].stem_filename, i + 1, current_song_correlation, proposed_corr);
             current_song_correlation = proposed_corr;
         } else {
+            patterns[i].selected = false;
             printf("[REJECT] %s (Rank %d) proposed correlation %.2f%% <= current %.2f%%\n",
                    patterns[i].stem_filename, i + 1, proposed_corr, current_song_correlation);
         }
@@ -408,6 +762,16 @@ int main(int argc, char** argv) {
         }
     }
 
+    printf("\nGenerating correlation HTML report...\n");
+    generate_correlation_html_report(
+        work_dir,
+        patterns,
+        num_patterns,
+        selected_indices,
+        num_selected,
+        current_song_correlation
+    );
+
     printf("\n=====================================================\n");
     printf("                  Song Summary                       \n");
     printf("=====================================================\n");
@@ -420,6 +784,9 @@ int main(int argc, char** argv) {
     for (int i = 0; i < num_patterns; i++) {
         if (patterns[i].recombined_samples) {
             drwav_free(patterns[i].recombined_samples, NULL);
+        }
+        if (patterns[i].stem_samples) {
+            drwav_free(patterns[i].stem_samples, NULL);
         }
     }
     free(patterns);
