@@ -43,6 +43,7 @@ typedef struct {
     uint64_t active_length;
     int original_index;
     bool selected;
+    int selection_order;
 
     double judgment_stem_corr_sum;
     double judgment_stem_cap_sum;
@@ -539,6 +540,7 @@ static void generate_correlation_html_report(
         fprintf(f, "      index: %d,\n", i);
         fprintf(f, "      filename: \"%s\",\n", pat_i->stem_filename);
         fprintf(f, "      selected: %s,\n", pat_i->selected ? "true" : "false");
+        fprintf(f, "      selectionOrder: %d,\n", pat_i->selection_order);
         fprintf(f, "      duration: %.4f,\n", duration_s);
         fprintf(f, "      sampleRate: %u,\n", pat_i->sample_rate);
         fprintf(f, "      totalSamples: %llu\n", (unsigned long long)pat_i->total_frames);
@@ -593,7 +595,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "      const st = DATA.stems[i];\n");
     fprintf(f, "      if (!st.capacity) continue;\n");
-    fprintf(f, "      const priorSelected = DATA.stems.filter(p => p.index < st.index && p.selected && p.capacity);\n");
+    fprintf(f, "      const priorSelected = DATA.stems.filter(p => p.selected && p.selectionOrder < st.selectionOrder && p.capacity);\n");
     fprintf(f, "      const corrBuf = new Float32Array(st.capacity.length);\n");
     fprintf(f, "      for (let s = 0; s < st.capacity.length; s++) {\n");
     fprintf(f, "        const cap_i = st.capacity[s];\n");
@@ -1076,56 +1078,126 @@ int main(int argc, char** argv) {
 
     int* test_set = (int*)malloc((size_t)num_patterns * sizeof(int));
 
+    // Step 1: Identify seed pattern (longest pattern with active_length > 0)
+    int seed_idx = -1;
     for (int i = 0; i < num_patterns; i++) {
-        if (patterns[i].active_length == 0) {
+        if (patterns[i].active_length > 0) {
+            seed_idx = i;
+            break;
+        } else {
             printf("[Skip] %s has 0 active length.\n", patterns[i].stem_filename);
             patterns[i].selected = false;
+            patterns[i].selection_order = num_patterns;
             patterns[i].judgment_stem_corr_sum = 0.0;
             patterns[i].judgment_stem_cap_sum = 0.0;
             patterns[i].judgment_stem_corr_pct = 0.0;
             patterns[i].judgment_overall_corr_sum = 0.0;
             patterns[i].judgment_overall_cap_sum = 0.0;
             patterns[i].judgment_overall_corr_pct = 0.0;
-            continue;
         }
+    }
 
-        compute_judgment_time_correlation_samples(&patterns[i], patterns, selected_indices, num_selected);
+    if (seed_idx != -1) {
+        compute_judgment_time_correlation_samples(&patterns[seed_idx], patterns, selected_indices, 0);
 
-        for (int k = 0; k < num_selected; k++) {
-            test_set[k] = selected_indices[k];
-        }
-        test_set[num_selected] = i;
-
+        test_set[0] = seed_idx;
         double overall_corr_sum = 0.0;
         double overall_cap_sum = 0.0;
         double proposed_corr = compute_correlation_ext(
             patterns,
             test_set,
-            num_selected + 1,
+            1,
             &overall_corr_sum,
             &overall_cap_sum
         );
 
-        patterns[i].judgment_overall_corr_sum = overall_corr_sum;
-        patterns[i].judgment_overall_cap_sum = overall_cap_sum;
-        patterns[i].judgment_overall_corr_pct = proposed_corr;
+        patterns[seed_idx].selected = true;
+        patterns[seed_idx].selection_order = num_selected; // 0
+        patterns[seed_idx].judgment_overall_corr_sum = overall_corr_sum;
+        patterns[seed_idx].judgment_overall_cap_sum = overall_cap_sum;
+        patterns[seed_idx].judgment_overall_corr_pct = proposed_corr;
 
-        if (num_selected == 0) {
-            selected_indices[num_selected++] = i;
-            current_song_correlation = proposed_corr;
-            patterns[i].selected = true;
-            printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation: %.2f%%\n",
-                   patterns[i].stem_filename, i + 1, current_song_correlation);
-        } else if (proposed_corr > current_song_correlation) {
-            selected_indices[num_selected++] = i;
-            patterns[i].selected = true;
+        selected_indices[num_selected++] = seed_idx;
+        current_song_correlation = proposed_corr;
+
+        printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation: %.2f%%\n",
+               patterns[seed_idx].stem_filename, seed_idx + 1, current_song_correlation);
+    }
+
+    // Step 2: Iteratively find the unselected candidate pattern that yields highest song correlation increase
+    while (num_selected < num_patterns) {
+        int best_candidate = -1;
+        double best_proposed_corr = current_song_correlation;
+        double best_overall_corr_sum = 0.0;
+        double best_overall_cap_sum = 0.0;
+        double best_stem_corr_sum = 0.0;
+        double best_stem_cap_sum = 0.0;
+        double best_stem_corr_pct = 0.0;
+
+        for (int i = 0; i < num_patterns; i++) {
+            if (patterns[i].selected || patterns[i].active_length == 0) {
+                continue;
+            }
+
+            compute_judgment_time_correlation_samples(&patterns[i], patterns, selected_indices, num_selected);
+
+            for (int k = 0; k < num_selected; k++) {
+                test_set[k] = selected_indices[k];
+            }
+            test_set[num_selected] = i;
+
+            double overall_corr_sum = 0.0;
+            double overall_cap_sum = 0.0;
+            double proposed_corr = compute_correlation_ext(
+                patterns,
+                test_set,
+                num_selected + 1,
+                &overall_corr_sum,
+                &overall_cap_sum
+            );
+
+            patterns[i].judgment_overall_corr_sum = overall_corr_sum;
+            patterns[i].judgment_overall_cap_sum = overall_cap_sum;
+            patterns[i].judgment_overall_corr_pct = proposed_corr;
+
+            if (proposed_corr > best_proposed_corr) {
+                best_candidate = i;
+                best_proposed_corr = proposed_corr;
+                best_overall_corr_sum = overall_corr_sum;
+                best_overall_cap_sum = overall_cap_sum;
+                best_stem_corr_sum = patterns[i].judgment_stem_corr_sum;
+                best_stem_cap_sum = patterns[i].judgment_stem_cap_sum;
+                best_stem_corr_pct = patterns[i].judgment_stem_corr_pct;
+            }
+        }
+
+        if (best_candidate != -1 && best_proposed_corr > current_song_correlation) {
+            patterns[best_candidate].selected = true;
+            patterns[best_candidate].selection_order = num_selected;
+            patterns[best_candidate].judgment_stem_corr_sum = best_stem_corr_sum;
+            patterns[best_candidate].judgment_stem_cap_sum = best_stem_cap_sum;
+            patterns[best_candidate].judgment_stem_corr_pct = best_stem_corr_pct;
+            patterns[best_candidate].judgment_overall_corr_sum = best_overall_corr_sum;
+            patterns[best_candidate].judgment_overall_cap_sum = best_overall_cap_sum;
+            patterns[best_candidate].judgment_overall_corr_pct = best_proposed_corr;
+
+            selected_indices[num_selected++] = best_candidate;
             printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.2f%% -> %.2f%%\n",
-                   patterns[i].stem_filename, i + 1, current_song_correlation, proposed_corr);
-            current_song_correlation = proposed_corr;
+                   patterns[best_candidate].stem_filename, best_candidate + 1, current_song_correlation, best_proposed_corr);
+            current_song_correlation = best_proposed_corr;
         } else {
-            patterns[i].selected = false;
-            printf("[REJECT] %s (Rank %d) proposed correlation %.2f%% <= current %.2f%%\n",
-                   patterns[i].stem_filename, i + 1, proposed_corr, current_song_correlation);
+            break;
+        }
+    }
+
+    // Mark remaining unselected patterns and log rejection
+    for (int i = 0; i < num_patterns; i++) {
+        if (!patterns[i].selected) {
+            patterns[i].selection_order = num_selected;
+            if (patterns[i].active_length > 0) {
+                printf("[REJECT] %s (Rank %d) best proposed correlation %.2f%% <= current %.2f%%\n",
+                       patterns[i].stem_filename, i + 1, patterns[i].judgment_overall_corr_pct, current_song_correlation);
+            }
         }
     }
 
