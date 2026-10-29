@@ -82,6 +82,26 @@ static bool file_exists(const char* filepath) {
     return false;
 }
 
+static void url_encode_filename(const char* src, char* dst, size_t dst_size) {
+    size_t d = 0;
+    while (*src && d + 3 < dst_size) {
+        unsigned char c = (unsigned char)*src;
+        if (c == '#') {
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = '3';
+        } else if (c == '%') {
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = '5';
+        } else if (c == '?') {
+            dst[d++] = '%'; dst[d++] = '3'; dst[d++] = 'F';
+        } else if (c == ' ') {
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = '0';
+        } else {
+            dst[d++] = c;
+        }
+        src++;
+    }
+    dst[d] = '\0';
+}
+
 static bool copy_file(const char* src_path, const char* dst_path) {
     FILE* src = fopen(src_path, "rb");
     if (!src) return false;
@@ -526,7 +546,9 @@ static void generate_correlation_html_report(
                 pat->judgment_overall_cap_sum,
                 pat->judgment_overall_corr_pct);
         fprintf(f, "        </div>\n");
-        fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, d);
+        char encoded_stem_filename[2048];
+        url_encode_filename(pat->stem_filename, encoded_stem_filename, sizeof(encoded_stem_filename));
+        fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", encoded_stem_filename, d);
         fprintf(f, "      </div>\n");
         fprintf(f, "    </div>\n");
 
@@ -553,6 +575,8 @@ static void generate_correlation_html_report(
         if (!pat_i->recombined_samples || pat_i->total_frames == 0) continue;
 
         double duration_s = pat_i->sample_rate > 0 ? (double)pat_i->total_frames / pat_i->sample_rate : 0.0;
+        double active_start_s = pat_i->sample_rate > 0 ? (double)pat_i->true_start / pat_i->sample_rate : 0.0;
+        double active_end_s = pat_i->sample_rate > 0 ? (double)pat_i->true_end / pat_i->sample_rate : 0.0;
 
         fprintf(f, "    {\n");
         fprintf(f, "      index: %d,\n", d);
@@ -560,6 +584,8 @@ static void generate_correlation_html_report(
         fprintf(f, "      selected: %s,\n", pat_i->selected ? "true" : "false");
         fprintf(f, "      selectionOrder: %d,\n", pat_i->selection_order);
         fprintf(f, "      duration: %.4f,\n", duration_s);
+        fprintf(f, "      activeStart: %.4f,\n", active_start_s);
+        fprintf(f, "      activeEnd: %.4f,\n", active_end_s);
         fprintf(f, "      sampleRate: %u,\n", pat_i->sample_rate);
         fprintf(f, "      totalSamples: %llu\n", (unsigned long long)pat_i->total_frames);
         fprintf(f, "    }%s\n", (d + 1 < num_patterns) ? "," : "");
@@ -918,7 +944,10 @@ static void generate_correlation_html_report(
     fprintf(f, "        renderAll();\n");
     fprintf(f, "      } else {\n");
     fprintf(f, "        const clickTime = xToTime(x1, rect.width);\n");
-    fprintf(f, "        if (audio) audio.currentTime = clickTime;\n");
+        fprintf(f, "        if (audio) {\n");
+        fprintf(f, "          audio.currentTime = clickTime;\n");
+        fprintf(f, "          audio.play().catch(() => {});\n");
+        fprintf(f, "        }\n");
     fprintf(f, "        renderCanvas(idx);\n");
     fprintf(f, "      }\n");
     fprintf(f, "    }\n");
@@ -930,8 +959,13 @@ static void generate_correlation_html_report(
     fprintf(f, "  });\n");
 
     fprintf(f, "  if (audio) {\n");
+    fprintf(f, "    audio.addEventListener('play', () => {\n");
+    fprintf(f, "      if (stem.activeStart !== undefined && audio.currentTime < stem.activeStart) {\n");
+    fprintf(f, "        audio.currentTime = stem.activeStart;\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "      renderAll();\n");
+    fprintf(f, "    });\n");
     fprintf(f, "    audio.addEventListener('timeupdate', renderAll);\n");
-    fprintf(f, "    audio.addEventListener('play', renderAll);\n");
     fprintf(f, "    audio.addEventListener('pause', renderAll);\n");
     fprintf(f, "  }\n");
     fprintf(f, "});\n\n");
