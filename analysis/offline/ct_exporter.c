@@ -957,7 +957,8 @@ static double compute_total_correlation(
 ) {
     if (!candidates || !active_mask || !rec_buf || rec_len <= 0 || sr <= 0) return 0.0;
 
-    double total_corr = 0.0;
+    double total_corr_sum = 0.0;
+    double total_cap_sum = 0.0;
 
     for (int p = 0; p < num_candidates; p++) {
         if (!active_mask[p]) continue;
@@ -991,12 +992,14 @@ static double compute_total_correlation(
             if (overlap_count > 0) {
                 double corr = (double)sum_other / (double)cap;
                 if (corr > 1.0) corr = 1.0;
-                total_corr += corr;
+                total_corr_sum += corr;
+                total_cap_sum += (double)cap;
             }
         }
     }
 
-    return total_corr;
+    if (total_cap_sum <= 0.0) return 0.0;
+    return total_corr_sum / total_cap_sum;
 }
 
 static void process_song_building_and_export(
@@ -1092,7 +1095,7 @@ static void process_song_building_and_export(
     snprintf(song_dir, sizeof(song_dir), "%s" PATH_SEP_STR "[song]", stems_dir);
     mkdir_p(song_dir);
 
-    printf("[Song Selection] Selected %d of %d pattern(s) into [song] (Total Correlation: %.4f)\n", active_cnt, num_patterns, current_best_corr);
+    printf("[Song Selection] Selected %d of %d pattern(s) into [song] (Total Correlation: %.2f%%)\n", active_cnt, num_patterns, current_best_corr * 100.0);
 
     const char* pref = prefix ? prefix : "";
 
