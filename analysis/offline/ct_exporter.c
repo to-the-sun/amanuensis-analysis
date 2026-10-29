@@ -344,60 +344,220 @@ static int find_recombined_audio_for_original(const char* exe_dir, const char* o
     return 0;
 }
 
-static float* load_recombined_audio(const char* exe_dir, const char* orig_audio_filepath, int* out_len, int* out_sr) {
-    if (!exe_dir || !orig_audio_filepath || !out_len || !out_sr) return NULL;
+static void write_loop_pattern_wav_from_file(
+    const char* pat_wav_path,
+    const char* src_wav_path,
+    double start_ms,
+    double end_ms
+) {
+    if (!pat_wav_path || !src_wav_path || src_wav_path[0] == '\0') return;
 
-    char rec_path[4096] = "";
-    if (!find_recombined_audio_for_original(exe_dir, orig_audio_filepath, rec_path, sizeof(rec_path))) {
-        return NULL;
-    }
+    drwav wav_in;
+    if (!drwav_init_file(&wav_in, src_wav_path, NULL)) return;
 
-    unsigned int rec_ch = 0, rec_sr = 0;
-    drwav_uint64 rec_frames = 0;
-    float* rec_pcm = drwav_open_file_and_read_pcm_frames_f32(rec_path, &rec_ch, &rec_sr, &rec_frames, NULL);
+    uint32_t num_ch = wav_in.channels;
+    uint32_t pat_sr = wav_in.sampleRate;
+    uint64_t pat_len = wav_in.totalPCMFrameCount;
 
-    if (!rec_pcm || rec_frames == 0 || rec_sr == 0) {
-        if (rec_pcm) drwav_free(rec_pcm, NULL);
-        return NULL;
-    }
+    uint64_t start_smp = (uint64_t)round((start_ms / 1000.0) * pat_sr);
+    uint64_t end_smp = (uint64_t)round((end_ms / 1000.0) * pat_sr);
+    if (start_smp >= pat_len) start_smp = pat_len > 0 ? pat_len - 1 : 0;
+    if (end_smp > pat_len) end_smp = pat_len;
+    uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
 
-    float* rec_buf = (float*)malloc(rec_frames * sizeof(float));
-    if (!rec_buf) {
-        drwav_free(rec_pcm, NULL);
-        return NULL;
-    }
+    drwav_seek_to_pcm_frame(&wav_in, start_smp);
 
-    *out_len = (int)rec_frames;
-    *out_sr = (int)rec_sr;
+    drwav_data_format format;
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_PCM;
+    format.channels = 1;
+    format.sampleRate = pat_sr;
+    format.bitsPerSample = 16;
 
-    if (rec_ch == 1) {
-        memcpy(rec_buf, rec_pcm, rec_frames * sizeof(float));
-    } else {
-        for (drwav_uint64 f = 0; f < rec_frames; f++) {
-            double sum = 0.0;
-            for (unsigned int ch_i = 0; ch_i < rec_ch; ch_i++) {
-                sum += rec_pcm[f * rec_ch + ch_i];
+    drwav wav_out;
+    if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
+        float f32_chunk[8192 * 16];
+        int16_t pcm16_chunk[8192];
+        uint64_t remaining = frame_count;
+
+        while (remaining > 0) {
+            uint64_t to_read = (remaining < 8192) ? remaining : 8192;
+            drwav_uint64 read_cnt = drwav_read_pcm_frames_f32(&wav_in, to_read, f32_chunk);
+            if (read_cnt == 0) break;
+
+            for (uint64_t i = 0; i < read_cnt; i++) {
+                double sum = 0.0;
+                for (uint32_t c = 0; c < num_ch; c++) sum += f32_chunk[i * num_ch + c];
+                float smp = (float)(sum / num_ch);
+                if (smp > 1.0f) smp = 1.0f;
+                if (smp < -1.0f) smp = -1.0f;
+                pcm16_chunk[i] = (int16_t)(smp * 32767.0f);
             }
-            rec_buf[f] = (float)(sum / rec_ch);
+            drwav_write_pcm_frames(&wav_out, read_cnt, pcm16_chunk);
+            remaining -= read_cnt;
         }
+        drwav_uninit(&wav_out);
     }
-    drwav_free(rec_pcm, NULL);
-
-    float max_abs_val = 0.0f;
-    for (int s = 0; s < *out_len; s++) {
-        float abs_smp = fabsf(rec_buf[s]);
-        if (abs_smp > max_abs_val) max_abs_val = abs_smp;
-    }
-    if (max_abs_val > 0.0f) {
-        float norm_factor = 1.0f / max_abs_val;
-        for (int s = 0; s < *out_len; s++) rec_buf[s] *= norm_factor;
-    }
-
-    printf("\nFound and loaded recombined audio file for stem slicing: %s\n", rec_path);
-    return rec_buf;
+    drwav_uninit(&wav_in);
 }
 
-static void write_stem_pattern_wav(
+static void write_loop_pattern_wav_from_buf(
+    const char* pat_wav_path,
+    const float* pat_audio,
+    int pat_len,
+    int pat_sr,
+    double start_ms,
+    double end_ms
+) {
+    if (!pat_wav_path || !pat_audio || pat_len <= 0 || pat_sr <= 0) return;
+
+    uint64_t start_smp = (uint64_t)round((start_ms / 1000.0) * pat_sr);
+    uint64_t end_smp = (uint64_t)round((end_ms / 1000.0) * pat_sr);
+    if (start_smp >= (uint64_t)pat_len) start_smp = pat_len > 0 ? pat_len - 1 : 0;
+    if (end_smp > (uint64_t)pat_len) end_smp = pat_len;
+    uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+
+    drwav_data_format format;
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_PCM;
+    format.channels = 1;
+    format.sampleRate = pat_sr;
+    format.bitsPerSample = 16;
+
+    drwav wav_out;
+    if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
+        int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
+        if (pcm16) {
+            for (uint64_t i = 0; i < frame_count; i++) {
+                float smp = pat_audio[start_smp + i];
+                if (smp > 1.0f) smp = 1.0f;
+                if (smp < -1.0f) smp = -1.0f;
+                pcm16[i] = (int16_t)(smp * 32767.0f);
+            }
+            drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
+            free(pcm16);
+        }
+        drwav_uninit(&wav_out);
+    }
+}
+
+static void write_stem_pattern_wav_from_file(
+    const char* stem_wav_path,
+    const char* src_wav_path,
+    double start_ms,
+    double end_ms,
+    double blank_space_ms
+) {
+    if (!stem_wav_path || !src_wav_path || src_wav_path[0] == '\0') return;
+
+    drwav wav_in;
+    if (!drwav_init_file(&wav_in, src_wav_path, NULL)) return;
+
+    uint32_t num_ch = wav_in.channels;
+    uint32_t pat_sr = wav_in.sampleRate;
+    uint64_t pat_len = wav_in.totalPCMFrameCount;
+
+    uint64_t start_smp = (uint64_t)round((start_ms / 1000.0) * pat_sr);
+    uint64_t end_smp = (uint64_t)round((end_ms / 1000.0) * pat_sr);
+    if (start_smp >= pat_len) start_smp = pat_len > 0 ? pat_len - 1 : 0;
+    if (end_smp > pat_len) end_smp = pat_len;
+    uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+
+    drwav_seek_to_pcm_frame(&wav_in, start_smp);
+
+    drwav_data_format format;
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_PCM;
+    format.channels = 1;
+    format.sampleRate = pat_sr;
+    format.bitsPerSample = 16;
+
+    uint64_t blank_frames = (uint64_t)round((blank_space_ms / 1000.0) * pat_sr);
+
+    drwav wav_stem_out;
+    if (drwav_init_file_write(&wav_stem_out, stem_wav_path, &format, NULL)) {
+        int16_t chunk[8192];
+        memset(chunk, 0, sizeof(chunk));
+
+        // Write blank frames (silence)
+        uint64_t remaining_blank = blank_frames;
+        while (remaining_blank > 0) {
+            uint64_t write_cnt = (remaining_blank < 8192) ? remaining_blank : 8192;
+            drwav_write_pcm_frames(&wav_stem_out, write_cnt, chunk);
+            remaining_blank -= write_cnt;
+        }
+
+        // Initialize crossfade state for dynamic amplitude-based fade in/out (999 samples low)
+        double crossfade_low_ms = (999.0 / (double)pat_sr) * 1000.0;
+        double crossfade_high_ms = 4999.0;
+        t_crossfade_state cf;
+        crossfade_init(&cf, (double)pat_sr, crossfade_low_ms, crossfade_high_ms);
+
+        // Pre-warm crossfade state in quiet/silence mode so last_control = 0.0
+        int warm_samples = (int)(pat_sr * (cf.high_ms / 1000.0));
+        if (warm_samples < 1) warm_samples = 1;
+        for (int w = 0; w < warm_samples; w++) {
+            double m1, m2, s_val;
+            int busy_status;
+            crossfade_process(&cf, 0.0, 0.0, 0.0, &m1, &m2, &s_val, &busy_status);
+        }
+
+        // Write pattern audio frames with dynamic crossfade (control = 1.0)
+        float f32_chunk[8192 * 16];
+        uint64_t remaining_audio = frame_count;
+        while (remaining_audio > 0) {
+            uint64_t to_read = (remaining_audio < 8192) ? remaining_audio : 8192;
+            drwav_uint64 read_cnt = drwav_read_pcm_frames_f32(&wav_in, to_read, f32_chunk);
+            for (uint64_t i = 0; i < to_read; i++) {
+                float smp = 0.0f;
+                if (i < read_cnt) {
+                    double sum = 0.0;
+                    for (uint32_t c = 0; c < num_ch; c++) sum += f32_chunk[i * num_ch + c];
+                    smp = (float)(sum / num_ch);
+                }
+                double mix1, mix2, sum_out;
+                int busy_status;
+                crossfade_process(&cf, 1.0, 0.0, (double)smp, &mix1, &mix2, &sum_out, &busy_status);
+
+                if (sum_out > 1.0) sum_out = 1.0;
+                if (sum_out < -1.0) sum_out = -1.0;
+                chunk[i] = (int16_t)(sum_out * 32767.0);
+            }
+            drwav_write_pcm_frames(&wav_stem_out, to_read, chunk);
+            remaining_audio -= to_read;
+        }
+
+        // Fade out back to silence smoothly at the end of pattern segment (control = 0.0), extending WAV by full max fade out time
+        uint64_t max_fade_frames = (uint64_t)round((cf.high_ms / 1000.0) * pat_sr);
+        uint64_t fade_written = 0;
+        int busy_status = 1;
+        while (fade_written < max_fade_frames) {
+            uint64_t to_read = ((max_fade_frames - fade_written) < 8192) ? (max_fade_frames - fade_written) : 8192;
+            drwav_uint64 read_cnt = drwav_read_pcm_frames_f32(&wav_in, to_read, f32_chunk);
+            for (uint64_t i = 0; i < to_read; i++) {
+                float smp = 0.0f;
+                if (i < read_cnt) {
+                    double sum = 0.0;
+                    for (uint32_t c = 0; c < num_ch; c++) sum += f32_chunk[i * num_ch + c];
+                    smp = (float)(sum / num_ch);
+                }
+                double mix1, mix2, sum_out;
+                crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum_out, &busy_status);
+
+                if (sum_out > 1.0) sum_out = 1.0;
+                if (sum_out < -1.0) sum_out = -1.0;
+                chunk[i] = (int16_t)(sum_out * 32767.0);
+            }
+            drwav_write_pcm_frames(&wav_stem_out, to_read, chunk);
+            fade_written += to_read;
+        }
+
+        drwav_uninit(&wav_stem_out);
+    }
+    drwav_uninit(&wav_in);
+}
+
+static void write_stem_pattern_wav_from_buf(
     const char* stem_wav_path,
     const float* pat_audio,
     int pat_len,
@@ -1175,13 +1335,15 @@ static int export_single_stem_assets_from_res(
     int evo_pts,
     const FullAnalysisResult* res2,
     int export_pattern_wavs,
-    const float* source_audio,
+    const char* source_audio_filepath,
+    const float* source_audio_buf,
     int source_len,
     int source_sr,
     const char* custom_loops_dir,
     const char* custom_stems_dir,
     const char* pattern_filename_prefix,
-    const float* recombined_audio,
+    const char* recombined_audio_filepath,
+    const float* recombined_audio_buf,
     int recombined_len,
     int recombined_sr
 ) {
@@ -1201,9 +1363,9 @@ static int export_single_stem_assets_from_res(
 
     if (export_pattern_wavs) {
         // Source audio selection for pattern slicing
-        const float* pat_audio = (source_audio && source_len > 0 && source_sr > 0) ? source_audio : y;
-        int pat_len = (source_audio && source_len > 0 && source_sr > 0) ? source_len : len;
-        int pat_sr = (source_audio && source_len > 0 && source_sr > 0) ? source_sr : sr;
+        const float* pat_audio = (source_audio_buf && source_len > 0 && source_sr > 0) ? source_audio_buf : y;
+        int pat_len = (source_audio_buf && source_len > 0 && source_sr > 0) ? source_len : len;
+        int pat_sr = (source_audio_buf && source_len > 0 && source_sr > 0) ? source_sr : sr;
 
         // Determine target loops and stems directories
         char loops_dir[4096];
@@ -1232,39 +1394,16 @@ static int export_single_stem_assets_from_res(
 
         const char* prefix = (pattern_filename_prefix && pattern_filename_prefix[0] != '\0') ? pattern_filename_prefix : "";
 
-        // Cut & Save identified pattern WAV files directly using dr_wav
+        // Cut & Save identified pattern WAV files
         for (int p = 0; p < num_patterns; p++) {
             // 1. Loopable WAV file in [loops]
             char pat_wav_path[4096];
             snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", loops_dir, prefix, p + 1);
 
-            uint64_t start_smp = (uint64_t)round((patterns[p].start_ms / 1000.0) * pat_sr);
-            uint64_t end_smp = (uint64_t)round((patterns[p].end_ms / 1000.0) * pat_sr);
-            if (start_smp >= (uint64_t)pat_len) start_smp = pat_len - 1;
-            if (end_smp > (uint64_t)pat_len) end_smp = pat_len;
-            uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
-
-            drwav_data_format format;
-            format.container = drwav_container_riff;
-            format.format = DR_WAVE_FORMAT_PCM;
-            format.channels = 1;
-            format.sampleRate = pat_sr;
-            format.bitsPerSample = 16;
-
-            drwav wav_out;
-            if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
-                int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
-                if (pcm16) {
-                    for (uint64_t i = 0; i < frame_count; i++) {
-                        float smp = pat_audio[start_smp + i];
-                        if (smp > 1.0f) smp = 1.0f;
-                        if (smp < -1.0f) smp = -1.0f;
-                        pcm16[i] = (int16_t)(smp * 32767.0f);
-                    }
-                    drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
-                    free(pcm16);
-                }
-                drwav_uninit(&wav_out);
+            if (source_audio_filepath && source_audio_filepath[0] != '\0') {
+                write_loop_pattern_wav_from_file(pat_wav_path, source_audio_filepath, patterns[p].start_ms, patterns[p].end_ms);
+            } else if (pat_audio && pat_len > 0 && pat_sr > 0) {
+                write_loop_pattern_wav_from_buf(pat_wav_path, pat_audio, pat_len, pat_sr, patterns[p].start_ms, patterns[p].end_ms);
             }
 
             // 2. Stems WAV file (aligned with pass loop point and arbitrary pad)
@@ -1284,12 +1423,20 @@ static int export_single_stem_assets_from_res(
             char stem_wav_path[4096];
             snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", stems_dir, prefix, p + 1);
 
-            write_stem_pattern_wav(stem_wav_path, pat_audio, pat_len, pat_sr, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
+            if (source_audio_filepath && source_audio_filepath[0] != '\0') {
+                write_stem_pattern_wav_from_file(stem_wav_path, source_audio_filepath, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
+            } else if (pat_audio && pat_len > 0 && pat_sr > 0) {
+                write_stem_pattern_wav_from_buf(stem_wav_path, pat_audio, pat_len, pat_sr, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
+            }
 
-            if (recombined_audio && recombined_len > 0 && recombined_sr > 0) {
-                char companion_stem_wav_path[4096];
-                snprintf(companion_stem_wav_path, sizeof(companion_stem_wav_path), "%s" PATH_SEP_STR "%spattern_%d_recombined.wav", stems_dir, prefix, p + 1);
-                write_stem_pattern_wav(companion_stem_wav_path, recombined_audio, recombined_len, recombined_sr, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
+            // Companion recombined stem WAV file
+            char companion_stem_wav_path[4096];
+            snprintf(companion_stem_wav_path, sizeof(companion_stem_wav_path), "%s" PATH_SEP_STR "%spattern_%d_recombined.wav", stems_dir, prefix, p + 1);
+
+            if (recombined_audio_filepath && recombined_audio_filepath[0] != '\0') {
+                write_stem_pattern_wav_from_file(companion_stem_wav_path, recombined_audio_filepath, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
+            } else if (recombined_audio_buf && recombined_len > 0 && recombined_sr > 0) {
+                write_stem_pattern_wav_from_buf(companion_stem_wav_path, recombined_audio_buf, recombined_len, recombined_sr, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
             }
         }
     }
@@ -2410,52 +2557,20 @@ static int export_all_assets_and_html_internal(
     char exe_dir[2048];
     get_executable_directory(exe_dir, sizeof(exe_dir));
 
-    float* orig_audio_buf = NULL;
-    int orig_audio_len = 0;
-    int orig_audio_sr = sr;
-
+    const char* src_audio_path = NULL;
     if (audio_filepath && audio_filepath[0] != '\0' && find_original_audio_for_stem(exe_dir, audio_filepath, orig_path, sizeof(orig_path))) {
         copy_passes_files_for_audio(orig_path, output_dir);
-        unsigned int orig_ch = 0, orig_sr = 0;
-        drwav_uint64 orig_frames = 0;
-        float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(orig_path, &orig_ch, &orig_sr, &orig_frames, NULL);
-        if (orig_pcm && orig_frames > 0 && orig_sr > 0) {
-            orig_audio_buf = (float*)malloc(orig_frames * sizeof(float));
-            if (orig_audio_buf) {
-                orig_audio_len = (int)orig_frames;
-                orig_audio_sr = (int)orig_sr;
-                if (orig_ch == 1) {
-                    memcpy(orig_audio_buf, orig_pcm, orig_frames * sizeof(float));
-                } else {
-                    for (drwav_uint64 f = 0; f < orig_frames; f++) {
-                        double sum = 0.0;
-                        for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
-                            sum += orig_pcm[f * orig_ch + ch_i];
-                        }
-                        orig_audio_buf[f] = (float)(sum / orig_ch);
-                    }
-                }
-                float max_abs_val = 0.0f;
-                for (int s = 0; s < orig_audio_len; s++) {
-                    float abs_smp = fabsf(orig_audio_buf[s]);
-                    if (abs_smp > max_abs_val) max_abs_val = abs_smp;
-                }
-                if (max_abs_val > 0.0f) {
-                    float norm_factor = 1.0f / max_abs_val;
-                    for (int s = 0; s < orig_audio_len; s++) orig_audio_buf[s] *= norm_factor;
-                }
-                printf("\nFound original audio file for pattern slicing: %s\n", orig_path);
-            }
-            drwav_free(orig_pcm, NULL);
-        }
+        src_audio_path = orig_path;
+        printf("\nFound original audio file for pattern slicing: %s\n", orig_path);
+    } else {
+        src_audio_path = audio_filepath;
     }
 
-    float* rec_audio_buf = NULL;
-    int rec_audio_len = 0;
-    int rec_audio_sr = sr;
-
+    char rec_path[4096] = "";
     const char* lookup_audio_path = (orig_path[0] != '\0') ? orig_path : audio_filepath;
-    rec_audio_buf = load_recombined_audio(exe_dir, lookup_audio_path, &rec_audio_len, &rec_audio_sr);
+    if (find_recombined_audio_for_original(exe_dir, lookup_audio_path, rec_path, sizeof(rec_path))) {
+        printf("Found recombined audio file for pattern slicing: %s\n", rec_path);
+    }
 
     int ret = export_single_stem_assets_from_res(
         output_dir,
@@ -2473,19 +2588,18 @@ static int export_all_assets_and_html_internal(
         CONTOUR_EVO_PTS,
         &res2,
         1,
-        orig_audio_buf,
-        orig_audio_len,
-        orig_audio_sr,
+        src_audio_path,
+        NULL,
+        0,
+        0,
         NULL,
         NULL,
         NULL,
-        rec_audio_buf,
-        rec_audio_len,
-        rec_audio_sr
+        rec_path[0] != '\0' ? rec_path : NULL,
+        NULL,
+        0,
+        0
     );
-
-    if (rec_audio_buf) free(rec_audio_buf);
-    if (orig_audio_buf) free(orig_audio_buf);
     if (accumulated_contour) free(accumulated_contour);
     if (contour_evo) free(contour_evo);
     analyzer_free_analysis(&res2);
@@ -2998,6 +3112,14 @@ static void process_single_stem_export(
     char pattern_prefix[1024];
     snprintf(pattern_prefix, sizeof(pattern_prefix), "%s_", stem->stem_name);
 
+    char rec_path[4096] = "";
+    char exe_dir[2048];
+    get_executable_directory(exe_dir, sizeof(exe_dir));
+    const char* lookup_path = original_audio_filepath ? original_audio_filepath : stem->audio_filepath;
+    if (find_recombined_audio_for_original(exe_dir, lookup_path, rec_path, sizeof(rec_path))) {
+        printf("Found recombined audio file for stem '%s': %s\n", stem->stem_name, rec_path);
+    }
+
     // Export stem assets and HTML report directly from res2_stem result using shared group Pass 1 assets
     export_single_stem_assets_from_res(
         stem_output_dir,
@@ -3015,12 +3137,14 @@ static void process_single_stem_export(
         evo_pts,
         res2_stem,
         0,
+        original_audio_filepath,
         source_audio,
         source_len,
         source_sr,
         overall_loops_dir,
         overall_stems_dir,
         pattern_prefix,
+        rec_path[0] != '\0' ? rec_path : NULL,
         NULL,
         0,
         0
@@ -3782,48 +3906,24 @@ int export_group_assets_and_html(
             }
         }
 
-        float* grp_rec_buf = NULL;
-        int grp_rec_len = 0;
-        int grp_rec_sr = common_sr;
-
+        char grp_rec_path[4096] = "";
         const char* lookup_group_path = grp_orig_path ? grp_orig_path : stems[group_stem_indices[0]].audio_filepath;
-        grp_rec_buf = load_recombined_audio(exe_dir, lookup_group_path, &grp_rec_len, &grp_rec_sr);
+        if (find_recombined_audio_for_original(exe_dir, lookup_group_path, grp_rec_path, sizeof(grp_rec_path))) {
+            printf("Found recombined audio file for group: %s\n", grp_rec_path);
+        }
 
         printf("\nCombining patterns for %d stem(s) sharing original audio '%s': %d raw -> %d merged pattern(s)\n",
                group_num_stems, grp_orig_path ? grp_orig_path : "(none)", grp_total_raw, grp_num_combined);
 
-        if (grp_audio_buf && grp_audio_len > 0 && grp_num_combined > 0) {
+        if ((grp_orig_path || grp_audio_buf) && grp_num_combined > 0) {
             for (int p = 0; p < grp_num_combined; p++) {
                 char pat_wav_path[4096];
                 snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, global_pat_idx);
 
-                uint64_t start_smp = (uint64_t)round((grp_combined[p].start_ms / 1000.0) * grp_audio_sr);
-                uint64_t end_smp = (uint64_t)round((grp_combined[p].end_ms / 1000.0) * grp_audio_sr);
-                if (start_smp >= (uint64_t)grp_audio_len) start_smp = grp_audio_len - 1;
-                if (end_smp > (uint64_t)grp_audio_len) end_smp = grp_audio_len;
-                uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
-
-                drwav_data_format format;
-                format.container = drwav_container_riff;
-                format.format = DR_WAVE_FORMAT_PCM;
-                format.channels = 1;
-                format.sampleRate = grp_audio_sr;
-                format.bitsPerSample = 16;
-
-                drwav wav_out;
-                if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
-                    int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
-                    if (pcm16) {
-                        for (uint64_t s = 0; s < frame_count; s++) {
-                            float smp = grp_audio_buf[start_smp + s];
-                            if (smp > 1.0f) smp = 1.0f;
-                            if (smp < -1.0f) smp = -1.0f;
-                            pcm16[s] = (int16_t)(smp * 32767.0f);
-                        }
-                        drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
-                        free(pcm16);
-                    }
-                    drwav_uninit(&wav_out);
+                if (grp_orig_path && grp_orig_path[0] != '\0') {
+                    write_loop_pattern_wav_from_file(pat_wav_path, grp_orig_path, grp_combined[p].start_ms, grp_combined[p].end_ms);
+                } else if (grp_audio_buf && grp_audio_len > 0 && grp_audio_sr > 0) {
+                    write_loop_pattern_wav_from_buf(pat_wav_path, grp_audio_buf, grp_audio_len, grp_audio_sr, grp_combined[p].start_ms, grp_combined[p].end_ms);
                 }
 
                 int assigned_pass_idx = 0;
@@ -3842,19 +3942,22 @@ int export_group_assets_and_html(
                 char stem_wav_path[4096];
                 snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_stems_dir, global_pat_idx);
 
-                write_stem_pattern_wav(stem_wav_path, grp_audio_buf, grp_audio_len, grp_audio_sr, grp_combined[p].start_ms, grp_combined[p].end_ms, blank_space_ms);
+                if (grp_orig_path && grp_orig_path[0] != '\0') {
+                    write_stem_pattern_wav_from_file(stem_wav_path, grp_orig_path, grp_combined[p].start_ms, grp_combined[p].end_ms, blank_space_ms);
+                } else if (grp_audio_buf && grp_audio_len > 0 && grp_audio_sr > 0) {
+                    write_stem_pattern_wav_from_buf(stem_wav_path, grp_audio_buf, grp_audio_len, grp_audio_sr, grp_combined[p].start_ms, grp_combined[p].end_ms, blank_space_ms);
+                }
 
-                if (grp_rec_buf && grp_rec_len > 0 && grp_rec_sr > 0) {
+                if (grp_rec_path[0] != '\0') {
                     char companion_stem_wav_path[4096];
                     snprintf(companion_stem_wav_path, sizeof(companion_stem_wav_path), "%s" PATH_SEP_STR "pattern_%d_recombined.wav", overall_stems_dir, global_pat_idx);
-                    write_stem_pattern_wav(companion_stem_wav_path, grp_rec_buf, grp_rec_len, grp_rec_sr, grp_combined[p].start_ms, grp_combined[p].end_ms, blank_space_ms);
+                    write_stem_pattern_wav_from_file(companion_stem_wav_path, grp_rec_path, grp_combined[p].start_ms, grp_combined[p].end_ms, blank_space_ms);
                 }
 
                 global_pat_idx++;
             }
         }
 
-        if (grp_rec_buf) free(grp_rec_buf);
         if (grp_audio_buf) free(grp_audio_buf);
     }
 
@@ -3935,8 +4038,10 @@ int export_group_assets_and_html(
                 &res2_group,
                 0,
                 NULL,
+                NULL,
                 0,
                 0,
+                NULL,
                 NULL,
                 NULL,
                 NULL,
