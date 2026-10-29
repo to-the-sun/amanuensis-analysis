@@ -340,9 +340,23 @@ static void generate_correlation_html_report(
     const char* work_dir,
     const PatternInfo* patterns,
     int num_patterns,
+    const int* selected_indices,
     int num_selected,
     double final_correlation
 ) {
+    int* display_order = (int*)malloc((size_t)num_patterns * sizeof(int));
+    if (!display_order) return;
+
+    int order_count = 0;
+    for (int s = 0; s < num_selected; s++) {
+        display_order[order_count++] = selected_indices[s];
+    }
+    for (int i = 0; i < num_patterns; i++) {
+        if (!patterns[i].selected) {
+            display_order[order_count++] = i;
+        }
+    }
+
     char js_path[4096];
     snprintf(js_path, sizeof(js_path), "%.3500s" PATH_SEP_STR "song_correlation_waveform_data.js", work_dir);
 
@@ -363,7 +377,8 @@ static void generate_correlation_html_report(
     if (fjs) {
         fprintf(fjs, "window.WAVEFORM_DATA = {\n");
         fprintf(fjs, "  stemWaveforms: [\n");
-        for (int i = 0; i < num_patterns; i++) {
+        for (int d = 0; d < num_patterns; d++) {
+            int i = display_order[d];
             const PatternInfo* pat = &patterns[i];
             uint64_t total_frames = pat->total_frames;
             int16_t* pcm_stem = (int16_t*)calloc(total_frames, sizeof(int16_t));
@@ -377,14 +392,15 @@ static void generate_correlation_html_report(
                 }
             }
             char* b64 = encode_base64_bytes((const uint8_t*)pcm_stem, total_frames * sizeof(int16_t));
-            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < num_patterns) ? "," : "");
+            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (d + 1 < num_patterns) ? "," : "");
             if (b64) free(b64);
             if (pcm_stem) free(pcm_stem);
         }
         fprintf(fjs, "  ],\n");
 
         fprintf(fjs, "  capacities: [\n");
-        for (int i = 0; i < num_patterns; i++) {
+        for (int d = 0; d < num_patterns; d++) {
+            int i = display_order[d];
             const PatternInfo* pat = &patterns[i];
             uint64_t total_frames = pat->total_frames;
             int16_t* pcm_cap = (int16_t*)calloc(total_frames, sizeof(int16_t));
@@ -396,7 +412,7 @@ static void generate_correlation_html_report(
                 }
             }
             char* b64 = encode_base64_bytes((const uint8_t*)pcm_cap, total_frames * sizeof(int16_t));
-            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < num_patterns) ? "," : "");
+            fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (d + 1 < num_patterns) ? "," : "");
             if (b64) free(b64);
             if (pcm_cap) free(pcm_cap);
         }
@@ -479,7 +495,8 @@ static void generate_correlation_html_report(
 
     fprintf(f, "<main>\n");
 
-    for (int i = 0; i < num_patterns; i++) {
+    for (int d = 0; d < num_patterns; d++) {
+        int i = display_order[d];
         const PatternInfo* pat = &patterns[i];
         if (!pat->recombined_samples || pat->total_frames == 0) continue;
 
@@ -509,13 +526,13 @@ static void generate_correlation_html_report(
                 pat->judgment_overall_cap_sum,
                 pat->judgment_overall_corr_pct);
         fprintf(f, "        </div>\n");
-        fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, i);
+        fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, d);
         fprintf(f, "      </div>\n");
         fprintf(f, "    </div>\n");
 
-        fprintf(f, "    <div class=\"canvas-container\" id=\"container-%d\">\n", i);
-        fprintf(f, "      <canvas id=\"canvas-%d\"></canvas>\n", i);
-        fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", i);
+        fprintf(f, "    <div class=\"canvas-container\" id=\"container-%d\">\n", d);
+        fprintf(f, "      <canvas id=\"canvas-%d\"></canvas>\n", d);
+        fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", d);
         fprintf(f, "    </div>\n");
         fprintf(f, "  </div>\n");
     }
@@ -530,21 +547,22 @@ static void generate_correlation_html_report(
     fprintf(f, "  duration: %.6f,\n", max_song_duration);
     fprintf(f, "  stems: [\n");
 
-    for (int i = 0; i < num_patterns; i++) {
+    for (int d = 0; d < num_patterns; d++) {
+        int i = display_order[d];
         const PatternInfo* pat_i = &patterns[i];
         if (!pat_i->recombined_samples || pat_i->total_frames == 0) continue;
 
         double duration_s = pat_i->sample_rate > 0 ? (double)pat_i->total_frames / pat_i->sample_rate : 0.0;
 
         fprintf(f, "    {\n");
-        fprintf(f, "      index: %d,\n", i);
+        fprintf(f, "      index: %d,\n", d);
         fprintf(f, "      filename: \"%s\",\n", pat_i->stem_filename);
         fprintf(f, "      selected: %s,\n", pat_i->selected ? "true" : "false");
         fprintf(f, "      selectionOrder: %d,\n", pat_i->selection_order);
         fprintf(f, "      duration: %.4f,\n", duration_s);
         fprintf(f, "      sampleRate: %u,\n", pat_i->sample_rate);
         fprintf(f, "      totalSamples: %llu\n", (unsigned long long)pat_i->total_frames);
-        fprintf(f, "    }%s\n", (i + 1 < num_patterns) ? "," : "");
+        fprintf(f, "    }%s\n", (d + 1 < num_patterns) ? "," : "");
     }
 
     fprintf(f, "  ]\n");
@@ -924,6 +942,7 @@ static void generate_correlation_html_report(
     fprintf(f, "</script>\n");
     fprintf(f, "</body>\n</html>\n");
 
+    free(display_order);
     fclose(f);
     printf("Successfully generated correlation HTML report: %s\n", html_path);
 }
@@ -1213,18 +1232,15 @@ int main(int argc, char** argv) {
         const PatternInfo* pat = &patterns[idx];
 
         char dst_stem[4096];
-        char dst_rec[4096];
         snprintf(dst_stem, sizeof(dst_stem), "%.3500s" PATH_SEP_STR "%.500s", song_dir, pat->stem_filename);
-        snprintf(dst_rec, sizeof(dst_rec), "%.3500s" PATH_SEP_STR "%.500s", song_dir, pat->recombined_filename);
 
         bool ok_stem = copy_file(pat->stem_path, dst_stem);
-        bool ok_rec = copy_file(pat->recombined_path, dst_rec);
 
-        if (ok_stem && ok_rec) {
-            printf("  Copied: %s and %s\n", pat->stem_filename, pat->recombined_filename);
+        if (ok_stem) {
+            printf("  Copied: %s\n", pat->stem_filename);
             copy_success_count++;
         } else {
-            printf("  [Error] Failed copying %s or %s into [song]\n", pat->stem_filename, pat->recombined_filename);
+            printf("  [Error] Failed copying %s into [song]\n", pat->stem_filename);
         }
     }
 
@@ -1233,6 +1249,7 @@ int main(int argc, char** argv) {
         work_dir,
         patterns,
         num_patterns,
+        selected_indices,
         num_selected,
         current_song_correlation
     );
