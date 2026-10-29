@@ -931,6 +931,200 @@ typedef struct {
     float waveform_max[300];
 } SegmentInfo;
 
+typedef struct {
+    double start_ms;
+    double end_ms;
+    int orig_index;
+    double duration_ms;
+    double blank_space_ms;
+} PatternCandidate;
+
+static int compare_pattern_candidates_desc(const void* a, const void* b) {
+    const PatternCandidate* pa = (const PatternCandidate*)a;
+    const PatternCandidate* pb = (const PatternCandidate*)b;
+    if (pb->duration_ms > pa->duration_ms) return 1;
+    if (pb->duration_ms < pa->duration_ms) return -1;
+    return 0;
+}
+
+static double compute_total_correlation(
+    int num_candidates,
+    const PatternCandidate* candidates,
+    const int* active_mask,
+    const float* rec_buf,
+    int rec_len,
+    int sr
+) {
+    if (!candidates || !active_mask || !rec_buf || rec_len <= 0 || sr <= 0) return 0.0;
+
+    double total_corr = 0.0;
+
+    for (int p = 0; p < num_candidates; p++) {
+        if (!active_mask[p]) continue;
+
+        uint64_t start_p = (uint64_t)round((candidates[p].start_ms / 1000.0) * sr);
+        uint64_t end_p = (uint64_t)round((candidates[p].end_ms / 1000.0) * sr);
+        if (start_p >= (uint64_t)rec_len) start_p = rec_len > 0 ? rec_len - 1 : 0;
+        if (end_p > (uint64_t)rec_len) end_p = rec_len;
+
+        for (uint64_t i = start_p; i < end_p; i++) {
+            float cap = fabsf(rec_buf[i]);
+            if (cap <= 1e-7f) continue;
+
+            float sum_other = 0.0f;
+            int overlap_count = 0;
+
+            for (int q = 0; q < num_candidates; q++) {
+                if (q == p || !active_mask[q]) continue;
+
+                uint64_t start_q = (uint64_t)round((candidates[q].start_ms / 1000.0) * sr);
+                uint64_t end_q = (uint64_t)round((candidates[q].end_ms / 1000.0) * sr);
+                if (start_q >= (uint64_t)rec_len) start_q = rec_len > 0 ? rec_len - 1 : 0;
+                if (end_q > (uint64_t)rec_len) end_q = rec_len;
+
+                if (i >= start_q && i < end_q) {
+                    sum_other += fabsf(rec_buf[i]);
+                    overlap_count++;
+                }
+            }
+
+            if (overlap_count > 0) {
+                double corr = (double)sum_other / (double)cap;
+                if (corr > 1.0) corr = 1.0;
+                total_corr += corr;
+            }
+        }
+    }
+
+    return total_corr;
+}
+
+static void process_song_building_and_export(
+    const char* stems_dir,
+    int num_patterns,
+    const PatternCandidate* candidates,
+    int sr,
+    const char* source_audio_filepath,
+    const float* source_audio_buf,
+    int source_len,
+    int source_sr,
+    const char* recombined_audio_filepath,
+    const float* recombined_audio_buf,
+    int recombined_len,
+    int recombined_sr,
+    const char* prefix
+) {
+    if (!stems_dir || num_patterns <= 0 || !candidates || sr <= 0) return;
+
+    // Load recombined flux audio for correlation calculation if not passed as buffer
+    const float* rec_flux_ptr = recombined_audio_buf;
+    int rec_flux_len = recombined_len;
+    int rec_flux_sr = recombined_sr;
+    int free_rec_flux = 0;
+
+    if (!rec_flux_ptr || rec_flux_len <= 0) {
+        if (recombined_audio_filepath && recombined_audio_filepath[0] != '\0') {
+            unsigned int ch = 0, wav_sr = 0;
+            drwav_uint64 frames = 0;
+            float* loaded_pcm = drwav_open_file_and_read_pcm_frames_f32(recombined_audio_filepath, &ch, &wav_sr, &frames, NULL);
+            if (loaded_pcm && frames > 0 && wav_sr > 0) {
+                rec_flux_sr = (int)wav_sr;
+                rec_flux_len = (int)frames;
+                if (ch == 1) {
+                    rec_flux_ptr = loaded_pcm;
+                } else {
+                    float* mono = (float*)malloc(frames * sizeof(float));
+                    if (mono) {
+                        for (drwav_uint64 f = 0; f < frames; f++) {
+                            double sum = 0.0;
+                            for (unsigned int c = 0; c < ch; c++) sum += loaded_pcm[f * ch + c];
+                            mono[f] = (float)(sum / ch);
+                        }
+                        rec_flux_ptr = mono;
+                    }
+                    drwav_free(loaded_pcm, NULL);
+                }
+                free_rec_flux = 1;
+            }
+        }
+    }
+
+    if (!rec_flux_ptr || rec_flux_len <= 0) {
+        rec_flux_ptr = source_audio_buf;
+        rec_flux_len = source_len;
+        rec_flux_sr = source_sr;
+    }
+
+    PatternCandidate* sorted = (PatternCandidate*)malloc(num_patterns * sizeof(PatternCandidate));
+    if (!sorted) {
+        if (free_rec_flux && rec_flux_ptr) free((void*)rec_flux_ptr);
+        return;
+    }
+    memcpy(sorted, candidates, num_patterns * sizeof(PatternCandidate));
+    qsort(sorted, num_patterns, sizeof(PatternCandidate), compare_pattern_candidates_desc);
+
+    int* active_mask = (int*)calloc(num_patterns, sizeof(int));
+    if (!active_mask) {
+        free(sorted);
+        if (free_rec_flux && rec_flux_ptr) free((void*)rec_flux_ptr);
+        return;
+    }
+
+    active_mask[0] = 1;
+    double current_best_corr = compute_total_correlation(num_patterns, sorted, active_mask, rec_flux_ptr, rec_flux_len, rec_flux_sr);
+
+    for (int k = 1; k < num_patterns; k++) {
+        active_mask[k] = 1;
+        double test_corr = compute_total_correlation(num_patterns, sorted, active_mask, rec_flux_ptr, rec_flux_len, rec_flux_sr);
+        if (test_corr > current_best_corr) {
+            current_best_corr = test_corr;
+        } else {
+            active_mask[k] = 0;
+        }
+    }
+
+    int active_cnt = 0;
+    for (int k = 0; k < num_patterns; k++) {
+        if (active_mask[k]) active_cnt++;
+    }
+
+    char song_dir[4096];
+    snprintf(song_dir, sizeof(song_dir), "%s" PATH_SEP_STR "[song]", stems_dir);
+    mkdir_p(song_dir);
+
+    printf("[Song Selection] Selected %d of %d pattern(s) into [song] (Total Correlation: %.4f)\n", active_cnt, num_patterns, current_best_corr);
+
+    const char* pref = prefix ? prefix : "";
+
+    for (int k = 0; k < num_patterns; k++) {
+        if (!active_mask[k]) continue;
+
+        int pat_idx = sorted[k].orig_index;
+
+        char stem_wav_path[4096];
+        snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", song_dir, pref, pat_idx);
+
+        if (source_audio_filepath && source_audio_filepath[0] != '\0') {
+            write_stem_pattern_wav_from_file(stem_wav_path, source_audio_filepath, sorted[k].start_ms, sorted[k].end_ms, sorted[k].blank_space_ms);
+        } else if (source_audio_buf && source_len > 0 && source_sr > 0) {
+            write_stem_pattern_wav_from_buf(stem_wav_path, source_audio_buf, source_len, source_sr, sorted[k].start_ms, sorted[k].end_ms, sorted[k].blank_space_ms);
+        }
+
+        char companion_stem_wav_path[4096];
+        snprintf(companion_stem_wav_path, sizeof(companion_stem_wav_path), "%s" PATH_SEP_STR "%spattern_%d_recombined.wav", song_dir, pref, pat_idx);
+
+        if (recombined_audio_filepath && recombined_audio_filepath[0] != '\0') {
+            write_stem_pattern_wav_from_file(companion_stem_wav_path, recombined_audio_filepath, sorted[k].start_ms, sorted[k].end_ms, sorted[k].blank_space_ms);
+        } else if (recombined_audio_buf && recombined_len > 0 && recombined_sr > 0) {
+            write_stem_pattern_wav_from_buf(companion_stem_wav_path, recombined_audio_buf, recombined_len, recombined_sr, sorted[k].start_ms, sorted[k].end_ms, sorted[k].blank_space_ms);
+        }
+    }
+
+    free(active_mask);
+    free(sorted);
+    if (free_rec_flux && rec_flux_ptr) free((void*)rec_flux_ptr);
+}
+
 static int write_bytes(FILE* f, const void* ptr, size_t size, size_t count) {
     if (count == 0) return 1;
     return (fwrite(ptr, size, count, f) == count) && !ferror(f);
@@ -1394,6 +1588,8 @@ static int export_single_stem_assets_from_res(
 
         const char* prefix = (pattern_filename_prefix && pattern_filename_prefix[0] != '\0') ? pattern_filename_prefix : "";
 
+        PatternCandidate* candidates = (PatternCandidate*)malloc((num_patterns > 0 ? num_patterns : 1) * sizeof(PatternCandidate));
+
         // Cut & Save identified pattern WAV files
         for (int p = 0; p < num_patterns; p++) {
             // 1. Loopable WAV file in [loops]
@@ -1420,6 +1616,14 @@ static int export_single_stem_assets_from_res(
             double blank_space_ms = (patterns[p].start_ms - pass_lp_ms) + pass_pad_ms;
             if (blank_space_ms < 0.0) blank_space_ms = 0.0;
 
+            if (candidates) {
+                candidates[p].start_ms = patterns[p].start_ms;
+                candidates[p].end_ms = patterns[p].end_ms;
+                candidates[p].orig_index = p + 1;
+                candidates[p].duration_ms = patterns[p].end_ms - patterns[p].start_ms;
+                candidates[p].blank_space_ms = blank_space_ms;
+            }
+
             char stem_wav_path[4096];
             snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", stems_dir, prefix, p + 1);
 
@@ -1438,6 +1642,25 @@ static int export_single_stem_assets_from_res(
             } else if (recombined_audio_buf && recombined_len > 0 && recombined_sr > 0) {
                 write_stem_pattern_wav_from_buf(companion_stem_wav_path, recombined_audio_buf, recombined_len, recombined_sr, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
             }
+        }
+
+        if (candidates && num_patterns > 0) {
+            process_song_building_and_export(
+                stems_dir,
+                num_patterns,
+                candidates,
+                sr,
+                source_audio_filepath,
+                pat_audio,
+                pat_len,
+                pat_sr,
+                recombined_audio_filepath,
+                recombined_audio_buf,
+                recombined_len,
+                recombined_sr,
+                prefix
+            );
+            free(candidates);
         }
     }
 
@@ -3916,6 +4139,8 @@ int export_group_assets_and_html(
                group_num_stems, grp_orig_path ? grp_orig_path : "(none)", grp_total_raw, grp_num_combined);
 
         if ((grp_orig_path || grp_audio_buf) && grp_num_combined > 0) {
+            PatternCandidate* grp_candidates = (PatternCandidate*)malloc(grp_num_combined * sizeof(PatternCandidate));
+
             for (int p = 0; p < grp_num_combined; p++) {
                 char pat_wav_path[4096];
                 snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, global_pat_idx);
@@ -3939,6 +4164,14 @@ int export_group_assets_and_html(
                 double blank_space_ms = (grp_combined[p].start_ms - pass_lp_ms) + pass_pad_ms;
                 if (blank_space_ms < 0.0) blank_space_ms = 0.0;
 
+                if (grp_candidates) {
+                    grp_candidates[p].start_ms = grp_combined[p].start_ms;
+                    grp_candidates[p].end_ms = grp_combined[p].end_ms;
+                    grp_candidates[p].orig_index = global_pat_idx;
+                    grp_candidates[p].duration_ms = grp_combined[p].end_ms - grp_combined[p].start_ms;
+                    grp_candidates[p].blank_space_ms = blank_space_ms;
+                }
+
                 char stem_wav_path[4096];
                 snprintf(stem_wav_path, sizeof(stem_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_stems_dir, global_pat_idx);
 
@@ -3955,6 +4188,25 @@ int export_group_assets_and_html(
                 }
 
                 global_pat_idx++;
+            }
+
+            if (grp_candidates) {
+                process_song_building_and_export(
+                    overall_stems_dir,
+                    grp_num_combined,
+                    grp_candidates,
+                    grp_audio_sr,
+                    grp_orig_path,
+                    grp_audio_buf,
+                    grp_audio_len,
+                    grp_audio_sr,
+                    grp_rec_path[0] != '\0' ? grp_rec_path : NULL,
+                    NULL,
+                    0,
+                    0,
+                    ""
+                );
+                free(grp_candidates);
             }
         }
 
