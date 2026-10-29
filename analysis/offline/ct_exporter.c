@@ -460,7 +460,7 @@ static void write_stem_pattern_wav(
                 float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
                 double mix1, mix2, sum;
                 int busy_status;
-                crossfade_process(&cf, 1.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+                crossfade_process(&cf, 1.0, (double)smp, 0.0, &mix1, &mix2, &sum, &busy_status);
 
                 if (sum > 1.0) sum = 1.0;
                 if (sum < -1.0) sum = -1.0;
@@ -480,7 +480,7 @@ static void write_stem_pattern_wav(
             for (uint64_t i = 0; i < write_cnt; i++) {
                 float smp = (curr_smp < (uint64_t)pat_len) ? pat_audio[curr_smp] : 0.0f;
                 double mix1, mix2, sum;
-                crossfade_process(&cf, 0.0, 0.0, (double)smp, &mix1, &mix2, &sum, &busy_status);
+                crossfade_process(&cf, 0.0, (double)smp, 0.0, &mix1, &mix2, &sum, &busy_status);
 
                 if (sum > 1.0) sum = 1.0;
                 if (sum < -1.0) sum = -1.0;
