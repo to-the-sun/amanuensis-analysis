@@ -24,6 +24,8 @@
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
+#define NUM_CORR_BINS 1000
+
 typedef struct {
     char stem_filename[512];
     char recombined_filename[512];
@@ -43,6 +45,8 @@ typedef struct {
     uint64_t active_length;
     int original_index;
     bool selected;
+
+    double actual_corr_bins[NUM_CORR_BINS];
 } PatternInfo;
 
 static int mkdir_p(const char* path) {
@@ -139,6 +143,43 @@ static double compute_correlation(const PatternInfo* patterns, const int* candid
 
     if (total_cap_sum <= 1e-6) return 0.0;
     return (total_corr_sum / total_cap_sum) * 100.0;
+}
+
+static void compute_judgment_time_correlation_bins(
+    PatternInfo* pat_i,
+    const PatternInfo* patterns,
+    const int* selected_indices,
+    int num_selected
+) {
+    uint64_t total_frames = pat_i->total_frames;
+    if (!pat_i->recombined_samples || total_frames == 0) {
+        memset(pat_i->actual_corr_bins, 0, sizeof(pat_i->actual_corr_bins));
+        return;
+    }
+
+    for (int b = 0; b < NUM_CORR_BINS; b++) {
+        uint64_t start_frame = (uint64_t)(((double)b / NUM_CORR_BINS) * total_frames);
+        uint64_t end_frame = (uint64_t)(((double)(b + 1) / NUM_CORR_BINS) * total_frames);
+        if (end_frame <= start_frame) end_frame = start_frame + 1;
+        if (end_frame > total_frames) end_frame = total_frames;
+
+        double max_corr = 0.0;
+        for (uint64_t s = start_frame; s < end_frame; s++) {
+            double sum_other = 0.0;
+            for (int j = 0; j < num_selected; j++) {
+                int idx_j = selected_indices[j];
+                const PatternInfo* pat_j = &patterns[idx_j];
+                if (s < pat_j->total_frames && pat_j->recombined_samples) {
+                    double cap_j = fabsf(pat_j->recombined_samples[s]);
+                    if (cap_j > 1e-6) {
+                        sum_other += cap_j;
+                    }
+                }
+            }
+            if (sum_other > max_corr) max_corr = sum_other;
+        }
+        pat_i->actual_corr_bins[b] = max_corr;
+    }
 }
 
 static int compare_patterns_by_length_desc(const void* a, const void* b) {
@@ -245,7 +286,6 @@ static void generate_correlation_html_report(
     const char* work_dir,
     const PatternInfo* patterns,
     int num_patterns,
-    const int* selected_indices,
     int num_selected,
     double final_correlation
 ) {
@@ -316,14 +356,14 @@ static void generate_correlation_html_report(
     fprintf(f, "  <div class=\"legend\">\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: rgba(120,120,150,0.35); border: 1px solid rgba(150,150,180,0.5);\"></span> Output Audio Waveform (Background)</div>\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Stem Correlation Capacity (|S_i(t)|)</div>\n");
-    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Actual Overlapping Correlation (&sum;<sub>j &ne; i</sub> |S_j(t)|)</div>\n");
+    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Judgment-Time Overlapping Correlation (&sum;<sub>j &lt; i</sub> |S_j(t)|)</div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n");
 
     fprintf(f, "<main>\n");
 
-    int target_bins = 1000;
+    int target_bins = NUM_CORR_BINS;
     double max_song_duration = 0.0;
 
     for (int i = 0; i < num_patterns; i++) {
@@ -442,28 +482,7 @@ static void generate_correlation_html_report(
 
         fprintf(f, "    actualCorrelation: [");
         for (int b = 0; b < target_bins; b++) {
-            uint64_t start_frame = (uint64_t)(((double)b / target_bins) * total_frames);
-            uint64_t end_frame = (uint64_t)(((double)(b + 1) / target_bins) * total_frames);
-            if (end_frame <= start_frame) end_frame = start_frame + 1;
-            if (end_frame > total_frames) end_frame = total_frames;
-
-            double max_corr = 0.0;
-            for (uint64_t s = start_frame; s < end_frame; s++) {
-                double sum_other = 0.0;
-                for (int j = 0; j < num_selected; j++) {
-                    int idx_j = selected_indices[j];
-                    if (idx_j == i) continue;
-                    const PatternInfo* pat_j = &patterns[idx_j];
-                    if (s < pat_j->total_frames && pat_j->recombined_samples) {
-                        double cap_j = fabsf(pat_j->recombined_samples[s]);
-                        if (cap_j > 1e-6) {
-                            sum_other += cap_j;
-                        }
-                    }
-                }
-                if (sum_other > max_corr) max_corr = sum_other;
-            }
-            fprintf(f, "%.4f%s", max_corr, (b < target_bins - 1) ? "," : "");
+            fprintf(f, "%.4f%s", pat_i->actual_corr_bins[b], (b < target_bins - 1) ? "," : "");
         }
         fprintf(f, "]\n  }%s\n", (i < num_patterns - 1) ? "," : "");
     }
@@ -847,8 +866,11 @@ int main(int argc, char** argv) {
         if (patterns[i].active_length == 0) {
             printf("[Skip] %s has 0 active length.\n", patterns[i].stem_filename);
             patterns[i].selected = false;
+            memset(patterns[i].actual_corr_bins, 0, sizeof(patterns[i].actual_corr_bins));
             continue;
         }
+
+        compute_judgment_time_correlation_bins(&patterns[i], patterns, selected_indices, num_selected);
 
         for (int k = 0; k < num_selected; k++) {
             test_set[k] = selected_indices[k];
@@ -908,7 +930,6 @@ int main(int argc, char** argv) {
         work_dir,
         patterns,
         num_patterns,
-        selected_indices,
         num_selected,
         current_song_correlation
     );
