@@ -535,6 +535,28 @@ static int compare_passes(const void* a, const void* b) {
     return 0;
 }
 
+static int find_best_pass_for_pattern(double start_ms, double end_ms, const PassInfo* passes, int total_passes) {
+    if (total_passes <= 0) return 0;
+
+    int best_pass_idx = 0;
+    double max_overlap = -1.0;
+
+    for (int i = 0; i < total_passes; i++) {
+        double p_start = passes[i].loop_point_ms;
+        double p_end = (i + 1 < total_passes) ? passes[i + 1].loop_point_ms : 1e15;
+
+        double ov_start = (start_ms > p_start) ? start_ms : p_start;
+        double ov_end = (end_ms < p_end) ? end_ms : p_end;
+        double overlap = (ov_end > ov_start) ? (ov_end - ov_start) : 0.0;
+
+        if (overlap > max_overlap) {
+            max_overlap = overlap;
+            best_pass_idx = i;
+        }
+    }
+    return best_pass_idx;
+}
+
 static int iequals_ext(const char* a, const char* b) {
     while (*a && *b) {
         if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
@@ -1232,6 +1254,21 @@ static int export_single_stem_assets_from_res(
 
         const char* prefix = (pattern_filename_prefix && pattern_filename_prefix[0] != '\0') ? pattern_filename_prefix : "";
 
+        double* raw_blank_spaces = (double*)malloc(num_patterns * sizeof(double));
+        double min_blank_space = 0.0;
+        if (raw_blank_spaces) {
+            for (int p = 0; p < num_patterns; p++) {
+                int assigned_pass_idx = find_best_pass_for_pattern(patterns[p].start_ms, patterns[p].end_ms, passes, total_passes);
+                double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
+                double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
+                raw_blank_spaces[p] = (patterns[p].start_ms - pass_lp_ms) + pass_pad_ms;
+                if (p == 0 || raw_blank_spaces[p] < min_blank_space) {
+                    min_blank_space = raw_blank_spaces[p];
+                }
+            }
+        }
+        double shift_ms = -min_blank_space;
+
         // Cut & Save identified pattern WAV files directly using dr_wav
         for (int p = 0; p < num_patterns; p++) {
             // 1. Loopable WAV file in [loops]
@@ -1267,18 +1304,8 @@ static int export_single_stem_assets_from_res(
                 drwav_uninit(&wav_out);
             }
 
-            // 2. Stems WAV file (aligned with pass loop point and arbitrary pad)
-            int assigned_pass_idx = 0;
-            for (int i = total_passes - 1; i >= 0; i--) {
-                if (patterns[p].start_ms >= passes[i].loop_point_ms) {
-                    assigned_pass_idx = i;
-                    break;
-                }
-            }
-
-            double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
-            double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
-            double blank_space_ms = (patterns[p].start_ms - pass_lp_ms) + pass_pad_ms;
+            // 2. Stems WAV file (aligned with pass loop point, arbitrary pad, and shift offset)
+            double blank_space_ms = (raw_blank_spaces ? raw_blank_spaces[p] : 0.0) + shift_ms;
             if (blank_space_ms < 0.0) blank_space_ms = 0.0;
 
             char stem_wav_path[4096];
@@ -1292,6 +1319,7 @@ static int export_single_stem_assets_from_res(
                 write_stem_pattern_wav(companion_stem_wav_path, recombined_audio, recombined_len, recombined_sr, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
             }
         }
+        if (raw_blank_spaces) free(raw_blank_spaces);
     }
 
     // Export snapshots.bin and snapshots.js
@@ -3793,6 +3821,21 @@ int export_group_assets_and_html(
                group_num_stems, grp_orig_path ? grp_orig_path : "(none)", grp_total_raw, grp_num_combined);
 
         if (grp_audio_buf && grp_audio_len > 0 && grp_num_combined > 0) {
+            double* grp_raw_blank_spaces = (double*)malloc(grp_num_combined * sizeof(double));
+            double grp_min_blank = 0.0;
+            if (grp_raw_blank_spaces) {
+                for (int p = 0; p < grp_num_combined; p++) {
+                    int assigned_pass_idx = find_best_pass_for_pattern(grp_combined[p].start_ms, grp_combined[p].end_ms, passes, total_passes);
+                    double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
+                    double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
+                    grp_raw_blank_spaces[p] = (grp_combined[p].start_ms - pass_lp_ms) + pass_pad_ms;
+                    if (p == 0 || grp_raw_blank_spaces[p] < grp_min_blank) {
+                        grp_min_blank = grp_raw_blank_spaces[p];
+                    }
+                }
+            }
+            double grp_shift_ms = -grp_min_blank;
+
             for (int p = 0; p < grp_num_combined; p++) {
                 char pat_wav_path[4096];
                 snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, global_pat_idx);
@@ -3826,17 +3869,7 @@ int export_group_assets_and_html(
                     drwav_uninit(&wav_out);
                 }
 
-                int assigned_pass_idx = 0;
-                for (int pass_i = total_passes - 1; pass_i >= 0; pass_i--) {
-                    if (grp_combined[p].start_ms >= passes[pass_i].loop_point_ms) {
-                        assigned_pass_idx = pass_i;
-                        break;
-                    }
-                }
-
-                double pass_lp_ms = passes[assigned_pass_idx].loop_point_ms;
-                double pass_pad_ms = passes[assigned_pass_idx].arbitrary_pad_ms;
-                double blank_space_ms = (grp_combined[p].start_ms - pass_lp_ms) + pass_pad_ms;
+                double blank_space_ms = (grp_raw_blank_spaces ? grp_raw_blank_spaces[p] : 0.0) + grp_shift_ms;
                 if (blank_space_ms < 0.0) blank_space_ms = 0.0;
 
                 char stem_wav_path[4096];
@@ -3852,6 +3885,7 @@ int export_group_assets_and_html(
 
                 global_pat_idx++;
             }
+            if (grp_raw_blank_spaces) free(grp_raw_blank_spaces);
         }
 
         if (grp_rec_buf) free(grp_rec_buf);
