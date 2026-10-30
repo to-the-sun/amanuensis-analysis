@@ -15,6 +15,8 @@ The C pipeline operates in two passes without Python dependencies:
    - Re-analyzes the audio with the optimized window size for peak detection, pattern identification, and segment scoring.
    - Copies the target audio file into the destination folder so the interactive HTML report plays the local copied instance.
    - Scans for and copies any matching text files (located in the audio file folder) whose names match the audio file except starting with "passes" instead of "palette" into the destination folder.
+   - Evaluates pattern overlaps against parsed pass interval boundaries (`[passes[i].loop_point_ms, passes[i+1].loop_point_ms]`), assigning each pattern to the pass with maximum temporal overlap (breaking ties in favor of earlier passes).
+   - Computes raw pattern start offsets relative to assigned pass loop points/pads and applies an unconditional offset shift (`shift_ms = -min_blank_space`) so the earliest pattern aligns with sample zero in exported stem WAV files in `[stems]` while preserving exact relative cross-pattern timing alignment.
    - Exports binary assets (`.ctbin`, `snapshots.bin`), Base64 snapshot fallbacks (`snapshots.js`), structured JSON data (`manifest.json`, `report_data.json`, `report_data.js`), pattern WAV slices, and an interactive HTML report (`<stem>.html`).
 
 ## Grouped Analysis & Multithreading Architecture (`--group` / `-g`)
