@@ -2749,40 +2749,44 @@ static unsigned int __stdcall pass2_stem_worker_win(void* arg) {
             analyzer_analyze_chunk_flux_direct(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
 
             for (int b = 0; b < 1; b++) {
-                for (int k = 0; k < 100; k++) {
-                    int f = act_s / hop + k;
-                    if (f >= 0 && f < num_f) {
-                        if (t->gpu_ok) {
-                            t->res2_stem->bands[b].envelope[f] = t->gpu_flux[b * num_f + f];
-                        } else {
-                            t->res2_stem->bands[b].envelope[f] = res_chunk->last_flux[b][k];
+                if (t->res2_stem->bands[b].envelope) {
+                    for (int k = 0; k < 100; k++) {
+                        int f = act_s / hop + k;
+                        if (f >= 0 && f < num_f) {
+                            if (t->gpu_ok) {
+                                t->res2_stem->bands[b].envelope[f] = t->gpu_flux[b * num_f + f];
+                            } else {
+                                t->res2_stem->bands[b].envelope[f] = res_chunk->last_flux[b][k];
+                            }
+                            if (t->res2_stem->bands[b].rolling_dynamic_smoothing) t->res2_stem->bands[b].rolling_dynamic_smoothing[f] = res_chunk->last_dynamic_smoothing[b][k];
+                            if (t->res2_stem->bands[b].rolling_prominence) t->res2_stem->bands[b].rolling_prominence[f] = res_chunk->last_prominence[b][k];
+                            if (t->res2_stem->bands[b].rolling_prominence_avg) t->res2_stem->bands[b].rolling_prominence_avg[f] = (float)res_chunk->metrics.band_prominence_avgs[b];
+                            if (t->res2_stem->bands[b].rolling_prominence_half_max) t->res2_stem->bands[b].rolling_prominence_half_max[f] = (float)res_chunk->metrics.band_prominence_half_maxes[b];
+                            if (t->res2_stem->bands[b].rolling_smoothing_avg) t->res2_stem->bands[b].rolling_smoothing_avg[f] = (float)res_chunk->metrics.band_smoothing_avgs[b];
+                            if (t->res2_stem->bands[b].rolling_flux_avg) t->res2_stem->bands[b].rolling_flux_avg[f] = (float)res_chunk->metrics.band_flux_avgs[b];
+                            if (t->res2_stem->bands[b].rolling_threshold) t->res2_stem->bands[b].rolling_threshold[f] = (float)res_chunk->metrics.band_midpoints[b];
+                            if (t->res2_stem->bands[b].rolling_lookback) t->res2_stem->bands[b].rolling_lookback[f] = (float)res_chunk->metrics.band_lookbacks[b];
+                            if (t->res2_stem->bands[b].rolling_avg_delta) t->res2_stem->bands[b].rolling_avg_delta[f] = (float)res_chunk->metrics.band_avg_deltas[b];
+                            if (t->res2_stem->bands[b].rolling_total_delta) t->res2_stem->bands[b].rolling_total_delta[f] = (float)res_chunk->metrics.band_total_deltas[b];
+                            if (t->res2_stem->bands[b].rolling_p_count) t->res2_stem->bands[b].rolling_p_count[f] = res_chunk->metrics.band_p_counts[b];
                         }
-                        t->res2_stem->bands[b].rolling_dynamic_smoothing[f] = res_chunk->last_dynamic_smoothing[b][k];
-                        t->res2_stem->bands[b].rolling_prominence[f] = res_chunk->last_prominence[b][k];
-                        t->res2_stem->bands[b].rolling_prominence_avg[f] = (float)res_chunk->metrics.band_prominence_avgs[b];
-                        t->res2_stem->bands[b].rolling_prominence_half_max[f] = (float)res_chunk->metrics.band_prominence_half_maxes[b];
-                        t->res2_stem->bands[b].rolling_smoothing_avg[f] = (float)res_chunk->metrics.band_smoothing_avgs[b];
-                        t->res2_stem->bands[b].rolling_flux_avg[f] = (float)res_chunk->metrics.band_flux_avgs[b];
-                        t->res2_stem->bands[b].rolling_threshold[f] = (float)res_chunk->metrics.band_midpoints[b];
-                        t->res2_stem->bands[b].rolling_lookback[f] = (float)res_chunk->metrics.band_lookbacks[b];
-                        t->res2_stem->bands[b].rolling_avg_delta[f] = (float)res_chunk->metrics.band_avg_deltas[b];
-                        t->res2_stem->bands[b].rolling_total_delta[f] = (float)res_chunk->metrics.band_total_deltas[b];
-                        t->res2_stem->bands[b].rolling_p_count[f] = res_chunk->metrics.band_p_counts[b];
                     }
                 }
             }
-            for (int k = 0; k < 100; k++) {
-                int f = act_s / hop + k;
-                if (f >= 0 && f < num_f) {
-                    t->res2_stem->ratings[f] = res_chunk->metrics.rating;
-                    t->res2_stem->std_devs[f] = res_chunk->metrics.std_dev;
-                    t->res2_stem->means[f] = res_chunk->metrics.mean;
-                    t->res2_stem->contrasts[f] = res_chunk->metrics.contrast;
-                    t->res2_stem->stability_scores[f] = res_chunk->metrics.stability_score;
-                    t->res2_stem->highest_peaks_ms[f] = res_chunk->metrics.highest_peak_valid ? res_chunk->metrics.highest_peak_ms : -999.0;
-                    t->res2_stem->demarcation_lines[f] = res_chunk->metrics.demarcation_line;
-                    t->res2_stem->rolling_global_flux_avg[f] = (float)res_chunk->metrics.global_flux_avg;
-                    t->res2_stem->rolling_global_smoothing_avg[f] = (float)res_chunk->metrics.global_smoothing_avg;
+            if (t->res2_stem->ratings) {
+                for (int k = 0; k < 100; k++) {
+                    int f = act_s / hop + k;
+                    if (f >= 0 && f < num_f) {
+                        t->res2_stem->ratings[f] = res_chunk->metrics.rating;
+                        if (t->res2_stem->std_devs) t->res2_stem->std_devs[f] = res_chunk->metrics.std_dev;
+                        if (t->res2_stem->means) t->res2_stem->means[f] = res_chunk->metrics.mean;
+                        if (t->res2_stem->contrasts) t->res2_stem->contrasts[f] = res_chunk->metrics.contrast;
+                        if (t->res2_stem->stability_scores) t->res2_stem->stability_scores[f] = res_chunk->metrics.stability_score;
+                        if (t->res2_stem->highest_peaks_ms) t->res2_stem->highest_peaks_ms[f] = res_chunk->metrics.highest_peak_valid ? res_chunk->metrics.highest_peak_ms : -999.0;
+                        if (t->res2_stem->demarcation_lines) t->res2_stem->demarcation_lines[f] = res_chunk->metrics.demarcation_line;
+                        if (t->res2_stem->rolling_global_flux_avg) t->res2_stem->rolling_global_flux_avg[f] = (float)res_chunk->metrics.global_flux_avg;
+                        if (t->res2_stem->rolling_global_smoothing_avg) t->res2_stem->rolling_global_smoothing_avg[f] = (float)res_chunk->metrics.global_smoothing_avg;
+                    }
                 }
             }
             for (int k = 0; k < res_chunk->peak_list.num_peaks; k++) {
@@ -2841,40 +2845,44 @@ static void* pass2_stem_worker_posix(void* arg) {
             analyzer_analyze_chunk_flux_direct(t->analyzer, push_ptr, step, sr, win_s / hop, act_s / hop, res_chunk);
 
             for (int b = 0; b < 1; b++) {
-                for (int k = 0; k < 100; k++) {
-                    int f = act_s / hop + k;
-                    if (f >= 0 && f < num_f) {
-                        if (t->gpu_ok) {
-                            t->res2_stem->bands[b].envelope[f] = t->gpu_flux[b * num_f + f];
-                        } else {
-                            t->res2_stem->bands[b].envelope[f] = res_chunk->last_flux[b][k];
+                if (t->res2_stem->bands[b].envelope) {
+                    for (int k = 0; k < 100; k++) {
+                        int f = act_s / hop + k;
+                        if (f >= 0 && f < num_f) {
+                            if (t->gpu_ok) {
+                                t->res2_stem->bands[b].envelope[f] = t->gpu_flux[b * num_f + f];
+                            } else {
+                                t->res2_stem->bands[b].envelope[f] = res_chunk->last_flux[b][k];
+                            }
+                            if (t->res2_stem->bands[b].rolling_dynamic_smoothing) t->res2_stem->bands[b].rolling_dynamic_smoothing[f] = res_chunk->last_dynamic_smoothing[b][k];
+                            if (t->res2_stem->bands[b].rolling_prominence) t->res2_stem->bands[b].rolling_prominence[f] = res_chunk->last_prominence[b][k];
+                            if (t->res2_stem->bands[b].rolling_prominence_avg) t->res2_stem->bands[b].rolling_prominence_avg[f] = (float)res_chunk->metrics.band_prominence_avgs[b];
+                            if (t->res2_stem->bands[b].rolling_prominence_half_max) t->res2_stem->bands[b].rolling_prominence_half_max[f] = (float)res_chunk->metrics.band_prominence_half_maxes[b];
+                            if (t->res2_stem->bands[b].rolling_smoothing_avg) t->res2_stem->bands[b].rolling_smoothing_avg[f] = (float)res_chunk->metrics.band_smoothing_avgs[b];
+                            if (t->res2_stem->bands[b].rolling_flux_avg) t->res2_stem->bands[b].rolling_flux_avg[f] = (float)res_chunk->metrics.band_flux_avgs[b];
+                            if (t->res2_stem->bands[b].rolling_threshold) t->res2_stem->bands[b].rolling_threshold[f] = (float)res_chunk->metrics.band_midpoints[b];
+                            if (t->res2_stem->bands[b].rolling_lookback) t->res2_stem->bands[b].rolling_lookback[f] = (float)res_chunk->metrics.band_lookbacks[b];
+                            if (t->res2_stem->bands[b].rolling_avg_delta) t->res2_stem->bands[b].rolling_avg_delta[f] = (float)res_chunk->metrics.band_avg_deltas[b];
+                            if (t->res2_stem->bands[b].rolling_total_delta) t->res2_stem->bands[b].rolling_total_delta[f] = (float)res_chunk->metrics.band_total_deltas[b];
+                            if (t->res2_stem->bands[b].rolling_p_count) t->res2_stem->bands[b].rolling_p_count[f] = res_chunk->metrics.band_p_counts[b];
                         }
-                        t->res2_stem->bands[b].rolling_dynamic_smoothing[f] = res_chunk->last_dynamic_smoothing[b][k];
-                        t->res2_stem->bands[b].rolling_prominence[f] = res_chunk->last_prominence[b][k];
-                        t->res2_stem->bands[b].rolling_prominence_avg[f] = (float)res_chunk->metrics.band_prominence_avgs[b];
-                        t->res2_stem->bands[b].rolling_prominence_half_max[f] = (float)res_chunk->metrics.band_prominence_half_maxes[b];
-                        t->res2_stem->bands[b].rolling_smoothing_avg[f] = (float)res_chunk->metrics.band_smoothing_avgs[b];
-                        t->res2_stem->bands[b].rolling_flux_avg[f] = (float)res_chunk->metrics.band_flux_avgs[b];
-                        t->res2_stem->bands[b].rolling_threshold[f] = (float)res_chunk->metrics.band_midpoints[b];
-                        t->res2_stem->bands[b].rolling_lookback[f] = (float)res_chunk->metrics.band_lookbacks[b];
-                        t->res2_stem->bands[b].rolling_avg_delta[f] = (float)res_chunk->metrics.band_avg_deltas[b];
-                        t->res2_stem->bands[b].rolling_total_delta[f] = (float)res_chunk->metrics.band_total_deltas[b];
-                        t->res2_stem->bands[b].rolling_p_count[f] = res_chunk->metrics.band_p_counts[b];
                     }
                 }
             }
-            for (int k = 0; k < 100; k++) {
-                int f = act_s / hop + k;
-                if (f >= 0 && f < num_f) {
-                    t->res2_stem->ratings[f] = res_chunk->metrics.rating;
-                    t->res2_stem->std_devs[f] = res_chunk->metrics.std_dev;
-                    t->res2_stem->means[f] = res_chunk->metrics.mean;
-                    t->res2_stem->contrasts[f] = res_chunk->metrics.contrast;
-                    t->res2_stem->stability_scores[f] = res_chunk->metrics.stability_score;
-                    t->res2_stem->highest_peaks_ms[f] = res_chunk->metrics.highest_peak_valid ? res_chunk->metrics.highest_peak_ms : -999.0;
-                    t->res2_stem->demarcation_lines[f] = res_chunk->metrics.demarcation_line;
-                    t->res2_stem->rolling_global_flux_avg[f] = (float)res_chunk->metrics.global_flux_avg;
-                    t->res2_stem->rolling_global_smoothing_avg[f] = (float)res_chunk->metrics.global_smoothing_avg;
+            if (t->res2_stem->ratings) {
+                for (int k = 0; k < 100; k++) {
+                    int f = act_s / hop + k;
+                    if (f >= 0 && f < num_f) {
+                        t->res2_stem->ratings[f] = res_chunk->metrics.rating;
+                        if (t->res2_stem->std_devs) t->res2_stem->std_devs[f] = res_chunk->metrics.std_dev;
+                        if (t->res2_stem->means) t->res2_stem->means[f] = res_chunk->metrics.mean;
+                        if (t->res2_stem->contrasts) t->res2_stem->contrasts[f] = res_chunk->metrics.contrast;
+                        if (t->res2_stem->stability_scores) t->res2_stem->stability_scores[f] = res_chunk->metrics.stability_score;
+                        if (t->res2_stem->highest_peaks_ms) t->res2_stem->highest_peaks_ms[f] = res_chunk->metrics.highest_peak_valid ? res_chunk->metrics.highest_peak_ms : -999.0;
+                        if (t->res2_stem->demarcation_lines) t->res2_stem->demarcation_lines[f] = res_chunk->metrics.demarcation_line;
+                        if (t->res2_stem->rolling_global_flux_avg) t->res2_stem->rolling_global_flux_avg[f] = (float)res_chunk->metrics.global_flux_avg;
+                        if (t->res2_stem->rolling_global_smoothing_avg) t->res2_stem->rolling_global_smoothing_avg[f] = (float)res_chunk->metrics.global_smoothing_avg;
+                    }
                 }
             }
             for (int k = 0; k < res_chunk->peak_list.num_peaks; k++) {
