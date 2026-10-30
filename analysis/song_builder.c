@@ -1362,6 +1362,17 @@ int main(int argc, char** argv) {
                         pcm16[f] = (int16_t)roundf(val * 32767.0f);
                     }
 
+                    uint64_t first_non_zero = 0;
+                    while (first_non_zero < max_frames && pcm16[first_non_zero] == 0) {
+                        first_non_zero++;
+                    }
+
+                    uint64_t frames_to_write = max_frames - first_non_zero;
+                    if (frames_to_write == 0 && max_frames > 0) {
+                        first_non_zero = 0;
+                        frames_to_write = max_frames;
+                    }
+
                     char finished_song_path[4096];
                     snprintf(finished_song_path, sizeof(finished_song_path), "%.3500s" PATH_SEP_STR "finished_song.wav", song_dir);
 
@@ -1374,9 +1385,9 @@ int main(int argc, char** argv) {
 
                     drwav wav_out;
                     if (drwav_init_file_write(&wav_out, finished_song_path, &format, NULL)) {
-                        drwav_write_pcm_frames(&wav_out, max_frames, pcm16);
+                        drwav_write_pcm_frames(&wav_out, frames_to_write, pcm16 + first_non_zero);
                         drwav_uninit(&wav_out);
-                        printf("  Generated finished song WAV: %s (Normalized peak = 1.0)\n", finished_song_path);
+                        printf("  Generated finished song WAV: %s (Normalized peak = 1.0, Omitted %llu leading zero samples)\n", finished_song_path, (unsigned long long)first_non_zero);
                     } else {
                         printf("  [Error] Failed creating finished song WAV: %s\n", finished_song_path);
                     }
