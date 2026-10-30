@@ -6,7 +6,7 @@
  *
  * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
  * identifying peak and trough markers, generating modified flux envelopes via peak salience,
- * exporting companion _flux.wav and _modified_flux.wav files to [flux]/,
+ * exporting companion _modified_flux.wav files and recombined modified flux WAV files,
  * and producing interactive HTML reports in [flux]/<basename>_index.html as well as
  * a master batch dashboard in [flux]/index.html.
  *
@@ -2122,12 +2122,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
 
-        // Export companion flux WAV files immediately
-        char raw_flux_filepath[4096];
-        snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
-                 stem_dir, basename, p, stem->note_name);
-        write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
-
+        // Export companion modified flux WAV files immediately (regular flux WAV disk writing is omitted)
         if (mod_flux_buf) {
             char mod_flux_filepath[4096];
             snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
