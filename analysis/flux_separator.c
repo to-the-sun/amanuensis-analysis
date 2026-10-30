@@ -60,6 +60,9 @@ double g_noise_floor_ratio = 0.19;
 /* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
 double g_silence_threshold = 0.009;
 
+/* Debug Mode Flag: 0 = disabled (default), 1 = enabled via --debug */
+static int g_debug_mode = 0;
+
 static pthread_mutex_t g_console_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1954,7 +1957,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     char flux_dir[8192];
     snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
-    ensure_dir_exists(flux_dir);
+    if (g_debug_mode) {
+        ensure_dir_exists(flux_dir);
+    }
 
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
@@ -1962,7 +1967,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     int audible_count = 0;
     int audible_capacity = 0;
 
-    double *recombined_mod_flux = (double*)calloc(total_channel_samples, sizeof(double));
+    double *recombined_mod_flux = g_debug_mode ? (double*)calloc(total_channel_samples, sizeof(double)) : NULL;
 
     clock_t flux_start_clock = clock();
 
@@ -2089,15 +2094,17 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         if (mod_flux_buf) {
             memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
 
-            // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
-            double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
-            if (ch0_flux) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    ch0_flux[s] = raw_flux_buf[s * num_channels];
+            if (g_debug_mode) {
+                // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
+                double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
+                if (ch0_flux) {
+                    for (uint32_t s = 0; s < total_samples; s++) {
+                        ch0_flux[s] = raw_flux_buf[s * num_channels];
+                    }
+                    detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
+                    detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
+                    free(ch0_flux);
                 }
-                detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
-                detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
-                free(ch0_flux);
             }
 
             // Process modified flux envelope for each channel
@@ -2122,11 +2129,13 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
 
-        // Export companion flux WAV files immediately
-        char raw_flux_filepath[4096];
-        snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
-                 stem_dir, basename, p, stem->note_name);
-        write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
+        if (g_debug_mode) {
+            // Export companion flux WAV files immediately
+            char raw_flux_filepath[4096];
+            snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
+                     stem_dir, basename, p, stem->note_name);
+            write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
+        }
 
         if (mod_flux_buf) {
             char mod_flux_filepath[4096];
@@ -2135,35 +2144,40 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
         }
 
-        // Store compact 16-bit PCM mono arrays for JS report generation
-        stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-        if (stem->raw_flux_i16) {
-            for (uint32_t s = 0; s < total_samples; s++) {
-                double sum_f = 0.0;
-                for (uint32_t c = 0; c < num_channels; c++) {
-                    sum_f += raw_flux_buf[s * num_channels + c];
-                }
-                double val = sum_f / num_channels;
-                if (val > 1.0) val = 1.0;
-                if (val < 0.0) val = 0.0;
-                stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
-            }
-        }
-
-        if (mod_flux_buf) {
-            stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-            if (stem->mod_flux_i16) {
+        if (g_debug_mode) {
+            // Store compact 16-bit PCM mono arrays for JS report generation
+            stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+            if (stem->raw_flux_i16) {
                 for (uint32_t s = 0; s < total_samples; s++) {
                     double sum_f = 0.0;
                     for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += mod_flux_buf[s * num_channels + c];
+                        sum_f += raw_flux_buf[s * num_channels + c];
                     }
                     double val = sum_f / num_channels;
                     if (val > 1.0) val = 1.0;
                     if (val < 0.0) val = 0.0;
-                    stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
+                    stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
                 }
             }
+
+            if (mod_flux_buf) {
+                stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+                if (stem->mod_flux_i16) {
+                    for (uint32_t s = 0; s < total_samples; s++) {
+                        double sum_f = 0.0;
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            sum_f += mod_flux_buf[s * num_channels + c];
+                        }
+                        double val = sum_f / num_channels;
+                        if (val > 1.0) val = 1.0;
+                        if (val < 0.0) val = 0.0;
+                        stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
+                    }
+                }
+            }
+        }
+
+        if (mod_flux_buf) {
             free(mod_flux_buf);
             mod_flux_buf = NULL;
         }
@@ -2202,7 +2216,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     int exported_count = audible_count;
 
     // Construct Flux HTML report in [flux] directory
-    if (flux_stems) {
+    if (g_debug_mode && flux_stems) {
         generate_flux_html_report(
             flux_dir,
             basename,
@@ -2214,7 +2228,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             flux_stems,
             audible_count
         );
+    }
 
+    if (flux_stems) {
         for (int idx = 0; idx < audible_count; idx++) {
             if (flux_stems[idx].raw_flux_i16) free(flux_stems[idx].raw_flux_i16);
             if (flux_stems[idx].mod_flux_i16) free(flux_stems[idx].mod_flux_i16);
@@ -2294,6 +2310,11 @@ int main(int argc, char *argv[]) {
             snprintf(path, sizeof(path), "%s", argv[i]);
             trim_string(path);
 
+            if (strcmp(path, "--debug") == 0 || strcmp(path, "-d") == 0 || strcmp(path, "-debug") == 0) {
+                g_debug_mode = 1;
+                continue;
+            }
+
             DIR *d = opendir(path);
             if (d) {
                 closedir(d);
@@ -2355,7 +2376,9 @@ int main(int argc, char *argv[]) {
 
     char flux_dir[8192];
     snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
-    ensure_dir_exists(flux_dir);
+    if (g_debug_mode) {
+        ensure_dir_exists(flux_dir);
+    }
 
     move_helper_files_to_pitch_stems(dir, stem_dir);
 
@@ -2424,8 +2447,10 @@ int main(int argc, char *argv[]) {
 
     double total_wall_clock_sec = (double)(clock() - batch_start_clock) / CLOCKS_PER_SEC;
 
-    /* Generate Master Batch HTML Report in [flux]/index.html */
-    generate_master_flux_html_report(flux_dir, stem_dir, results, num_files, total_wall_clock_sec);
+    if (g_debug_mode) {
+        /* Generate Master Batch HTML Report in [flux]/index.html */
+        generate_master_flux_html_report(flux_dir, stem_dir, results, num_files, total_wall_clock_sec);
+    }
 
     int total_success = 0;
     for (int i = 0; i < num_files; i++) {
@@ -2438,7 +2463,9 @@ int main(int argc, char *argv[]) {
     printf("  Successfully Processed: %d / %d WAV files\n", total_success, num_files);
     printf("  Total Wall-Clock Time:  %.2f seconds\n", total_wall_clock_sec);
     printf("  Output Stem Folder:     %s/\n", stem_dir);
-    printf("  Batch Report URL:       %s/index.html\n", flux_dir);
+    if (g_debug_mode) {
+        printf("  Batch Report URL:       %s/index.html\n", flux_dir);
+    }
     printf("====================================================\n");
 
     for (int i = 0; i < num_files; i++) {
