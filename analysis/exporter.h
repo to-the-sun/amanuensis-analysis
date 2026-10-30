@@ -44,7 +44,8 @@ int export_all_assets_and_html(
     const float* y,
     int len,
     int sr,
-    int pass1_window_ms
+    int pass1_window_ms,
+    int debug_mode
 );
 
 typedef struct {
@@ -61,7 +62,8 @@ int export_group_assets_and_html(
     const char* parent_dir,
     const char* group_name,
     int pass1_window_ms,
-    const char* original_audio_filepath
+    const char* original_audio_filepath,
+    int debug_mode
 );
 
 void get_executable_directory(char* out_dir, size_t out_size);

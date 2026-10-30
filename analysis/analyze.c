@@ -239,7 +239,7 @@ static int compare_strings(const void* a, const void* b) {
     return strcmp(*(const char**)a, *(const char**)b);
 }
 
-static int process_single_file(const char* audio_filepath, int window_ms) {
+static int process_single_file(const char* audio_filepath, int window_ms, int debug_mode) {
     printf("\n------------------------------------------------------------\n");
     printf("Loading WAV audio file: %s\n", audio_filepath);
 
@@ -288,22 +288,25 @@ static int process_single_file(const char* audio_filepath, int window_ms) {
 
     char output_dir[4096];
     snprintf(output_dir, sizeof(output_dir), "%s[palettes]" PATH_SEP_STR "%s", dir_path, stem_name);
-    mkdir_p(output_dir);
 
-    const char* last_slash = strrchr(audio_filepath, '/');
-    const char* last_backslash = strrchr(audio_filepath, '\\');
-    const char* audio_filename = audio_filepath;
-    if (last_slash && last_slash >= audio_filename) audio_filename = last_slash + 1;
-    if (last_backslash && last_backslash >= audio_filename) audio_filename = last_backslash + 1;
+    if (debug_mode) {
+        mkdir_p(output_dir);
 
-    char dst_audio_path[4096];
-    snprintf(dst_audio_path, sizeof(dst_audio_path), "%s" PATH_SEP_STR "%s", output_dir, audio_filename);
+        const char* last_slash = strrchr(audio_filepath, '/');
+        const char* last_backslash = strrchr(audio_filepath, '\\');
+        const char* audio_filename = audio_filepath;
+        if (last_slash && last_slash >= audio_filename) audio_filename = last_slash + 1;
+        if (last_backslash && last_backslash >= audio_filename) audio_filename = last_backslash + 1;
 
-    if (copy_file(audio_filepath, dst_audio_path)) {
-        printf("Copied audio file to destination: %s -> %s\n", audio_filepath, dst_audio_path);
+        char dst_audio_path[4096];
+        snprintf(dst_audio_path, sizeof(dst_audio_path), "%s" PATH_SEP_STR "%s", output_dir, audio_filename);
+
+        if (copy_file(audio_filepath, dst_audio_path)) {
+            printf("Copied audio file to destination: %s -> %s\n", audio_filepath, dst_audio_path);
+        }
+
+        copy_matching_passes_text_files(dir_path, stem_name, output_dir);
     }
-
-    copy_matching_passes_text_files(dir_path, stem_name, output_dir);
 
     printf("\nRunning standalone transience analysis, pattern finding, & asset exports in pure C...\n");
 
@@ -314,7 +317,8 @@ static int process_single_file(const char* audio_filepath, int window_ms) {
         mono_data,
         (int)mono_frames,
         (int)sample_rate,
-        window_ms
+        window_ms,
+        debug_mode
     );
     free(mono_data);
 
@@ -326,11 +330,15 @@ static int process_single_file(const char* audio_filepath, int window_ms) {
     printf("\n============================================================\n");
     printf("ASSETS & HTML REPORT GENERATED IN PURE C FOR: %s\n", stem_name);
     printf("Output Directory: %s" PATH_SEP_STR "\n", output_dir);
-    printf("Assets Exported:  .ctbin, manifest.json, snapshots.bin, snapshots.js,\n");
-    printf("                  report_data.json, report_data.js,\n");
-    printf("                  [loops]" PATH_SEP_STR " pattern WAVs,\n");
-    printf("                  [stems]" PATH_SEP_STR " aligned pattern WAVs,\n");
-    printf("                  %s.html\n", stem_name);
+    if (debug_mode) {
+        printf("Assets Exported:  .ctbin, manifest.json, snapshots.bin, snapshots.js,\n");
+        printf("                  report_data.json, report_data.js,\n");
+        printf("                  [loops]" PATH_SEP_STR " pattern WAVs,\n");
+        printf("                  [stems]" PATH_SEP_STR " aligned pattern WAVs,\n");
+        printf("                  %s.html\n", stem_name);
+    } else {
+        printf("Assets Exported:  [stems]" PATH_SEP_STR " aligned pattern WAVs\n");
+    }
     printf("============================================================\n");
 
     return 1;
@@ -342,6 +350,7 @@ typedef struct {
     int file_index;
     int total_files;
     int window_ms;
+    int debug_mode;
     int success;
 } ThreadTask;
 
@@ -349,14 +358,14 @@ typedef struct {
 static unsigned int __stdcall worker_thread_win(void* arg) {
     ThreadTask* t = (ThreadTask*)arg;
     printf("\n[Thread %d/%d] Starting parallel processing: %s\n", t->file_index, t->total_files, t->filename);
-    t->success = process_single_file(t->full_path, t->window_ms);
+    t->success = process_single_file(t->full_path, t->window_ms, t->debug_mode);
     return 0;
 }
 #else
 static void* worker_thread_posix(void* arg) {
     ThreadTask* t = (ThreadTask*)arg;
     printf("\n[Thread %d/%d] Starting parallel processing: %s\n", t->file_index, t->total_files, t->filename);
-    t->success = process_single_file(t->full_path, t->window_ms);
+    t->success = process_single_file(t->full_path, t->window_ms, t->debug_mode);
     return NULL;
 }
 #endif
@@ -477,7 +486,7 @@ static void* decode_worker_posix(void* arg) {
 }
 #endif
 
-static int process_group_files(const FileList* wav_files, const char* base_dir, int window_ms, const char* original_audio_filepath) {
+static int process_group_files(const FileList* wav_files, const char* base_dir, int window_ms, const char* original_audio_filepath, int debug_mode) {
     if (!wav_files || wav_files->count <= 0) return 0;
     int num_stems = wav_files->count;
     printf("\n------------------------------------------------------------\n");
@@ -623,7 +632,8 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
         base_dir,
         group_name,
         window_ms,
-        original_audio_filepath
+        original_audio_filepath,
+        debug_mode
     );
 
     for (int i = 0; i < num_stems; i++) {
@@ -651,6 +661,7 @@ int main(int argc, char** argv) {
     printf("============================================================\n\n");
 
     int is_group_mode = 0;
+    int is_debug_mode = 0;
     char target_dir[2048] = "";
     char original_audio_filepath[4096] = "";
     int window_ms = 15000;
@@ -658,6 +669,8 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (iequals(argv[i], "--group") || iequals(argv[i], "-g")) {
             is_group_mode = 1;
+        } else if (iequals(argv[i], "--debug") || iequals(argv[i], "-d")) {
+            is_debug_mode = 1;
         } else if (iequals(argv[i], "--original") || iequals(argv[i], "-o") || iequals(argv[i], "--original-audio")) {
             if (i + 1 < argc) {
                 strncpy(original_audio_filepath, argv[i + 1], sizeof(original_audio_filepath) - 1);
@@ -678,9 +691,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (is_debug_mode) {
+        printf("[Debug Mode Enabled] Full report assets, snapshots, and HTML visualizers will be created.\n\n");
+    }
+
     if (target_dir[0] != '\0' && !is_group_mode) {
         // Single file drag-and-drop or command line invocation
-        int success = process_single_file(target_dir, window_ms);
+        int success = process_single_file(target_dir, window_ms, is_debug_mode);
         return success ? 0 : 1;
     }
 
@@ -756,7 +773,8 @@ int main(int argc, char** argv) {
             &wav_files,
             exe_dir,
             window_ms,
-            original_audio_filepath[0] != '\0' ? original_audio_filepath : NULL
+            original_audio_filepath[0] != '\0' ? original_audio_filepath : NULL,
+            is_debug_mode
         );
         file_list_free(&wav_files);
         printf("\nPress Enter to exit...");
@@ -776,6 +794,7 @@ int main(int argc, char** argv) {
         tasks[i].file_index = i + 1;
         tasks[i].total_files = num_files;
         tasks[i].window_ms = window_ms;
+        tasks[i].debug_mode = is_debug_mode;
         tasks[i].success = 0;
     }
 

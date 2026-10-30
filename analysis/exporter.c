@@ -670,6 +670,8 @@ static void parse_passes_in_dir(const char* output_dir, PassInfo* out_passes, in
     out_passes[0].arbitrary_pad_ms = 0.0;
     *out_total_passes = 1;
 
+    if (!output_dir || output_dir[0] == '\0') return;
+
     DIR* dir = opendir(output_dir);
     if (!dir) return;
 
@@ -730,6 +732,13 @@ static void parse_passes_in_dir(const char* output_dir, PassInfo* out_passes, in
             out_passes[*out_total_passes] = raw_passes[i];
             (*out_total_passes)++;
         }
+    }
+}
+
+static void find_and_parse_passes(const char* primary_dir, const char* fallback_dir, PassInfo* out_passes, int* out_total_passes) {
+    parse_passes_in_dir(primary_dir, out_passes, out_total_passes);
+    if (*out_total_passes <= 1 && fallback_dir && fallback_dir[0] != '\0' && strcmp(primary_dir, fallback_dir) != 0) {
+        parse_passes_in_dir(fallback_dir, out_passes, out_total_passes);
     }
 }
 
@@ -1183,12 +1192,16 @@ static int export_single_stem_assets_from_res(
     const char* pattern_filename_prefix,
     const float* recombined_audio,
     int recombined_len,
-    int recombined_sr
+    int recombined_sr,
+    int debug_mode,
+    const char* parent_dir
 ) {
-    // Export .ctbin binary file for Pass 2 directly from existing res2
-    char ctbin_path[4096];
-    snprintf(ctbin_path, sizeof(ctbin_path), "%s" PATH_SEP_STR "%s.ctbin", output_dir, stem_name);
-    export_ctbin_from_res(ctbin_path, res2, sr, pass2_win_ms);
+    if (debug_mode) {
+        // Export .ctbin binary file for Pass 2 directly from existing res2
+        char ctbin_path[4096];
+        snprintf(ctbin_path, sizeof(ctbin_path), "%s" PATH_SEP_STR "%s.ctbin", output_dir, stem_name);
+        export_ctbin_from_res(ctbin_path, res2, sr, pass2_win_ms);
+    }
 
     // Segment transience grouping & pattern derivation
     double total_duration_ms = ((double)len / (double)sr) * 1000.0;
@@ -1206,13 +1219,16 @@ static int export_single_stem_assets_from_res(
         int pat_sr = (source_audio && source_len > 0 && source_sr > 0) ? source_sr : sr;
 
         // Determine target loops and stems directories
-        char loops_dir[4096];
-        if (custom_loops_dir && custom_loops_dir[0] != '\0') {
-            snprintf(loops_dir, sizeof(loops_dir), "%s", custom_loops_dir);
-        } else {
-            snprintf(loops_dir, sizeof(loops_dir), "%s" PATH_SEP_STR "[loops]", output_dir);
+        char loops_dir[4096] = "";
+        int loops_dir_res = 0;
+        if (debug_mode) {
+            if (custom_loops_dir && custom_loops_dir[0] != '\0') {
+                snprintf(loops_dir, sizeof(loops_dir), "%s", custom_loops_dir);
+            } else {
+                snprintf(loops_dir, sizeof(loops_dir), "%s" PATH_SEP_STR "[loops]", output_dir);
+            }
+            loops_dir_res = mkdir_p(loops_dir);
         }
-        int loops_dir_res = mkdir_p(loops_dir);
 
         char stems_dir[4096];
         if (custom_stems_dir && custom_stems_dir[0] != '\0') {
@@ -1228,43 +1244,45 @@ static int export_single_stem_assets_from_res(
         // Parse passes text file if present
         PassInfo passes[257];
         int total_passes = 0;
-        parse_passes_in_dir(output_dir, passes, &total_passes);
+        find_and_parse_passes(output_dir, parent_dir, passes, &total_passes);
 
         const char* prefix = (pattern_filename_prefix && pattern_filename_prefix[0] != '\0') ? pattern_filename_prefix : "";
 
         // Cut & Save identified pattern WAV files directly using dr_wav
         for (int p = 0; p < num_patterns; p++) {
-            // 1. Loopable WAV file in [loops]
-            char pat_wav_path[4096];
-            snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", loops_dir, prefix, p + 1);
+            // 1. Loopable WAV file in [loops] (only if debug_mode is enabled)
+            if (debug_mode) {
+                char pat_wav_path[4096];
+                snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "%spattern_%d.wav", loops_dir, prefix, p + 1);
 
-            uint64_t start_smp = (uint64_t)round((patterns[p].start_ms / 1000.0) * pat_sr);
-            uint64_t end_smp = (uint64_t)round((patterns[p].end_ms / 1000.0) * pat_sr);
-            if (start_smp >= (uint64_t)pat_len) start_smp = pat_len - 1;
-            if (end_smp > (uint64_t)pat_len) end_smp = pat_len;
-            uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+                uint64_t start_smp = (uint64_t)round((patterns[p].start_ms / 1000.0) * pat_sr);
+                uint64_t end_smp = (uint64_t)round((patterns[p].end_ms / 1000.0) * pat_sr);
+                if (start_smp >= (uint64_t)pat_len) start_smp = pat_len - 1;
+                if (end_smp > (uint64_t)pat_len) end_smp = pat_len;
+                uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
 
-            drwav_data_format format;
-            format.container = drwav_container_riff;
-            format.format = DR_WAVE_FORMAT_PCM;
-            format.channels = 1;
-            format.sampleRate = pat_sr;
-            format.bitsPerSample = 16;
+                drwav_data_format format;
+                format.container = drwav_container_riff;
+                format.format = DR_WAVE_FORMAT_PCM;
+                format.channels = 1;
+                format.sampleRate = pat_sr;
+                format.bitsPerSample = 16;
 
-            drwav wav_out;
-            if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
-                int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
-                if (pcm16) {
-                    for (uint64_t i = 0; i < frame_count; i++) {
-                        float smp = pat_audio[start_smp + i];
-                        if (smp > 1.0f) smp = 1.0f;
-                        if (smp < -1.0f) smp = -1.0f;
-                        pcm16[i] = (int16_t)(smp * 32767.0f);
+                drwav wav_out;
+                if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
+                    int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
+                    if (pcm16) {
+                        for (uint64_t i = 0; i < frame_count; i++) {
+                            float smp = pat_audio[start_smp + i];
+                            if (smp > 1.0f) smp = 1.0f;
+                            if (smp < -1.0f) smp = -1.0f;
+                            pcm16[i] = (int16_t)(smp * 32767.0f);
+                        }
+                        drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
+                        free(pcm16);
                     }
-                    drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
-                    free(pcm16);
+                    drwav_uninit(&wav_out);
                 }
-                drwav_uninit(&wav_out);
             }
 
             // 2. Stems WAV file (aligned with pass loop point and arbitrary pad)
@@ -1292,6 +1310,11 @@ static int export_single_stem_assets_from_res(
                 write_stem_pattern_wav(companion_stem_wav_path, recombined_audio, recombined_len, recombined_sr, patterns[p].start_ms, patterns[p].end_ms, blank_space_ms);
             }
         }
+    }
+
+    if (!debug_mode) {
+        free(segments);
+        return 1;
     }
 
     // Export snapshots.bin and snapshots.js
@@ -2313,7 +2336,8 @@ static int export_all_assets_and_html_internal(
     int len,
     int sr,
     int pass1_window_ms,
-    SharedTransientBuffer* shared_buffer
+    SharedTransientBuffer* shared_buffer,
+    int debug_mode
 ) {
     if (!output_dir || !stem_name || !y || len <= 0 || sr <= 0) return 0;
 
@@ -2481,7 +2505,9 @@ static int export_all_assets_and_html_internal(
         NULL,
         rec_audio_buf,
         rec_audio_len,
-        rec_audio_sr
+        rec_audio_sr,
+        debug_mode,
+        output_dir
     );
 
     if (rec_audio_buf) free(rec_audio_buf);
@@ -2499,9 +2525,10 @@ int export_all_assets_and_html(
     const float* y,
     int len,
     int sr,
-    int pass1_window_ms
+    int pass1_window_ms,
+    int debug_mode
 ) {
-    return export_all_assets_and_html_internal(audio_filepath, output_dir, stem_name, y, len, sr, pass1_window_ms, NULL);
+    return export_all_assets_and_html_internal(audio_filepath, output_dir, stem_name, y, len, sr, pass1_window_ms, NULL, debug_mode);
 }
 
 static int get_max_worker_threads(void) {
@@ -2938,6 +2965,7 @@ typedef struct {
     int source_len;
     int source_sr;
     const char* original_audio_filepath;
+    int debug_mode;
     volatile int* export_counter;
     GroupMutex* counter_mutex;
     int total_stems;
@@ -2958,39 +2986,45 @@ static void process_single_stem_export(
     const float* source_audio,
     int source_len,
     int source_sr,
-    const char* original_audio_filepath
+    const char* original_audio_filepath,
+    int debug_mode
 ) {
     char stem_output_dir[4096];
     snprintf(stem_output_dir, sizeof(stem_output_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "%s", parent_dir, stem->stem_name);
-    mkdir_p(stem_output_dir);
 
-    // Copy audio WAV file into stem palette output directory as <stem_name>.wav
-    char dst_stem_audio_path[4096];
-    snprintf(dst_stem_audio_path, sizeof(dst_stem_audio_path), "%s" PATH_SEP_STR "%s.wav", stem_output_dir, stem->stem_name);
+    if (debug_mode) {
+        mkdir_p(stem_output_dir);
 
-    FILE* src_f = fopen(stem->audio_filepath, "rb");
-    if (src_f) {
-        FILE* dst_f = fopen(dst_stem_audio_path, "wb");
-        if (dst_f) {
-            char buf[65536];
-            size_t bytes_read;
-            while ((bytes_read = fread(buf, 1, sizeof(buf), src_f)) > 0) {
-                fwrite(buf, 1, bytes_read, dst_f);
+        // Copy audio WAV file into stem palette output directory as <stem_name>.wav
+        char dst_stem_audio_path[4096];
+        snprintf(dst_stem_audio_path, sizeof(dst_stem_audio_path), "%s" PATH_SEP_STR "%s.wav", stem_output_dir, stem->stem_name);
+
+        FILE* src_f = fopen(stem->audio_filepath, "rb");
+        if (src_f) {
+            FILE* dst_f = fopen(dst_stem_audio_path, "wb");
+            if (dst_f) {
+                char buf[65536];
+                size_t bytes_read;
+                while ((bytes_read = fread(buf, 1, sizeof(buf), src_f)) > 0) {
+                    fwrite(buf, 1, bytes_read, dst_f);
+                }
+                fclose(dst_f);
             }
-            fclose(dst_f);
+            fclose(src_f);
         }
-        fclose(src_f);
-    }
 
-    // Copy matching passes text files into stem palette output directory
-    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-        copy_passes_files_for_audio(original_audio_filepath, stem_output_dir);
+        // Copy matching passes text files into stem palette output directory
+        if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+            copy_passes_files_for_audio(original_audio_filepath, stem_output_dir);
+        }
+        copy_passes_files_for_audio(stem->audio_filepath, stem_output_dir);
     }
-    copy_passes_files_for_audio(stem->audio_filepath, stem_output_dir);
 
     // Overall [loops] and [stems] target folders inside parent [palettes]
-    char overall_loops_dir[4096];
-    snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
+    char overall_loops_dir[4096] = "";
+    if (debug_mode) {
+        snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
+    }
 
     char overall_stems_dir[4096];
     snprintf(overall_stems_dir, sizeof(overall_stems_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[stems]", parent_dir);
@@ -3023,7 +3057,9 @@ static void process_single_stem_export(
         pattern_prefix,
         NULL,
         0,
-        0
+        0,
+        debug_mode,
+        parent_dir
     );
 }
 
@@ -3034,7 +3070,8 @@ static unsigned int __stdcall export_worker_win(void* arg) {
         t->stem, t->parent_dir, t->pass2_win_ms,
         t->best_bar_length_ms, t->accumulated_contour, t->contour_len,
         t->contour_sample_count, t->contour_evo, t->evo_frames, t->evo_pts, t->res2_stem,
-        t->source_audio, t->source_len, t->source_sr, t->original_audio_filepath
+        t->source_audio, t->source_len, t->source_sr, t->original_audio_filepath,
+        t->debug_mode
     );
     group_mutex_lock(t->counter_mutex);
     (*(t->export_counter))++;
@@ -3050,7 +3087,8 @@ static void* export_worker_posix(void* arg) {
         t->stem, t->parent_dir, t->pass2_win_ms,
         t->best_bar_length_ms, t->accumulated_contour, t->contour_len,
         t->contour_sample_count, t->contour_evo, t->evo_frames, t->evo_pts, t->res2_stem,
-        t->source_audio, t->source_len, t->source_sr, t->original_audio_filepath
+        t->source_audio, t->source_len, t->source_sr, t->original_audio_filepath,
+        t->debug_mode
     );
     group_mutex_lock(t->counter_mutex);
     (*(t->export_counter))++;
@@ -3084,7 +3122,8 @@ int export_group_assets_and_html(
     const char* parent_dir,
     const char* group_name,
     int pass1_window_ms,
-    const char* original_audio_filepath
+    const char* original_audio_filepath,
+    int debug_mode
 ) {
     if (!stems || num_stems <= 0 || !parent_dir || !group_name) {
         printf("Error: Invalid arguments passed to export_group_assets_and_html (stems=%p, num_stems=%d, parent_dir=%s, group_name=%s)\n",
@@ -3100,12 +3139,14 @@ int export_group_assets_and_html(
     mkdir_p(group_output_dir);
     printf("[Group Mode] Output directory ready: %s\n", group_output_dir);
 
-    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-        copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
-    }
-    for (int i = 0; i < num_stems; i++) {
-        if (stems[i].audio_filepath) {
-            copy_passes_files_for_audio(stems[i].audio_filepath, group_output_dir);
+    if (debug_mode) {
+        if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+            copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
+        }
+        for (int i = 0; i < num_stems; i++) {
+            if (stems[i].audio_filepath) {
+                copy_passes_files_for_audio(stems[i].audio_filepath, group_output_dir);
+            }
         }
     }
 
@@ -3273,7 +3314,9 @@ int export_group_assets_and_html(
     GroupMutex stft_mutex;
     group_mutex_init(&stft_mutex);
 
-    print_progress_bar(0, num_stems, "Pre-computing STFT Envelopes");
+    if (debug_mode) {
+        print_progress_bar(0, num_stems, "Pre-computing STFT Envelopes");
+    }
 
     for (int i = 0; i < num_stems; i++) {
         pcap[i] = (int*)calloc(MAX_BANDS, sizeof(int));
@@ -3284,42 +3327,44 @@ int export_group_assets_and_html(
         res2_stems[i].times = (float*)malloc(sizeof(float) * num_f);
         for (int f = 0; f < num_f; f++) res2_stems[i].times[f] = (float)f * (float)hop / (float)stems[i].sr;
 
-        res2_stems[i].ratings = (double*)malloc(sizeof(double) * num_f);
-        res2_stems[i].std_devs = (double*)malloc(sizeof(double) * num_f);
-        res2_stems[i].means = (double*)malloc(sizeof(double) * num_f);
-        res2_stems[i].contrasts = (double*)malloc(sizeof(double) * num_f);
-        res2_stems[i].stability_scores = (double*)malloc(sizeof(double) * num_f);
-        res2_stems[i].highest_peaks_ms = (double*)malloc(sizeof(double) * num_f);
-        res2_stems[i].demarcation_lines = (double*)malloc(sizeof(double) * num_f);
-        res2_stems[i].rolling_global_flux_avg = (float*)calloc(num_f, sizeof(float));
-        res2_stems[i].rolling_global_smoothing_avg = (float*)calloc(num_f, sizeof(float));
+        if (debug_mode) {
+            res2_stems[i].ratings = (double*)malloc(sizeof(double) * num_f);
+            res2_stems[i].std_devs = (double*)malloc(sizeof(double) * num_f);
+            res2_stems[i].means = (double*)malloc(sizeof(double) * num_f);
+            res2_stems[i].contrasts = (double*)malloc(sizeof(double) * num_f);
+            res2_stems[i].stability_scores = (double*)malloc(sizeof(double) * num_f);
+            res2_stems[i].highest_peaks_ms = (double*)malloc(sizeof(double) * num_f);
+            res2_stems[i].demarcation_lines = (double*)malloc(sizeof(double) * num_f);
+            res2_stems[i].rolling_global_flux_avg = (float*)calloc(num_f, sizeof(float));
+            res2_stems[i].rolling_global_smoothing_avg = (float*)calloc(num_f, sizeof(float));
 
-        for (int b = 0; b < 1; b++) {
-            res2_stems[i].bands[b].envelope = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_dynamic_smoothing = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_prominence = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_prominence_avg = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_prominence_half_max = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_smoothing_avg = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_flux_avg = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_threshold = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_lookback = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_avg_delta = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_total_delta = (float*)calloc(num_f, sizeof(float));
-            res2_stems[i].bands[b].rolling_p_count = (int*)calloc(num_f, sizeof(int));
-            res2_stems[i].bands[b].peaks = NULL;
-            res2_stems[i].bands[b].num_peaks = 0;
+            for (int b = 0; b < 1; b++) {
+                res2_stems[i].bands[b].envelope = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_dynamic_smoothing = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_prominence = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_prominence_avg = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_prominence_half_max = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_smoothing_avg = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_flux_avg = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_threshold = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_lookback = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_avg_delta = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_total_delta = (float*)calloc(num_f, sizeof(float));
+                res2_stems[i].bands[b].rolling_p_count = (int*)calloc(num_f, sizeof(int));
+                res2_stems[i].bands[b].peaks = NULL;
+                res2_stems[i].bands[b].num_peaks = 0;
+            }
+
+            pass2_gpu_flux[i] = (float*)malloc(sizeof(float) * 1 * num_f);
+
+            stft_tasks[i].stem_idx = i;
+            stft_tasks[i].stem = &stems[i];
+            stft_tasks[i].gpu_flux = pass2_gpu_flux[i];
+            stft_tasks[i].num_f = num_f;
+            stft_tasks[i].completed_counter = &stft_counter;
+            stft_tasks[i].counter_mutex = &stft_mutex;
+            stft_tasks[i].total_stems = num_stems;
         }
-
-        pass2_gpu_flux[i] = (float*)malloc(sizeof(float) * 1 * num_f);
-
-        stft_tasks[i].stem_idx = i;
-        stft_tasks[i].stem = &stems[i];
-        stft_tasks[i].gpu_flux = pass2_gpu_flux[i];
-        stft_tasks[i].num_f = num_f;
-        stft_tasks[i].completed_counter = &stft_counter;
-        stft_tasks[i].counter_mutex = &stft_mutex;
-        stft_tasks[i].total_stems = num_stems;
 
         pass2_analyzers[i] = analyzer_create(1.0, &group_shared, &group_shared_mutex, group_mutex_lock, group_mutex_unlock, pass2_win_ms, 1);
         if (pass2_analyzers[i]) analyzer_set_sample_rate(pass2_analyzers[i], stems[i].sr);
@@ -3331,37 +3376,39 @@ int export_group_assets_and_html(
         }
     }
 
+    if (debug_mode) {
 #if defined(_WIN32) || defined(_WIN64)
-    for (int batch_start = 0; batch_start < num_stems; batch_start += max_worker_threads) {
-        int batch_count = num_stems - batch_start;
-        if (batch_count > max_worker_threads) batch_count = max_worker_threads;
-        HANDLE* threads = (HANDLE*)malloc(batch_count * sizeof(HANDLE));
-        if (threads) {
-            for (int i = 0; i < batch_count; i++) {
-                threads[i] = (HANDLE)_beginthreadex(NULL, 0, stft_worker_win, &stft_tasks[batch_start + i], 0, NULL);
+        for (int batch_start = 0; batch_start < num_stems; batch_start += max_worker_threads) {
+            int batch_count = num_stems - batch_start;
+            if (batch_count > max_worker_threads) batch_count = max_worker_threads;
+            HANDLE* threads = (HANDLE*)malloc(batch_count * sizeof(HANDLE));
+            if (threads) {
+                for (int i = 0; i < batch_count; i++) {
+                    threads[i] = (HANDLE)_beginthreadex(NULL, 0, stft_worker_win, &stft_tasks[batch_start + i], 0, NULL);
+                }
+                WaitForMultipleObjects(batch_count, threads, TRUE, INFINITE);
+                for (int i = 0; i < batch_count; i++) CloseHandle(threads[i]);
+                free(threads);
             }
-            WaitForMultipleObjects(batch_count, threads, TRUE, INFINITE);
-            for (int i = 0; i < batch_count; i++) CloseHandle(threads[i]);
-            free(threads);
         }
-    }
 #else
-    for (int batch_start = 0; batch_start < num_stems; batch_start += max_worker_threads) {
-        int batch_count = num_stems - batch_start;
-        if (batch_count > max_worker_threads) batch_count = max_worker_threads;
-        pthread_t* threads = (pthread_t*)malloc(batch_count * sizeof(pthread_t));
-        if (threads) {
-            for (int i = 0; i < batch_count; i++) {
-                pthread_create(&threads[i], NULL, stft_worker_posix, &stft_tasks[batch_start + i]);
+        for (int batch_start = 0; batch_start < num_stems; batch_start += max_worker_threads) {
+            int batch_count = num_stems - batch_start;
+            if (batch_count > max_worker_threads) batch_count = max_worker_threads;
+            pthread_t* threads = (pthread_t*)malloc(batch_count * sizeof(pthread_t));
+            if (threads) {
+                for (int i = 0; i < batch_count; i++) {
+                    pthread_create(&threads[i], NULL, stft_worker_posix, &stft_tasks[batch_start + i]);
+                }
+                for (int i = 0; i < batch_count; i++) pthread_join(threads[i], NULL);
+                free(threads);
             }
-            for (int i = 0; i < batch_count; i++) pthread_join(threads[i], NULL);
-            free(threads);
         }
-    }
 #endif
 
-    for (int i = 0; i < num_stems; i++) {
-        pass2_gpu_ok[i] = stft_tasks[i].gpu_ok;
+        for (int i = 0; i < num_stems; i++) {
+            pass2_gpu_ok[i] = stft_tasks[i].gpu_ok;
+        }
     }
     free(stft_tasks);
     group_mutex_destroy(&stft_mutex);
@@ -3580,6 +3627,7 @@ int export_group_assets_and_html(
         export_tasks[i].source_len = group_audio_len;
         export_tasks[i].source_sr = group_audio_sr;
         export_tasks[i].original_audio_filepath = original_audio_filepath;
+        export_tasks[i].debug_mode = debug_mode;
         export_tasks[i].export_counter = &export_counter;
         export_tasks[i].counter_mutex = &export_mutex;
         export_tasks[i].total_stems = num_stems;
@@ -3623,7 +3671,9 @@ int export_group_assets_and_html(
         char resolved_path[4096] = "";
         if (find_original_audio_for_stem(exe_dir, stems[i].audio_filepath, resolved_path, sizeof(resolved_path))) {
             stem_orig_paths[i] = strdup(resolved_path);
-            copy_passes_files_for_audio(resolved_path, group_output_dir);
+            if (debug_mode) {
+                copy_passes_files_for_audio(resolved_path, group_output_dir);
+            }
             printf("[Group Mode] Resolved original audio for stem '%s': %s\n", stems[i].stem_name, resolved_path);
         } else if (original_audio_filepath && original_audio_filepath[0] != '\0') {
             stem_orig_paths[i] = strdup(original_audio_filepath);
@@ -3638,9 +3688,11 @@ int export_group_assets_and_html(
         double end_ms;
     } GroupPatternInterval;
 
-    char overall_loops_dir[4096];
-    snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
-    mkdir_p(overall_loops_dir);
+    char overall_loops_dir[4096] = "";
+    if (debug_mode) {
+        snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
+        mkdir_p(overall_loops_dir);
+    }
 
     char overall_stems_dir[4096];
     snprintf(overall_stems_dir, sizeof(overall_stems_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[stems]", parent_dir);
@@ -3648,7 +3700,7 @@ int export_group_assets_and_html(
 
     PassInfo passes[257];
     int total_passes = 0;
-    parse_passes_in_dir(group_output_dir, passes, &total_passes);
+    find_and_parse_passes(group_output_dir, parent_dir, passes, &total_passes);
 
     int* assigned = (int*)calloc(num_stems, sizeof(int));
     int global_pat_idx = 1;
@@ -3794,36 +3846,38 @@ int export_group_assets_and_html(
 
         if (grp_audio_buf && grp_audio_len > 0 && grp_num_combined > 0) {
             for (int p = 0; p < grp_num_combined; p++) {
-                char pat_wav_path[4096];
-                snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, global_pat_idx);
+                if (debug_mode) {
+                    char pat_wav_path[4096];
+                    snprintf(pat_wav_path, sizeof(pat_wav_path), "%s" PATH_SEP_STR "pattern_%d.wav", overall_loops_dir, global_pat_idx);
 
-                uint64_t start_smp = (uint64_t)round((grp_combined[p].start_ms / 1000.0) * grp_audio_sr);
-                uint64_t end_smp = (uint64_t)round((grp_combined[p].end_ms / 1000.0) * grp_audio_sr);
-                if (start_smp >= (uint64_t)grp_audio_len) start_smp = grp_audio_len - 1;
-                if (end_smp > (uint64_t)grp_audio_len) end_smp = grp_audio_len;
-                uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
+                    uint64_t start_smp = (uint64_t)round((grp_combined[p].start_ms / 1000.0) * grp_audio_sr);
+                    uint64_t end_smp = (uint64_t)round((grp_combined[p].end_ms / 1000.0) * grp_audio_sr);
+                    if (start_smp >= (uint64_t)grp_audio_len) start_smp = grp_audio_len - 1;
+                    if (end_smp > (uint64_t)grp_audio_len) end_smp = grp_audio_len;
+                    uint64_t frame_count = (end_smp > start_smp) ? (end_smp - start_smp) : 0;
 
-                drwav_data_format format;
-                format.container = drwav_container_riff;
-                format.format = DR_WAVE_FORMAT_PCM;
-                format.channels = 1;
-                format.sampleRate = grp_audio_sr;
-                format.bitsPerSample = 16;
+                    drwav_data_format format;
+                    format.container = drwav_container_riff;
+                    format.format = DR_WAVE_FORMAT_PCM;
+                    format.channels = 1;
+                    format.sampleRate = grp_audio_sr;
+                    format.bitsPerSample = 16;
 
-                drwav wav_out;
-                if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
-                    int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
-                    if (pcm16) {
-                        for (uint64_t s = 0; s < frame_count; s++) {
-                            float smp = grp_audio_buf[start_smp + s];
-                            if (smp > 1.0f) smp = 1.0f;
-                            if (smp < -1.0f) smp = -1.0f;
-                            pcm16[s] = (int16_t)(smp * 32767.0f);
+                    drwav wav_out;
+                    if (drwav_init_file_write(&wav_out, pat_wav_path, &format, NULL)) {
+                        int16_t* pcm16 = (int16_t*)malloc(frame_count * sizeof(int16_t));
+                        if (pcm16) {
+                            for (uint64_t s = 0; s < frame_count; s++) {
+                                float smp = grp_audio_buf[start_smp + s];
+                                if (smp > 1.0f) smp = 1.0f;
+                                if (smp < -1.0f) smp = -1.0f;
+                                pcm16[s] = (int16_t)(smp * 32767.0f);
+                            }
+                            drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
+                            free(pcm16);
                         }
-                        drwav_write_pcm_frames(&wav_out, frame_count, pcm16);
-                        free(pcm16);
+                        drwav_uninit(&wav_out);
                     }
-                    drwav_uninit(&wav_out);
                 }
 
                 int assigned_pass_idx = 0;
@@ -3872,11 +3926,11 @@ int export_group_assets_and_html(
     free(export_tasks);
     group_mutex_destroy(&export_mutex);
 
-    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+    if (debug_mode && original_audio_filepath && original_audio_filepath[0] != '\0') {
         copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
     }
 
-    if (mono_combined && group_audio_len > 0) {
+    if (debug_mode && mono_combined && group_audio_len > 0) {
         char group_wav_filename[1024];
         snprintf(group_wav_filename, sizeof(group_wav_filename), "group_%s_pattern_analysis.wav", group_name);
 
@@ -3942,7 +3996,9 @@ int export_group_assets_and_html(
                 NULL,
                 NULL,
                 0,
-                0
+                0,
+                debug_mode,
+                parent_dir
             );
             if (export_ok) {
                 printf("SUCCESS: Group HTML Report generated successfully: %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
@@ -3953,7 +4009,9 @@ int export_group_assets_and_html(
         } else {
             printf("Error: Failed to perform transience analysis for Group HTML Report.\n");
         }
+    }
 
+    if (mono_combined) {
         free(mono_combined);
     }
 
