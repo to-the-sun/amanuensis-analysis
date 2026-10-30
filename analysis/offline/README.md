@@ -58,5 +58,10 @@ The interactive report (`<audio_stem>.html`) features:
 
 To compile the standalone analyzer executables:
 
-- **Linux**: `make` (produces `ct_analyze_headless`)
-- **Windows (64-bit Cross-Compilation)**: `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra ct_analyze_headless.c ct_exporter.c cumulative_transience.c -o ct_analyze_headless.exe -lm`
+- **Linux**: `make` (produces `ct_analyze_headless` and `ct_song_builder`)
+- **Windows (64-bit Cross-Compilation)**: `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra ct_analyze_headless.c ct_exporter.c cumulative_transience.c crossfade.c -o ct_analyze_headless.exe -lm -lpthread -lOpenCL` and `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra ct_song_builder.c -o ct_song_builder.exe -lm`
+
+## Companion Executables
+
+- **`ct_recombined_pattern_builder` / `ct_recombined_pattern_builder.exe`**: Generates companion recombined flux pattern WAV files (`pattern_<N>_recombined.wav`) inside `[stems]`.
+- **`ct_song_builder` / `ct_song_builder.exe`**: Evaluates cross-stem correlation metrics inside `[stems]`, copies selected pattern stems into `[song]`, generates a combined finished song WAV (`[song]/finished_song.wav`) normalized to peak amplitude 1.0, and exports an interactive correlation HTML report (`song_correlation_report.html`).
