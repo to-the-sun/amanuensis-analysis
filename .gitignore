@@ -22,19 +22,11 @@ additive_synthesis/square/
 additive_synthesis/bell/
 additive_synthesis/complex/
 
-# Pitch separator executables and stem outputs
-pitch_separator
-analysis/pitch_separator
-analysis/ct_pitch_separator
-analysis/flux_pitch_separator
-ct_analyze_headless
-analysis/offline/ct_analyze_headless
-!pitch_separator.exe
-!analysis/pitch_separator.exe
-!ct_pitch_separator.exe
-!analysis/ct_pitch_separator.exe
-!flux_pitch_separator.exe
-!analysis/flux_pitch_separator.exe
-!ct_analyze_headless.exe
-!analysis/offline/ct_analyze_headless.exe
+# Analysis executables and stem outputs
+analysis/flux_separator
+analysis/analyze
+analysis/song_builder
+!analysis/flux_separator.exe
+!analysis/analyze.exe
+!analysis/song_builder.exe
 *_pitch_stems/
