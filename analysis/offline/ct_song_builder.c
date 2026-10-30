@@ -1244,6 +1244,85 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (num_selected > 0) {
+        printf("\nMixing and normalizing combined song WAV...\n");
+        uint64_t max_frames = 0;
+        unsigned int out_sr = 44100;
+
+        for (int s = 0; s < num_selected; s++) {
+            int idx = selected_indices[s];
+            const PatternInfo* pat = &patterns[idx];
+            if (pat->stem_total_frames > max_frames) {
+                max_frames = pat->stem_total_frames;
+            }
+            if (pat->stem_sample_rate > 0) {
+                out_sr = pat->stem_sample_rate;
+            }
+        }
+
+        if (max_frames > 0) {
+            float* mix_buffer = (float*)calloc(max_frames, sizeof(float));
+            if (mix_buffer) {
+                for (int s = 0; s < num_selected; s++) {
+                    int idx = selected_indices[s];
+                    const PatternInfo* pat = &patterns[idx];
+                    if (pat->stem_samples && pat->stem_total_frames > 0) {
+                        for (uint64_t f = 0; f < pat->stem_total_frames; f++) {
+                            mix_buffer[f] += pat->stem_samples[f];
+                        }
+                    }
+                }
+
+                float max_amp = 0.0f;
+                for (uint64_t f = 0; f < max_frames; f++) {
+                    float amp = fabsf(mix_buffer[f]);
+                    if (amp > max_amp) {
+                        max_amp = amp;
+                    }
+                }
+
+                if (max_amp > 0.0f) {
+                    float scale = 1.0f / max_amp;
+                    for (uint64_t f = 0; f < max_frames; f++) {
+                        mix_buffer[f] *= scale;
+                    }
+                }
+
+                int16_t* pcm16 = (int16_t*)malloc(max_frames * sizeof(int16_t));
+                if (pcm16) {
+                    for (uint64_t f = 0; f < max_frames; f++) {
+                        float val = mix_buffer[f];
+                        if (val > 1.0f) val = 1.0f;
+                        if (val < -1.0f) val = -1.0f;
+                        pcm16[f] = (int16_t)roundf(val * 32767.0f);
+                    }
+
+                    char finished_song_path[4096];
+                    snprintf(finished_song_path, sizeof(finished_song_path), "%.3500s" PATH_SEP_STR "finished_song.wav", song_dir);
+
+                    drwav_data_format format;
+                    format.container = drwav_container_riff;
+                    format.format = DR_WAVE_FORMAT_PCM;
+                    format.channels = 1;
+                    format.sampleRate = out_sr;
+                    format.bitsPerSample = 16;
+
+                    drwav wav_out;
+                    if (drwav_init_file_write(&wav_out, finished_song_path, &format, NULL)) {
+                        drwav_write_pcm_frames(&wav_out, max_frames, pcm16);
+                        drwav_uninit(&wav_out);
+                        printf("  Generated finished song WAV: %s (Normalized peak = 1.0)\n", finished_song_path);
+                    } else {
+                        printf("  [Error] Failed creating finished song WAV: %s\n", finished_song_path);
+                    }
+
+                    free(pcm16);
+                }
+                free(mix_buffer);
+            }
+        }
+    }
+
     printf("\nGenerating correlation HTML report...\n");
     generate_correlation_html_report(
         work_dir,
