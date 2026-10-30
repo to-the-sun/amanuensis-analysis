@@ -25,9 +25,17 @@ if not defined MATCHED_WAV (
 )
 
 if defined MATCHED_WAV (
-    "%~dp0ct_analyze_headless.exe" --group --original "!MATCHED_WAV!" %*
+    "%~dp0analyze.exe" --group --original "!MATCHED_WAV!" %*
 ) else (
-    "%~dp0ct_analyze_headless.exe" --group %*
+    "%~dp0analyze.exe" --group %*
+)
+
+if exist "%~dp0song_builder.exe" (
+    if not exist "[palettes]\[stems]" mkdir "[palettes]\[stems]"
+    move /y "%~dp0song_builder.exe" "[palettes]\[stems]\" >nul
+) else if exist "song_builder.exe" (
+    if not exist "[palettes]\[stems]" mkdir "[palettes]\[stems]"
+    move /y "song_builder.exe" "[palettes]\[stems]\" >nul
 )
 
 pause

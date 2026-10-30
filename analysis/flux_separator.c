@@ -1,5 +1,5 @@
 /*
- * flux_pitch_separator.c
+ * flux_separator.c
  *
  * Perfect Reconstruction Pitch Stem Separator - Spectral Flux Focus
  * Multi-File, Directory Scanning & Multi-Threaded Concurrent Execution
@@ -1725,6 +1725,65 @@ void get_filepath_components(const char *filepath, char *out_dir, char *out_base
     }
 }
 
+static void move_helper_files_to_pitch_stems(const char *dir, const char *stem_dir) {
+    const char *files_to_move[] = {
+        "analyze_group.bat",
+        "analyze.exe",
+        "song_builder.exe"
+    };
+    int num_files = sizeof(files_to_move) / sizeof(files_to_move[0]);
+
+    for (int i = 0; i < num_files; i++) {
+        const char *filename = files_to_move[i];
+        char src_path[4096];
+        char dst_path[4096];
+        int found = 0;
+
+        if (strlen(dir) == 0 || strcmp(dir, ".") == 0) {
+            snprintf(src_path, sizeof(src_path), "%s", filename);
+        } else {
+            snprintf(src_path, sizeof(src_path), "%s/%s", dir, filename);
+        }
+
+        FILE *f = fopen(src_path, "rb");
+        if (f) {
+            fclose(f);
+            found = 1;
+        } else if (strlen(dir) != 0 && strcmp(dir, ".") != 0) {
+            snprintf(src_path, sizeof(src_path), "%s", filename);
+            f = fopen(src_path, "rb");
+            if (f) {
+                fclose(f);
+                found = 1;
+            }
+        }
+
+        if (found) {
+            snprintf(dst_path, sizeof(dst_path), "%s/%s", stem_dir, filename);
+            if (rename(src_path, dst_path) == 0) {
+                printf("  Moved helper file: %s -> %s\n", src_path, dst_path);
+            } else {
+                FILE *in = fopen(src_path, "rb");
+                FILE *out = fopen(dst_path, "wb");
+                if (in && out) {
+                    char buf[8192];
+                    size_t bytes;
+                    while ((bytes = fread(buf, 1, sizeof(buf), in)) > 0) {
+                        fwrite(buf, 1, bytes, out);
+                    }
+                    fclose(in);
+                    fclose(out);
+                    remove(src_path);
+                    printf("  Moved helper file: %s -> %s\n", src_path, dst_path);
+                } else {
+                    if (in) fclose(in);
+                    if (out) fclose(out);
+                }
+            }
+        }
+    }
+}
+
 int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int thread_slot, int num_slots) {
     clock_t start_clock = clock();
 
@@ -2222,7 +2281,7 @@ int main(int argc, char *argv[]) {
     enable_ansi_terminal();
 
     printf("====================================================\n");
-    printf("         SPECTRAL FLUX PITCH STEM SEPARATOR         \n");
+    printf("               SPECTRAL FLUX SEPARATOR              \n");
     printf("====================================================\n\n");
 
     char **file_list = NULL;
@@ -2297,6 +2356,8 @@ int main(int argc, char *argv[]) {
     char flux_dir[8192];
     snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
     ensure_dir_exists(flux_dir);
+
+    move_helper_files_to_pitch_stems(dir, stem_dir);
 
     init_fft_tables();
     init_flux_fft_tables();

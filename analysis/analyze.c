@@ -24,7 +24,7 @@
 #endif
 
 #include "cumulative_transience.h"
-#include "ct_exporter.h"
+#include "exporter.h"
 
 static void get_directory_and_stem(const char* filepath, char* out_dir, char* out_stem) {
     const char* last_slash = strrchr(filepath, '/');

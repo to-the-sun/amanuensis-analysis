@@ -1,5 +1,5 @@
-#ifndef CT_EXPORTER_H
-#define CT_EXPORTER_H
+#ifndef EXPORTER_H
+#define EXPORTER_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,4 +71,4 @@ int find_original_audio_for_stem(const char* exe_dir, const char* stem_filename,
 }
 #endif
 
-#endif // CT_EXPORTER_H
+#endif // EXPORTER_H

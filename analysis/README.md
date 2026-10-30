@@ -1,6 +1,6 @@
 # Standalone Offline Cumulative Transience Analyzer & Exporter
 
-This directory contains the pure C implementation of the offline transience analyzer and HTML report exporter (`ct_analyze_headless`).
+This directory contains the pure C implementation of the offline transience analyzer and HTML report exporter (`analyze`), pitch stem spectral flux separator (`flux_separator`), pattern song correlation builder (`song_builder`), and group analysis launcher (`analyze_group.bat`).
 
 ## Architecture
 
@@ -21,7 +21,7 @@ The C pipeline operates in two passes without Python dependencies:
 
 When invoked with `--group` (or `-g`), the analyzer executes multi-file grouped stem analysis across all WAV files in a target palette directory, computing shared cross-stem transience metrics while maximizing multi-core CPU and GPU utilization. An optional argument `--original <path>` (or `-o <path>`) allows specifying the absolute or relative path to an original audio file.
 
-When searching for original audio files to extract audio from for creating `[stems]` and `[loops]`, the analyzer inspects parent folders level-by-level starting at the parent directory above the folder containing `ct_analyze_headless.exe`. It looks for a WAV file whose whole name (minus extension) matches the beginning of the stem WAV file in question (case-insensitive). If a match is found in a parent directory level, higher parent directories are forgone. Matching `passes` text files associated with dynamically located original audio files are scanned and copied into destination palette directories.
+When searching for original audio files to extract audio from for creating `[stems]` and `[loops]`, the analyzer inspects parent folders level-by-level starting at the parent directory above the folder containing `analyze.exe`. It looks for a WAV file whose whole name (minus extension) matches the beginning of the stem WAV file in question (case-insensitive). If a match is found in a parent directory level, higher parent directories are forgone. Matching `passes` text files associated with dynamically located original audio files are scanned and copied into destination palette directories.
 
 1. **Parallel Stem WAV Decoding**:
    - Spawns CPU worker threads (`_beginthreadex` on Windows, `pthread_create` on POSIX) to decode PCM audio frames and perform stereo-to-mono downmixing across all stems concurrently.
@@ -40,28 +40,27 @@ When searching for original audio files to extract audio from for creating `[ste
    - Thread task delegation logging outputs real-time console messages (`[Thread X/Y] Starting task: ...`) as worker threads pick up tasks.
    - Thread-safe console progress bar rendering (`print_progress_bar`) displays fine-grained step/frame-level percentage indicators across all pipeline stages (Decoding, Pass 1, STFT, Pass 2, Asset Export, Group Mixing, Group Report).
 
-## Generated HTML Report Layout
+## Executable Helper File Moving Workflow
 
-The interactive report (`<audio_stem>.html`) features:
+1. **`flux_separator.exe`**:
+   - When executed, `flux_separator.exe` searches its folder for `analyze_group.bat`, `analyze.exe`, and `song_builder.exe`, and moves any of these helper files found into the newly created `pitch_stems` directory.
 
-1. **Section 1: Interactive Waveform & Pattern Map**:
-   - Overall audio waveform, color-coded pattern spans, and audio seek interactions.
-
-2. **Section 2: Zoomed-In Segment Inspector**:
-   - Vertically stacked segment panels (`boxPrev`, `boxCurr`, `boxNext`).
-   - Dynamic pattern color-coding: segment borders dynamically highlight using the color of the pattern they belong to, and cleanly revert back to neutral borders when a pattern ends.
-
-3. **Section 3: Real-Time Accumulated History Buffer**:
-   - Real-time history buffer graph updating during audio playback with peak markers, qualification lines, tolerance bands, and drag-to-zoom controls.
+2. **`analyze_group.bat`**:
+   - When executed, `analyze_group.bat` invokes `analyze.exe --group` to perform group analysis across stems, and then searches its folder for `song_builder.exe` and moves it into the newly created `[palettes]/[stems]` directory.
 
 ## Compilation
 
-To compile the standalone analyzer executables:
+To compile the analysis executables:
 
-- **Linux**: `make` (produces `ct_analyze_headless` and `ct_song_builder`)
-- **Windows (64-bit Cross-Compilation)**: `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra ct_analyze_headless.c ct_exporter.c cumulative_transience.c crossfade.c -o ct_analyze_headless.exe -lm -lpthread -lOpenCL` and `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra ct_song_builder.c -o ct_song_builder.exe -lm`
+- **Linux**: `make` (produces `analyze`, `song_builder`, and `flux_separator`)
+- **Windows (64-bit Cross-Compilation)**:
+  - `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra analyze.c exporter.c cumulative_transience.c crossfade.c -o analyze.exe -lm -lpthread -lOpenCL`
+  - `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra song_builder.c -o song_builder.exe -lm`
+  - `x86_64-w64-mingw32-gcc -O3 -Wall -std=c99 -I. -pthread flux_separator.c -o flux_separator.exe -lm`
 
-## Companion Executables
+## Executables Summary
 
-- **`ct_recombined_pattern_builder` / `ct_recombined_pattern_builder.exe`**: Generates companion recombined flux pattern WAV files (`pattern_<N>_recombined.wav`) inside `[stems]`.
-- **`ct_song_builder` / `ct_song_builder.exe`**: Evaluates cross-stem correlation metrics inside `[stems]`, copies selected pattern stems into `[song]`, generates a combined finished song WAV (`[song]/finished_song.wav`) normalized to peak amplitude 1.0, and exports an interactive correlation HTML report (`song_correlation_report.html`).
+- **`flux_separator` / `flux_separator.exe`**: Multi-threaded C pitch separator generating spectral flux stems and interactive HTML reports. Automatically moves `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` into `pitch_stems/`.
+- **`analyze` / `analyze.exe`**: C cumulative transience analyzer generating palette pattern maps, loop/stem WAV slices, JSON manifests, and interactive HTML reports.
+- **`analyze_group.bat`**: Batch launcher for group stem analysis. Automatically moves `song_builder.exe` into `[palettes]/[stems]/`.
+- **`song_builder` / `song_builder.exe`**: Evaluates cross-stem correlation metrics inside `[stems]`, copies selected pattern stems into `[song]`, generates a combined finished song WAV (`[song]/finished_song.wav`) normalized to peak amplitude 1.0, and exports an interactive correlation HTML report (`song_correlation_report.html`).
