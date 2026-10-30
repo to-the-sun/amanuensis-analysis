@@ -60,7 +60,7 @@ To compile the analysis executables:
 
 ## Executables Summary
 
-- **`flux_separator` / `flux_separator.exe`**: Multi-threaded C pitch separator generating spectral flux stems. Supports an optional `--debug` argument (disabled by default) to generate companion `[flux]` subfolders, raw/recombined flux WAV files, and interactive HTML reports. Automatically moves `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` into `pitch_stems/`.
+- **`flux_separator` / `flux_separator.exe`**: Multi-threaded C pitch separator generating pitch stem WAV files in `pitch_stems/`. Supports an optional `--debug` argument (disabled by default) to generate companion `[flux]` subfolders, raw/recombined flux WAV files, and interactive HTML reports. Automatically moves `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` into `pitch_stems/`.
 - **`analyze` / `analyze.exe`**: C cumulative transience analyzer generating palette pattern maps, loop/stem WAV slices, JSON manifests, and interactive HTML reports.
 - **`analyze_group.bat`**: Batch launcher for group stem analysis. Automatically moves `song_builder.exe` into `[palettes]/[stems]/`.
 - **`song_builder` / `song_builder.exe`**: Evaluates cross-stem correlation metrics inside `[stems]`, copies selected pattern stems into `[song]`, generates a combined finished song WAV (`[song]/finished_song.wav`) normalized to peak amplitude 1.0, and exports an interactive correlation HTML report (`song_correlation_report.html`).

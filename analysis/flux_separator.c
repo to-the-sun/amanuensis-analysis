@@ -2051,137 +2051,139 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         double stem_rms = sqrt(stem_sum_sq / (total_samples * num_channels));
         double active_ms = ((double)active_frames / sample_rate) * 1000.0;
 
-        double *raw_flux_buf = NULL;
-        if (g_debug_mode && active_ms >= 99.0 && stem_rms > 1e-6) {
-            raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
-            if (raw_flux_buf) {
-                compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, raw_flux_buf, 1);
+        if (active_ms >= 99.0 && stem_rms > 1e-6) {
+            audible_count++;
+
+            char note_name[32];
+            get_note_name(p, note_name, sizeof(note_name));
+
+            // Always write the pitch stem WAV file to pitch_stems/
+            char stem_filepath[4096];
+            snprintf(stem_filepath, sizeof(stem_filepath), "%s/%s_pitch_%03d_%s.wav",
+                     stem_dir, basename, p, note_name);
+            write_wav_16bit(stem_filepath, sample_rate, num_channels, total_samples, unpadded_data);
+
+            if (g_debug_mode) {
+                double *raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+                if (raw_flux_buf) {
+                    compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, raw_flux_buf, 1);
+
+                    double max_fl_peak = 0.0;
+                    double fl_sum_sq = 0.0;
+                    for (size_t k = 0; k < total_channel_samples; k++) {
+                        double val = raw_flux_buf[k];
+                        if (val > max_fl_peak) max_fl_peak = val;
+                        fl_sum_sq += val * val;
+                    }
+                    double fl_rms = sqrt(fl_sum_sq / total_channel_samples);
+
+                    if (audible_count - 1 >= audible_capacity) {
+                        audible_capacity = (audible_capacity == 0) ? 16 : audible_capacity * 2;
+                        flux_stems = (FluxStem*)realloc(flux_stems, audible_capacity * sizeof(FluxStem));
+                    }
+
+                    FluxStem *stem = &flux_stems[audible_count - 1];
+                    memset(stem, 0, sizeof(FluxStem));
+                    stem->pitch = p;
+                    snprintf(stem->note_name, sizeof(stem->note_name), "%s", note_name);
+                    stem->max_flux_peak = max_fl_peak;
+                    stem->rms_flux = fl_rms;
+
+                    snprintf(stem->mod_filename, sizeof(stem->mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
+                             basename, p, note_name);
+
+                    double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+                    if (mod_flux_buf) {
+                        memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
+
+                        // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
+                        double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
+                        if (ch0_flux) {
+                            for (uint32_t s = 0; s < total_samples; s++) {
+                                ch0_flux[s] = raw_flux_buf[s * num_channels];
+                            }
+                            detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
+                            detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
+                            free(ch0_flux);
+                        }
+
+                        // Process modified flux envelope for each channel
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            double *channel_flux = (double*)malloc(total_samples * sizeof(double));
+                            if (channel_flux) {
+                                for (uint32_t s = 0; s < total_samples; s++) {
+                                    channel_flux[s] = mod_flux_buf[s * num_channels + c];
+                                }
+                                modify_flux_envelope_channel(channel_flux, total_samples);
+                                for (uint32_t s = 0; s < total_samples; s++) {
+                                    mod_flux_buf[s * num_channels + c] = channel_flux[s];
+                                }
+                                free(channel_flux);
+                            }
+                        }
+
+                        if (recombined_mod_flux) {
+                            for (size_t k = 0; k < total_channel_samples; k++) {
+                                recombined_mod_flux[k] += mod_flux_buf[k];
+                            }
+                        }
+                    }
+
+                    // Export companion flux WAV files immediately
+                    char raw_flux_filepath[4096];
+                    snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
+                             stem_dir, basename, p, note_name);
+                    write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
+
+                    if (mod_flux_buf) {
+                        char mod_flux_filepath[4096];
+                        snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/[flux]/%s",
+                                 stem_dir, stem->mod_filename);
+                        write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
+                    }
+
+                    // Store compact 16-bit PCM mono arrays for JS report generation
+                    stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+                    if (stem->raw_flux_i16) {
+                        for (uint32_t s = 0; s < total_samples; s++) {
+                            double sum_f = 0.0;
+                            for (uint32_t c = 0; c < num_channels; c++) {
+                                sum_f += raw_flux_buf[s * num_channels + c];
+                            }
+                            double val = sum_f / num_channels;
+                            if (val > 1.0) val = 1.0;
+                            if (val < 0.0) val = 0.0;
+                            stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
+                        }
+                    }
+
+                    if (mod_flux_buf) {
+                        stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+                        if (stem->mod_flux_i16) {
+                            for (uint32_t s = 0; s < total_samples; s++) {
+                                double sum_f = 0.0;
+                                for (uint32_t c = 0; c < num_channels; c++) {
+                                    sum_f += mod_flux_buf[s * num_channels + c];
+                                }
+                                double val = sum_f / num_channels;
+                                if (val > 1.0) val = 1.0;
+                                if (val < 0.0) val = 0.0;
+                                stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
+                            }
+                        }
+                        free(mod_flux_buf);
+                        mod_flux_buf = NULL;
+                    }
+
+                    free(raw_flux_buf);
+                    raw_flux_buf = NULL;
+                }
             }
         }
 
         // Free reconstructed main pitch stem audio immediately
         free(unpadded_data);
         unpadded_data = NULL;
-
-        if (g_debug_mode) {
-            if (!raw_flux_buf) continue;
-
-            // Calculate flux metrics
-            double max_fl_peak = 0.0;
-            double fl_sum_sq = 0.0;
-            for (size_t k = 0; k < total_channel_samples; k++) {
-                double val = raw_flux_buf[k];
-                if (val > max_fl_peak) max_fl_peak = val;
-                fl_sum_sq += val * val;
-            }
-            double fl_rms = sqrt(fl_sum_sq / total_channel_samples);
-
-            if (audible_count >= audible_capacity) {
-                audible_capacity = (audible_capacity == 0) ? 16 : audible_capacity * 2;
-                flux_stems = (FluxStem*)realloc(flux_stems, audible_capacity * sizeof(FluxStem));
-            }
-
-            FluxStem *stem = &flux_stems[audible_count++];
-            memset(stem, 0, sizeof(FluxStem));
-            stem->pitch = p;
-            get_note_name(p, stem->note_name, sizeof(stem->note_name));
-            stem->max_flux_peak = max_fl_peak;
-            stem->rms_flux = fl_rms;
-
-            snprintf(stem->mod_filename, sizeof(stem->mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
-                     basename, p, stem->note_name);
-
-            double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
-            if (mod_flux_buf) {
-                memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
-
-                // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
-                double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
-                if (ch0_flux) {
-                    for (uint32_t s = 0; s < total_samples; s++) {
-                        ch0_flux[s] = raw_flux_buf[s * num_channels];
-                    }
-                    detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
-                    detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
-                    free(ch0_flux);
-                }
-
-                // Process modified flux envelope for each channel
-                for (uint32_t c = 0; c < num_channels; c++) {
-                    double *channel_flux = (double*)malloc(total_samples * sizeof(double));
-                    if (channel_flux) {
-                        for (uint32_t s = 0; s < total_samples; s++) {
-                            channel_flux[s] = mod_flux_buf[s * num_channels + c];
-                        }
-                        modify_flux_envelope_channel(channel_flux, total_samples);
-                        for (uint32_t s = 0; s < total_samples; s++) {
-                            mod_flux_buf[s * num_channels + c] = channel_flux[s];
-                        }
-                        free(channel_flux);
-                    }
-                }
-
-                if (recombined_mod_flux) {
-                    for (size_t k = 0; k < total_channel_samples; k++) {
-                        recombined_mod_flux[k] += mod_flux_buf[k];
-                    }
-                }
-            }
-
-            // Export companion flux WAV files immediately
-            char raw_flux_filepath[4096];
-            snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
-                     stem_dir, basename, p, stem->note_name);
-            write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
-
-            if (mod_flux_buf) {
-                char mod_flux_filepath[4096];
-                snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
-                         stem_dir, stem->mod_filename);
-                write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
-            }
-
-            // Store compact 16-bit PCM mono arrays for JS report generation
-            stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-            if (stem->raw_flux_i16) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += raw_flux_buf[s * num_channels + c];
-                    }
-                    double val = sum_f / num_channels;
-                    if (val > 1.0) val = 1.0;
-                    if (val < 0.0) val = 0.0;
-                    stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
-                }
-            }
-
-            if (mod_flux_buf) {
-                stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-                if (stem->mod_flux_i16) {
-                    for (uint32_t s = 0; s < total_samples; s++) {
-                        double sum_f = 0.0;
-                        for (uint32_t c = 0; c < num_channels; c++) {
-                            sum_f += mod_flux_buf[s * num_channels + c];
-                        }
-                        double val = sum_f / num_channels;
-                        if (val > 1.0) val = 1.0;
-                        if (val < 0.0) val = 0.0;
-                        stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
-                    }
-                }
-                free(mod_flux_buf);
-                mod_flux_buf = NULL;
-            }
-
-            // Free full-precision double arrays immediately to optimize RAM footprint
-            free(raw_flux_buf);
-            raw_flux_buf = NULL;
-        } else {
-            if (active_ms >= 99.0 && stem_rms > 1e-6) {
-                audible_count++;
-            }
-        }
     }
 
     if (g_debug_mode && recombined_mod_flux) {
