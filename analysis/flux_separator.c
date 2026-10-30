@@ -1374,19 +1374,6 @@ void generate_master_flux_html_report(
         fprintf(f, "</body>\n</html>\n");
         fclose(f);
     }
-
-    /* Top-level redirecting index.html in stem_dir */
-    char redirect_path[4096];
-    snprintf(redirect_path, sizeof(redirect_path), "%s/index.html", stem_dir);
-    FILE *f_redir = fopen(redirect_path, "w");
-    if (f_redir) {
-        fprintf(f_redir, "<!DOCTYPE html>\n<html>\n<head>\n");
-        fprintf(f_redir, "<meta http-equiv=\"refresh\" content=\"0; url=[flux]/index.html\">\n");
-        fprintf(f_redir, "<title>Spectral Flux Report Redirect</title>\n</head>\n<body>\n");
-        fprintf(f_redir, "<p>Redirecting to <a href=\"[flux]/index.html\">Spectral Flux Batch Report</a>...</p>\n");
-        fprintf(f_redir, "</body>\n</html>\n");
-        fclose(f_redir);
-    }
 }
 
 void init_fft_tables(void) {
