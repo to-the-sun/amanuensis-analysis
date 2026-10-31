@@ -182,20 +182,6 @@ static double compute_correlation_ext(
     return sqrt(var);
 }
 
-static bool check_patterns_overlap(const PatternInfo* pat1, const PatternInfo* pat2) {
-    if (!pat1 || !pat2) return false;
-    if (!pat1->recombined_samples || !pat2->recombined_samples) return false;
-    if (pat1->active_length == 0 || pat2->active_length == 0) return false;
-
-    uint64_t min_frames = pat1->total_frames < pat2->total_frames ? pat1->total_frames : pat2->total_frames;
-    for (uint64_t t = 0; t < min_frames; t++) {
-        if (fabsf(pat1->recombined_samples[t]) > 1e-6f && fabsf(pat2->recombined_samples[t]) > 1e-6f) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static int compare_patterns_by_length_desc(const void* a, const void* b) {
     const PatternInfo* pa = (const PatternInfo*)a;
     const PatternInfo* pb = (const PatternInfo*)b;
@@ -1000,73 +986,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Step 1: Start out with the two longest patterns that overlap at all
-    int seed_i = -1;
-    int seed_j = -1;
+    // Sequential pattern testing in descending length order through a single unified loop.
+    // When no patterns are selected, correlation is null (NaN). Zero correlation (e.g. from the first
+    // pattern having no multi-pattern overlap yet) is considered better than null (NaN) correlation.
+    current_song_correlation = NAN;
 
     for (int i = 0; i < num_patterns; i++) {
-        if (patterns[i].active_length == 0) continue;
-        for (int j = i + 1; j < num_patterns; j++) {
-            if (patterns[j].active_length == 0) continue;
-            if (check_patterns_overlap(&patterns[i], &patterns[j])) {
-                seed_i = i;
-                seed_j = j;
-                break;
-            }
-        }
-        if (seed_i != -1) {
-            break;
-        }
-    }
-
-    if (seed_i != -1 && seed_j != -1) {
-        int pair[2] = { seed_i, seed_j };
-        double pair_corr = compute_correlation_ext(patterns, pair, 2);
-
-        // Add seed_i
-        patterns[seed_i].selected = true;
-        patterns[seed_i].selection_order = num_selected;
-        patterns[seed_i].judgment_overall_corr_pct = 0.0;
-        selected_indices[num_selected++] = seed_i;
-
-        // Add seed_j
-        patterns[seed_j].selected = true;
-        patterns[seed_j].selection_order = num_selected;
-        patterns[seed_j].judgment_overall_corr_pct = pair_corr;
-        selected_indices[num_selected++] = seed_j;
-
-        current_song_correlation = pair_corr;
-
-        printf("[ACCEPT] %s (Rank %d) & %s (Rank %d) selected as seed pair (longest overlapping). Song Correlation (Std Dev): %.6f\n",
-               patterns[seed_i].stem_filename, seed_i + 1,
-               patterns[seed_j].stem_filename, seed_j + 1,
-               current_song_correlation);
-    } else {
-        // Fallback for single active pattern or no overlapping pairs
-        int single_seed = -1;
-        for (int i = 0; i < num_patterns; i++) {
-            if (patterns[i].active_length > 0) {
-                single_seed = i;
-                break;
-            }
-        }
-
-        if (single_seed != -1) {
-            patterns[single_seed].selected = true;
-            patterns[single_seed].selection_order = num_selected;
-            patterns[single_seed].judgment_overall_corr_pct = 0.0;
-            selected_indices[num_selected++] = single_seed;
-            current_song_correlation = 0.0;
-
-            printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation (Std Dev): %.6f\n",
-                   patterns[single_seed].stem_filename, single_seed + 1, current_song_correlation);
-        }
-    }
-
-    // Step 2: Proceed testing the next longest pattern sequentially until all patterns have been tested.
-    // If a pattern increases correlation it is accepted. If it decreases or stays equal it is rejected.
-    for (int i = 0; i < num_patterns; i++) {
-        if (patterns[i].selected || patterns[i].active_length == 0) {
+        if (patterns[i].active_length == 0) {
             continue;
         }
 
@@ -1078,13 +1004,26 @@ int main(int argc, char** argv) {
         double proposed_corr = compute_correlation_ext(patterns, test_set, num_selected + 1);
         patterns[i].judgment_overall_corr_pct = proposed_corr;
 
-        if (proposed_corr > current_song_correlation) {
+        bool is_increase = false;
+        if (isnan(current_song_correlation)) {
+            // First pattern: zero correlation is better than null/NaN correlation
+            is_increase = true;
+        } else if (proposed_corr > current_song_correlation) {
+            is_increase = true;
+        }
+
+        if (is_increase) {
             patterns[i].selected = true;
             patterns[i].selection_order = num_selected;
             selected_indices[num_selected++] = i;
 
-            printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.6f -> %.6f\n",
-                   patterns[i].stem_filename, i + 1, current_song_correlation, proposed_corr);
+            if (isnan(current_song_correlation)) {
+                printf("[ACCEPT] %s (Rank %d) added. Song Correlation initialized: null -> %.6f\n",
+                       patterns[i].stem_filename, i + 1, proposed_corr);
+            } else {
+                printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.6f -> %.6f\n",
+                       patterns[i].stem_filename, i + 1, current_song_correlation, proposed_corr);
+            }
             current_song_correlation = proposed_corr;
         } else {
             patterns[i].selection_order = num_selected;
