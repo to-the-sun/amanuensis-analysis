@@ -58,7 +58,7 @@ Pure C offline cumulative transience analyzer (`analyze` / `analyze.exe`) genera
 
 ### Group Analysis & Song Building (`analyze_group.bat` & `song_builder`)
 - `analyze_group.bat`: Executes multi-file grouped stem analysis across all stems in a palette directory, automatically moving `song_builder.exe` into `[palettes]/[stems]/`.
-- `song_builder`: Evaluates pattern correlation across candidate patterns inside `[stems]/` (calculating correlation across sample indices where other added patterns have a non-zero sum and subtracting any excess whenever a pattern value exceeds that sum, recalculating scores across all patterns in the song when testing candidate additions), copies selected pattern stems into `[song]/`, builds `[song]/finished_song.wav` (omitting leading blank space so the first non-zero sample is at index zero), and exports an interactive correlation report (`song_correlation_report.html`).
+- `song_builder`: Evaluates pattern variance and discorrelation across candidate patterns inside `[stems]/` (calculating sample deviation from the mean across overlapping patterns and seeking to reduce overall discorrelation), copies selected pattern stems into `[song]/`, builds `[song]/finished_song.wav` (omitting leading blank space so the first non-zero sample is at index zero), and exports an interactive correlation report (`song_correlation_report.html`).
 
 ### Pitch Tracking & Tuning Regression (`pitch_tracker.py`)
 Analyzes polyphonic recordings for continuous dominant pitch and steady tuning regression over time using YIN, pYIN, or PipTrack algorithms. Outputs high-resolution 2-panel visual plots (`.png`) with spectrogram overlays and fractional MIDI gridlines, as well as detailed CSV exports with cent deviations (`+12c`, `-34c`).
