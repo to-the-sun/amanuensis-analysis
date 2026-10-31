@@ -3888,6 +3888,101 @@ int export_group_assets_and_html(
             if (grp_raw_blank_spaces) free(grp_raw_blank_spaces);
         }
 
+        // Export Group Audio WAV and HTML Report for this specific original audio file (or fallback)
+        if (grp_audio_buf && grp_audio_len > 0) {
+            char target_orig_basename[1024];
+            if (grp_orig_path && grp_orig_path[0] != '\0') {
+                const char* fn = grp_orig_path;
+                const char* slash1 = strrchr(fn, '/');
+                const char* slash2 = strrchr(fn, '\\');
+                if (slash1 && slash1 >= fn) fn = slash1 + 1;
+                if (slash2 && slash2 >= fn) fn = slash2 + 1;
+                const char* dot = strrchr(fn, '.');
+                size_t blen = dot ? (size_t)(dot - fn) : strlen(fn);
+                if (blen >= sizeof(target_orig_basename)) blen = sizeof(target_orig_basename) - 1;
+                strncpy(target_orig_basename, fn, blen);
+                target_orig_basename[blen] = '\0';
+            } else {
+                snprintf(target_orig_basename, sizeof(target_orig_basename), "%s", group_name);
+            }
+
+            char group_wav_filename[1024];
+            snprintf(group_wav_filename, sizeof(group_wav_filename), "group_%s_pattern_analysis.wav", target_orig_basename);
+
+            char group_wav_path[4096];
+            snprintf(group_wav_path, sizeof(group_wav_path), "%s" PATH_SEP_STR "%s", group_output_dir, group_wav_filename);
+
+            printf("\n[Group Mode] Writing group audio WAV file: %s...\n", group_wav_path);
+
+            drwav_data_format format;
+            format.container = drwav_container_riff;
+            format.format = DR_WAVE_FORMAT_PCM;
+            format.channels = 1;
+            format.sampleRate = grp_audio_sr;
+            format.bitsPerSample = 16;
+
+            drwav group_wav_out;
+            if (drwav_init_file_write(&group_wav_out, group_wav_path, &format, NULL)) {
+                int16_t* pcm16 = (int16_t*)malloc(grp_audio_len * sizeof(int16_t));
+                if (pcm16) {
+                    for (int s = 0; s < grp_audio_len; s++) {
+                        float smp = grp_audio_buf[s];
+                        if (smp > 1.0f) smp = 1.0f;
+                        if (smp < -1.0f) smp = -1.0f;
+                        pcm16[s] = (int16_t)(smp * 32767.0f);
+                    }
+                    drwav_write_pcm_frames(&group_wav_out, grp_audio_len, pcm16);
+                    free(pcm16);
+                }
+                drwav_uninit(&group_wav_out);
+            }
+
+            // Export group interactive HTML report & assets for this original audio file
+            char group_stem_name[1024];
+            snprintf(group_stem_name, sizeof(group_stem_name), "group_%s_pattern_analysis", target_orig_basename);
+
+            printf("\nGenerating Group Mix and HTML Report: %s" PATH_SEP_STR "%s.html...\n", group_output_dir, group_stem_name);
+
+            FullAnalysisResult res2_group;
+            if (analyzer_batch_analyze_shared(grp_audio_buf, grp_audio_len, grp_audio_sr, pass2_win_ms, 1, NULL, &res2_group, 1)) {
+                printf("[Group Mode] Transience analysis completed for Group HTML Report '%s'. Writing assets...\n", group_stem_name);
+                int export_ok = export_single_stem_assets_from_res(
+                    group_output_dir,
+                    group_stem_name,
+                    grp_audio_buf,
+                    grp_audio_len,
+                    grp_audio_sr,
+                    pass2_win_ms,
+                    best_bar_length_ms,
+                    accumulated_contour,
+                    contour_len,
+                    contour_sample_count,
+                    contour_evo,
+                    CONTOUR_EVO_FRAMES,
+                    CONTOUR_EVO_PTS,
+                    &res2_group,
+                    0,
+                    NULL,
+                    0,
+                    0,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    0,
+                    0
+                );
+                if (export_ok) {
+                    printf("SUCCESS: Group HTML Report generated successfully: %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
+                } else {
+                    printf("Error: Failed to write Group HTML report %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
+                }
+                analyzer_free_analysis(&res2_group);
+            } else {
+                printf("Error: Failed to perform transience analysis for Group HTML Report '%s'.\n", group_stem_name);
+            }
+        }
+
         if (grp_rec_buf) free(grp_rec_buf);
         if (grp_audio_buf) free(grp_audio_buf);
     }
@@ -3910,84 +4005,7 @@ int export_group_assets_and_html(
         copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
     }
 
-    if (mono_combined && group_audio_len > 0) {
-        char group_wav_filename[1024];
-        snprintf(group_wav_filename, sizeof(group_wav_filename), "group_%s_pattern_analysis.wav", group_name);
-
-        char group_wav_path[4096];
-        snprintf(group_wav_path, sizeof(group_wav_path), "%s" PATH_SEP_STR "%s", group_output_dir, group_wav_filename);
-
-        printf("\n[Group Mode] Writing group audio WAV file: %s...\n", group_wav_path);
-
-        drwav_data_format format;
-        format.container = drwav_container_riff;
-        format.format = DR_WAVE_FORMAT_PCM;
-        format.channels = 1;
-        format.sampleRate = group_audio_sr;
-        format.bitsPerSample = 16;
-
-        drwav group_wav_out;
-        if (drwav_init_file_write(&group_wav_out, group_wav_path, &format, NULL)) {
-            int16_t* pcm16 = (int16_t*)malloc(group_audio_len * sizeof(int16_t));
-            if (pcm16) {
-                for (int s = 0; s < group_audio_len; s++) {
-                    float smp = mono_combined[s];
-                    if (smp > 1.0f) smp = 1.0f;
-                    if (smp < -1.0f) smp = -1.0f;
-                    pcm16[s] = (int16_t)(smp * 32767.0f);
-                }
-                drwav_write_pcm_frames(&group_wav_out, group_audio_len, pcm16);
-                free(pcm16);
-            }
-            drwav_uninit(&group_wav_out);
-        }
-
-        // Export full combined group interactive HTML report & assets
-        char group_stem_name[1024];
-        snprintf(group_stem_name, sizeof(group_stem_name), "group_%s_pattern_analysis", group_name);
-
-        printf("\nGenerating Group Mix and HTML Report: %s" PATH_SEP_STR "%s.html...\n", group_output_dir, group_stem_name);
-
-        // Run Pass 2 on group mono audio to get group res2
-        FullAnalysisResult res2_group;
-        if (analyzer_batch_analyze_shared(mono_combined, group_audio_len, group_audio_sr, pass2_win_ms, 1, NULL, &res2_group, 1)) {
-            printf("[Group Mode] Transience analysis completed for Group HTML Report. Writing assets...\n");
-            int export_ok = export_single_stem_assets_from_res(
-                group_output_dir,
-                group_stem_name,
-                mono_combined,
-                group_audio_len,
-                group_audio_sr,
-                pass2_win_ms,
-                best_bar_length_ms,
-                accumulated_contour,
-                contour_len,
-                contour_sample_count,
-                contour_evo,
-                CONTOUR_EVO_FRAMES,
-                CONTOUR_EVO_PTS,
-                &res2_group,
-                0,
-                NULL,
-                0,
-                0,
-                NULL,
-                NULL,
-                NULL,
-                NULL,
-                0,
-                0
-            );
-            if (export_ok) {
-                printf("SUCCESS: Group HTML Report generated successfully: %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
-            } else {
-                printf("Error: Failed to write Group HTML report %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
-            }
-            analyzer_free_analysis(&res2_group);
-        } else {
-            printf("Error: Failed to perform transience analysis for Group HTML Report.\n");
-        }
-
+    if (mono_combined) {
         free(mono_combined);
     }
 

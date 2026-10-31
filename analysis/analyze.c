@@ -638,7 +638,7 @@ static int process_group_files(const FileList* wav_files, const char* base_dir, 
         printf("\n============================================================\n");
         printf("GROUP ANALYSIS COMPLETE FOR %d STEMS!\n", num_stems);
         printf("Output Folder: %s[palettes]" PATH_SEP_STR "\n", base_dir);
-        printf("Group HTML Report: group_%s_pattern_analysis.html\n", group_name);
+        printf("Group HTML Report(s) generated in output folder.\n");
         printf("============================================================\n");
     }
 
