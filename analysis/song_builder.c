@@ -137,16 +137,14 @@ static double compute_stem_correlation(
         return 0.0;
     }
 
-    // First summing all of the values in each sample of that stem
-    double stem_corr = 0.0;
-    for (uint64_t t = 0; t < pat_i->total_frames; t++) {
-        stem_corr += (double)pat_i->recombined_samples[t];
-    }
-
-    // For each sample, the values at that sample index in each of the other stems
-    // that have already been added to the song should be summed.
-    // If that sum is greater than zero and the value at the sample for the stem in question
+    // The correlation score for a sample should only be calculated if there is at least one
+    // other pattern with a non-zero value at that sample index.
+    // If the other-pattern sum for a sample index is zero, that sample should not count
+    // one way or the other towards the correlation score for that pattern.
+    // If that sum is greater than zero and the value at the sample for the pattern in question
     // exceeds it, the amount it exceeds it by should be subtracted from the correlation score.
+    double stem_corr = 0.0;
+
     for (uint64_t t = 0; t < pat_i->total_frames; t++) {
         double val_i = (double)pat_i->recombined_samples[t];
         double sum_other = 0.0;
@@ -161,8 +159,11 @@ static double compute_stem_correlation(
             }
         }
 
-        if (sum_other > 0.0 && val_i > sum_other) {
-            stem_corr -= (val_i - sum_other);
+        if (sum_other > 0.0) {
+            stem_corr += val_i;
+            if (val_i > sum_other) {
+                stem_corr -= (val_i - sum_other);
+            }
         }
     }
 
