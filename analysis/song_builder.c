@@ -45,12 +45,6 @@ typedef struct {
     bool selected;
     int selection_order;
 
-    double judgment_stem_corr_sum;
-    double judgment_stem_cap_sum;
-    double judgment_stem_corr_pct;
-
-    double judgment_overall_corr_sum;
-    double judgment_overall_cap_sum;
     double judgment_overall_corr_pct;
 } PatternInfo;
 
@@ -134,13 +128,9 @@ static char* encode_base64_bytes(const uint8_t* data, size_t input_len) {
 static double compute_correlation_ext(
     const PatternInfo* patterns,
     const int* candidate_indices,
-    int count,
-    double* out_total_corr,
-    double* out_total_cap
+    int count
 ) {
     if (count <= 0) {
-        if (out_total_corr) *out_total_corr = 0.0;
-        if (out_total_cap) *out_total_cap = 0.0;
         return 0.0;
     }
 
@@ -154,8 +144,6 @@ static double compute_correlation_ext(
     }
 
     if (max_frames == 0) {
-        if (out_total_corr) *out_total_corr = 0.0;
-        if (out_total_cap) *out_total_cap = 0.0;
         return 0.0;
     }
 
@@ -185,66 +173,13 @@ static double compute_correlation_ext(
     }
 
     if (qualifying_samples == 0) {
-        if (out_total_corr) *out_total_corr = 0.0;
-        if (out_total_cap) *out_total_cap = 0.0;
         return 0.0;
     }
 
     double mean = sum / (double)qualifying_samples;
     double var = (sum_sq / (double)qualifying_samples) - (mean * mean);
     if (var < 0.0) var = 0.0;
-    double std_dev = sqrt(var);
-
-    if (out_total_corr) *out_total_corr = std_dev;
-    if (out_total_cap) *out_total_cap = sum;
-
-    return std_dev;
-}
-
-static void compute_judgment_time_correlation_samples(
-    PatternInfo* pat_i,
-    const PatternInfo* patterns,
-    const int* selected_indices,
-    int num_selected
-) {
-    uint64_t total_frames = pat_i->total_frames;
-    if (!pat_i->recombined_samples || total_frames == 0) {
-        pat_i->judgment_stem_corr_sum = 0.0;
-        pat_i->judgment_stem_cap_sum = 0.0;
-        pat_i->judgment_stem_corr_pct = 0.0;
-        return;
-    }
-
-    double stem_corr_sum = 0.0;
-    double stem_cap_sum = 0.0;
-
-    for (uint64_t s = 0; s < total_frames; s++) {
-        double cap_i = fabsf(pat_i->recombined_samples[s]);
-        double sum_other = 0.0;
-        bool has_overlap = false;
-
-        for (int j = 0; j < num_selected; j++) {
-            int idx_j = selected_indices[j];
-            const PatternInfo* pat_j = &patterns[idx_j];
-            if (s < pat_j->total_frames && pat_j->recombined_samples) {
-                double cap_j = fabsf(pat_j->recombined_samples[s]);
-                if (cap_j > 1e-6) {
-                    sum_other += cap_j;
-                    has_overlap = true;
-                }
-            }
-        }
-
-        if (cap_i > 1e-6 && has_overlap) {
-            double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
-            stem_corr_sum += corr_mag;
-            stem_cap_sum += cap_i;
-        }
-    }
-
-    pat_i->judgment_stem_corr_sum = stem_corr_sum;
-    pat_i->judgment_stem_cap_sum = stem_cap_sum;
-    pat_i->judgment_stem_corr_pct = (stem_cap_sum > 1e-6) ? (stem_corr_sum / stem_cap_sum) * 100.0 : 0.0;
+    return sqrt(var);
 }
 
 static int compare_patterns_by_length_desc(const void* a, const void* b) {
@@ -409,23 +344,23 @@ static void generate_correlation_html_report(
         }
         fprintf(fjs, "  ],\n");
 
-        fprintf(fjs, "  capacities: [\n");
+        fprintf(fjs, "  fluxEnvelopes: [\n");
         for (int d = 0; d < num_patterns; d++) {
             int i = display_order[d];
             const PatternInfo* pat = &patterns[i];
             uint64_t total_frames = pat->total_frames;
-            int16_t* pcm_cap = (int16_t*)calloc(total_frames, sizeof(int16_t));
-            if (pat->recombined_samples && pcm_cap) {
+            int16_t* pcm_flux = (int16_t*)calloc(total_frames, sizeof(int16_t));
+            if (pat->recombined_samples && pcm_flux) {
                 for (uint64_t s = 0; s < total_frames; s++) {
                     float val = fabsf(pat->recombined_samples[s]);
                     if (val > 1.0f) val = 1.0f;
-                    pcm_cap[s] = (int16_t)round(val * 32767.0f);
+                    pcm_flux[s] = (int16_t)round(val * 32767.0f);
                 }
             }
-            char* b64 = encode_base64_bytes((const uint8_t*)pcm_cap, total_frames * sizeof(int16_t));
+            char* b64 = encode_base64_bytes((const uint8_t*)pcm_flux, total_frames * sizeof(int16_t));
             fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (d + 1 < num_patterns) ? "," : "");
             if (b64) free(b64);
-            if (pcm_cap) free(pcm_cap);
+            if (pcm_flux) free(pcm_flux);
         }
         fprintf(fjs, "  ]\n");
         fprintf(fjs, "};\n");
@@ -498,8 +433,7 @@ static void generate_correlation_html_report(
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"legend\">\n");
     fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: rgba(120,120,160,0.35); border: 1px solid rgba(150,150,180,0.5);\"></span> Output Audio Waveform (Background)</div>\n");
-    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Stem Correlation Capacity (|S_i(t)|)</div>\n");
-    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #00e676;\"></span> Judgment-Time Overlapping Correlation (Min(|S_i(t)|, &sum;<sub>j &lt; i</sub> |S_j(t)|))</div>\n");
+    fprintf(f, "    <div class=\"legend-item\"><span class=\"legend-color\" style=\"background: #ff9800;\"></span> Flux Envelope (|S_i(t)|)</div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n");
@@ -528,11 +462,7 @@ static void generate_correlation_html_report(
         fprintf(f, "          <div><strong>Duration:</strong> %.2fs | <strong>Active:</strong> %.2fs</div>\n",
                 duration_s,
                 pat->sample_rate > 0 ? (double)pat->active_length / pat->sample_rate : 0.0);
-        fprintf(f, "          <div><strong>Stem Corr / Cap at Judgment:</strong> %.2f / %.2f (%.2f%%)</div>\n",
-                pat->judgment_stem_corr_sum,
-                pat->judgment_stem_cap_sum,
-                pat->judgment_stem_corr_pct);
-        fprintf(f, "          <div><strong>Overall Song Correlation (Std Dev) if Included:</strong> %.6f</div>\n",
+        fprintf(f, "          <div><strong>Song Correlation (Std Dev) if Included:</strong> %.6f</div>\n",
                 pat->judgment_overall_corr_pct);
         fprintf(f, "        </div>\n");
         fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, d);
@@ -614,25 +544,9 @@ static void generate_correlation_html_report(
     fprintf(f, "      if (window.WAVEFORM_DATA.stemWaveforms && window.WAVEFORM_DATA.stemWaveforms[i]) {\n");
     fprintf(f, "        st.stemWaveform = base64ToFloat32(window.WAVEFORM_DATA.stemWaveforms[i], n);\n");
     fprintf(f, "      }\n");
-    fprintf(f, "      if (window.WAVEFORM_DATA.capacities && window.WAVEFORM_DATA.capacities[i]) {\n");
-    fprintf(f, "        st.capacity = base64ToFloat32(window.WAVEFORM_DATA.capacities[i], n);\n");
+    fprintf(f, "      if (window.WAVEFORM_DATA.fluxEnvelopes && window.WAVEFORM_DATA.fluxEnvelopes[i]) {\n");
+    fprintf(f, "        st.fluxEnvelope = base64ToFloat32(window.WAVEFORM_DATA.fluxEnvelopes[i], n);\n");
     fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    // Compute judgment-time overlapping correlation against earlier selected stems\n");
-    fprintf(f, "    for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "      const st = DATA.stems[i];\n");
-    fprintf(f, "      if (!st.capacity) continue;\n");
-    fprintf(f, "      const priorSelected = DATA.stems.filter(p => p.selected && p.selectionOrder < st.selectionOrder && p.capacity);\n");
-    fprintf(f, "      const corrBuf = new Float32Array(st.capacity.length);\n");
-    fprintf(f, "      for (let s = 0; s < st.capacity.length; s++) {\n");
-    fprintf(f, "        const cap_i = st.capacity[s];\n");
-    fprintf(f, "        let sum_other = 0.0;\n");
-    fprintf(f, "        for (const prior of priorSelected) {\n");
-    fprintf(f, "          if (s < prior.capacity.length) sum_other += prior.capacity[s];\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "        corrBuf[s] = Math.min(cap_i, sum_other);\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      st.actualCorrelation = corrBuf;\n");
     fprintf(f, "    }\n");
     fprintf(f, "  }\n");
     fprintf(f, "}\n\n");
@@ -751,8 +665,8 @@ static void generate_correlation_html_report(
     fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 1. Draw Stem Capacity Envelope (Orange) ---\n");
-    fprintf(f, "  if (stem.capacity) {\n");
+    fprintf(f, "  // --- 1. Draw Stem Flux Envelope (Orange) ---\n");
+    fprintf(f, "  if (stem.fluxEnvelope) {\n");
     fprintf(f, "    ctx.beginPath();\n");
     fprintf(f, "    ctx.strokeStyle = '#ff9800';\n");
     fprintf(f, "    ctx.lineWidth = 2;\n");
@@ -760,7 +674,7 @@ static void generate_correlation_html_report(
     fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
     fprintf(f, "        const t = s / sr;\n");
     fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        const cap = stem.capacity[s];\n");
+    fprintf(f, "        const cap = stem.fluxEnvelope[s];\n");
     fprintf(f, "        const y = height - (cap * height * 0.88) - 4;\n");
     fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
     fprintf(f, "      }\n");
@@ -769,7 +683,7 @@ static void generate_correlation_html_report(
     fprintf(f, "        ctx.fillStyle = '#ff9800';\n");
     fprintf(f, "        for (let s = sampleStart; s <= sampleEnd; s++) {\n");
     fprintf(f, "          const x = timeToX(s / sr, width);\n");
-    fprintf(f, "          const cap = stem.capacity[s];\n");
+    fprintf(f, "          const cap = stem.fluxEnvelope[s];\n");
     fprintf(f, "          const y = height - (cap * height * 0.88) - 4;\n");
     fprintf(f, "          ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
     fprintf(f, "        }\n");
@@ -782,9 +696,9 @@ static void generate_correlation_html_report(
     fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * sr));\n");
     fprintf(f, "        const s2 = Math.min(totalN - 1, Math.ceil(t2 * sr));\n");
     fprintf(f, "        if (s1 <= s2 && s1 < totalN) {\n");
-    fprintf(f, "          let maxC = stem.capacity[s1];\n");
+    fprintf(f, "          let maxC = stem.fluxEnvelope[s1];\n");
     fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
-    fprintf(f, "            if (stem.capacity[s] > maxC) maxC = stem.capacity[s];\n");
+    fprintf(f, "            if (stem.fluxEnvelope[s] > maxC) maxC = stem.fluxEnvelope[s];\n");
     fprintf(f, "          }\n");
     fprintf(f, "          const y = height - (maxC * height * 0.88) - 4;\n");
     fprintf(f, "          if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
@@ -794,50 +708,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 2. Draw Judgment-Time Correlation Envelope (Green) ---\n");
-    fprintf(f, "  if (stem.actualCorrelation) {\n");
-    fprintf(f, "    ctx.beginPath();\n");
-    fprintf(f, "    ctx.strokeStyle = '#00e676';\n");
-    fprintf(f, "    ctx.lineWidth = 2;\n");
-    fprintf(f, "    if (visCount <= width * 3) {\n");
-    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
-    fprintf(f, "        const t = s / sr;\n");
-    fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        const corr = stem.actualCorrelation[s];\n");
-    fprintf(f, "        const y = height - (corr * height * 0.88) - 4;\n");
-    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "      if (visCount < width * 0.6) {\n");
-    fprintf(f, "        ctx.fillStyle = '#00e676';\n");
-    fprintf(f, "        for (let s = sampleStart; s <= sampleEnd; s++) {\n");
-    fprintf(f, "          const x = timeToX(s / sr, width);\n");
-    fprintf(f, "          const corr = stem.actualCorrelation[s];\n");
-    fprintf(f, "          const y = height - (corr * height * 0.88) - 4;\n");
-    fprintf(f, "          ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fill();\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    } else {\n");
-    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
-    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
-    fprintf(f, "        const t1 = xToTime(px, width);\n");
-    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
-    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * sr));\n");
-    fprintf(f, "        const s2 = Math.min(totalN - 1, Math.ceil(t2 * sr));\n");
-    fprintf(f, "        if (s1 <= s2 && s1 < totalN) {\n");
-    fprintf(f, "          let maxCr = stem.actualCorrelation[s1];\n");
-    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
-    fprintf(f, "            if (stem.actualCorrelation[s] > maxCr) maxCr = stem.actualCorrelation[s];\n");
-    fprintf(f, "          }\n");
-    fprintf(f, "          const y = height - (maxCr * height * 0.88) - 4;\n");
-    fprintf(f, "          if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  // --- 3. Audio Playhead ---\n");
+    fprintf(f, "  // --- 2. Audio Playhead ---\n");
     fprintf(f, "  if (audio && duration > 0 && audio.currentTime >= viewStart && audio.currentTime <= viewEnd) {\n");
     fprintf(f, "    const playX = timeToX(audio.currentTime, width);\n");
     fprintf(f, "    ctx.strokeStyle = '#ffffff';\n");
@@ -845,7 +716,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    ctx.beginPath(); ctx.moveTo(playX, 0); ctx.lineTo(playX, height); ctx.stroke();\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 4. Hover Crosshair ---\n");
+    fprintf(f, "  // --- 3. Hover Crosshair ---\n");
     fprintf(f, "  if (hoverState && hoverState.index === index) {\n");
     fprintf(f, "    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';\n");
     fprintf(f, "    ctx.setLineDash([4, 4]);\n");
@@ -853,7 +724,7 @@ static void generate_correlation_html_report(
     fprintf(f, "    ctx.setLineDash([]);\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // --- 5. Active Drag Selection Highlight ---\n");
+    fprintf(f, "  // --- 4. Active Drag Selection Highlight ---\n");
     fprintf(f, "  if (activeDrag && activeDrag.index === index) {\n");
     fprintf(f, "    const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
     fprintf(f, "    const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
@@ -897,11 +768,10 @@ static void generate_correlation_html_report(
 
     fprintf(f, "    const t = xToTime(x, rect.width);\n");
     fprintf(f, "    const s = Math.min(stem.totalSamples - 1, Math.max(0, Math.round(t * stem.sampleRate)));\n");
-    fprintf(f, "    const capVal = (stem.capacity && stem.capacity.length > s) ? stem.capacity[s] : 0;\n");
-    fprintf(f, "    const corrVal = (stem.actualCorrelation && stem.actualCorrelation.length > s) ? stem.actualCorrelation[s] : 0;\n");
+    fprintf(f, "    const fluxVal = (stem.fluxEnvelope && stem.fluxEnvelope.length > s) ? stem.fluxEnvelope[s] : 0;\n");
     fprintf(f, "    const waveVal = (stem.stemWaveform && stem.stemWaveform.length > s) ? stem.stemWaveform[s] : 0;\n");
     fprintf(f, "    tooltip.style.opacity = '1';\n");
-    fprintf(f, "    tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Cap: ${capVal.toFixed(4)} | Overlap Corr: ${corrVal.toFixed(4)} | Waveform: ${waveVal.toFixed(4)}`;\n");
+    fprintf(f, "    tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Flux: ${fluxVal.toFixed(4)} | Waveform: ${waveVal.toFixed(4)}`;\n");
     fprintf(f, "  });\n\n");
 
     fprintf(f, "  canvas.addEventListener('mouseleave', () => {\n");
@@ -1098,7 +968,7 @@ int main(int argc, char** argv) {
                i + 1, patterns[i].stem_filename, (unsigned long long)patterns[i].active_length);
     }
 
-    printf("\nEvaluating greedy pattern selection based on song correlation metric...\n\n");
+    printf("\nEvaluating pattern selection based on song correlation metric...\n\n");
 
     int* selected_indices = (int*)malloc((size_t)num_patterns * sizeof(int));
     int num_selected = 0;
@@ -1110,187 +980,55 @@ int main(int argc, char** argv) {
     for (int i = 0; i < num_patterns; i++) {
         patterns[i].selected = false;
         patterns[i].selection_order = num_patterns;
-        patterns[i].judgment_stem_corr_sum = 0.0;
-        patterns[i].judgment_stem_cap_sum = 0.0;
-        patterns[i].judgment_stem_corr_pct = 0.0;
-        patterns[i].judgment_overall_corr_sum = 0.0;
-        patterns[i].judgment_overall_cap_sum = 0.0;
         patterns[i].judgment_overall_corr_pct = 0.0;
         if (patterns[i].active_length == 0) {
             printf("[Skip] %s has 0 active length.\n", patterns[i].stem_filename);
         }
     }
 
-    // Step 1: Compare every pattern pair to find the pair with the greatest correlation
-    int best_pair_i = -1;
-    int best_pair_j = -1;
-    double max_pair_corr = -1.0;
-    double max_pair_corr_sum = 0.0;
-    double max_pair_cap_sum = 0.0;
+    // Sequential pattern testing in descending length order through a single unified loop.
+    // When no patterns are selected, correlation is null (NaN). Zero correlation (e.g. from the first
+    // pattern having no multi-pattern overlap yet) is considered better than null (NaN) correlation.
+    current_song_correlation = NAN;
 
     for (int i = 0; i < num_patterns; i++) {
-        if (patterns[i].active_length == 0) continue;
-        for (int j = i + 1; j < num_patterns; j++) {
-            if (patterns[j].active_length == 0) continue;
-
-            int pair[2] = { i, j };
-            double corr_sum = 0.0;
-            double cap_sum = 0.0;
-            double pair_corr = compute_correlation_ext(patterns, pair, 2, &corr_sum, &cap_sum);
-
-            if (pair_corr > max_pair_corr) {
-                max_pair_corr = pair_corr;
-                best_pair_i = i;
-                best_pair_j = j;
-                max_pair_corr_sum = corr_sum;
-                max_pair_cap_sum = cap_sum;
-            }
-        }
-    }
-
-    if (best_pair_i != -1 && best_pair_j != -1 && max_pair_corr > 0.0) {
-        // Add best_pair_i first
-        compute_judgment_time_correlation_samples(&patterns[best_pair_i], patterns, NULL, 0);
-        test_set[0] = best_pair_i;
-        double overall_corr_sum1 = 0.0, overall_cap_sum1 = 0.0;
-        double proposed_corr1 = compute_correlation_ext(patterns, test_set, 1, &overall_corr_sum1, &overall_cap_sum1);
-
-        patterns[best_pair_i].selected = true;
-        patterns[best_pair_i].selection_order = num_selected; // 0
-        patterns[best_pair_i].judgment_overall_corr_sum = overall_corr_sum1;
-        patterns[best_pair_i].judgment_overall_cap_sum = overall_cap_sum1;
-        patterns[best_pair_i].judgment_overall_corr_pct = proposed_corr1;
-        selected_indices[num_selected++] = best_pair_i;
-
-        // Add best_pair_j second
-        compute_judgment_time_correlation_samples(&patterns[best_pair_j], patterns, selected_indices, 1);
-        test_set[0] = best_pair_i;
-        test_set[1] = best_pair_j;
-        patterns[best_pair_j].selected = true;
-        patterns[best_pair_j].selection_order = num_selected; // 1
-        patterns[best_pair_j].judgment_overall_corr_sum = max_pair_corr_sum;
-        patterns[best_pair_j].judgment_overall_cap_sum = max_pair_cap_sum;
-        patterns[best_pair_j].judgment_overall_corr_pct = max_pair_corr;
-        selected_indices[num_selected++] = best_pair_j;
-
-        current_song_correlation = max_pair_corr;
-
-        printf("[ACCEPT] %s (Rank %d) & %s (Rank %d) selected as seed pair. Song Correlation (Std Dev): %.6f\n",
-               patterns[best_pair_i].stem_filename, best_pair_i + 1,
-               patterns[best_pair_j].stem_filename, best_pair_j + 1,
-               current_song_correlation);
-    } else {
-        // Fallback for single active pattern or no overlapping pairs
-        int seed_idx = -1;
-        for (int i = 0; i < num_patterns; i++) {
-            if (patterns[i].active_length > 0) {
-                seed_idx = i;
-                break;
-            }
+        if (patterns[i].active_length == 0) {
+            continue;
         }
 
-        if (seed_idx != -1) {
-            compute_judgment_time_correlation_samples(&patterns[seed_idx], patterns, selected_indices, 0);
-
-            test_set[0] = seed_idx;
-            double overall_corr_sum = 0.0;
-            double overall_cap_sum = 0.0;
-            double proposed_corr = compute_correlation_ext(
-                patterns,
-                test_set,
-                1,
-                &overall_corr_sum,
-                &overall_cap_sum
-            );
-
-            patterns[seed_idx].selected = true;
-            patterns[seed_idx].selection_order = num_selected; // 0
-            patterns[seed_idx].judgment_overall_corr_sum = overall_corr_sum;
-            patterns[seed_idx].judgment_overall_cap_sum = overall_cap_sum;
-            patterns[seed_idx].judgment_overall_corr_pct = proposed_corr;
-
-            selected_indices[num_selected++] = seed_idx;
-            current_song_correlation = proposed_corr;
-
-            printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation (Std Dev): %.6f\n",
-                   patterns[seed_idx].stem_filename, seed_idx + 1, current_song_correlation);
+        for (int k = 0; k < num_selected; k++) {
+            test_set[k] = selected_indices[k];
         }
-    }
+        test_set[num_selected] = i;
 
-    // Step 2: Iteratively find the unselected candidate pattern that yields highest song correlation increase
-    while (num_selected < num_patterns) {
-        int best_candidate = -1;
-        double best_proposed_corr = current_song_correlation;
-        double best_overall_corr_sum = 0.0;
-        double best_overall_cap_sum = 0.0;
-        double best_stem_corr_sum = 0.0;
-        double best_stem_cap_sum = 0.0;
-        double best_stem_corr_pct = 0.0;
+        double proposed_corr = compute_correlation_ext(patterns, test_set, num_selected + 1);
+        patterns[i].judgment_overall_corr_pct = proposed_corr;
 
-        for (int i = 0; i < num_patterns; i++) {
-            if (patterns[i].selected || patterns[i].active_length == 0) {
-                continue;
-            }
-
-            compute_judgment_time_correlation_samples(&patterns[i], patterns, selected_indices, num_selected);
-
-            for (int k = 0; k < num_selected; k++) {
-                test_set[k] = selected_indices[k];
-            }
-            test_set[num_selected] = i;
-
-            double overall_corr_sum = 0.0;
-            double overall_cap_sum = 0.0;
-            double proposed_corr = compute_correlation_ext(
-                patterns,
-                test_set,
-                num_selected + 1,
-                &overall_corr_sum,
-                &overall_cap_sum
-            );
-
-            patterns[i].judgment_overall_corr_sum = overall_corr_sum;
-            patterns[i].judgment_overall_cap_sum = overall_cap_sum;
-            patterns[i].judgment_overall_corr_pct = proposed_corr;
-
-            if (proposed_corr > best_proposed_corr) {
-                best_candidate = i;
-                best_proposed_corr = proposed_corr;
-                best_overall_corr_sum = overall_corr_sum;
-                best_overall_cap_sum = overall_cap_sum;
-                best_stem_corr_sum = patterns[i].judgment_stem_corr_sum;
-                best_stem_cap_sum = patterns[i].judgment_stem_cap_sum;
-                best_stem_corr_pct = patterns[i].judgment_stem_corr_pct;
-            }
+        bool is_increase = false;
+        if (isnan(current_song_correlation)) {
+            // First pattern: zero correlation is better than null/NaN correlation
+            is_increase = true;
+        } else if (proposed_corr > current_song_correlation) {
+            is_increase = true;
         }
 
-        if (best_candidate != -1 && best_proposed_corr > current_song_correlation) {
-            patterns[best_candidate].selected = true;
-            patterns[best_candidate].selection_order = num_selected;
-            patterns[best_candidate].judgment_stem_corr_sum = best_stem_corr_sum;
-            patterns[best_candidate].judgment_stem_cap_sum = best_stem_cap_sum;
-            patterns[best_candidate].judgment_stem_corr_pct = best_stem_corr_pct;
-            patterns[best_candidate].judgment_overall_corr_sum = best_overall_corr_sum;
-            patterns[best_candidate].judgment_overall_cap_sum = best_overall_cap_sum;
-            patterns[best_candidate].judgment_overall_corr_pct = best_proposed_corr;
-
-            selected_indices[num_selected++] = best_candidate;
-            printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.6f -> %.6f\n",
-                   patterns[best_candidate].stem_filename, best_candidate + 1, current_song_correlation, best_proposed_corr);
-            current_song_correlation = best_proposed_corr;
-        } else {
-            break;
-        }
-    }
-
-    // Mark remaining unselected patterns and log rejection
-    for (int i = 0; i < num_patterns; i++) {
-        if (!patterns[i].selected) {
+        if (is_increase) {
+            patterns[i].selected = true;
             patterns[i].selection_order = num_selected;
-            if (patterns[i].active_length > 0) {
-                printf("[REJECT] %s (Rank %d) best proposed correlation %.6f <= current %.6f\n",
-                       patterns[i].stem_filename, i + 1, patterns[i].judgment_overall_corr_pct, current_song_correlation);
+            selected_indices[num_selected++] = i;
+
+            if (isnan(current_song_correlation)) {
+                printf("[ACCEPT] %s (Rank %d) added. Song Correlation initialized: null -> %.6f\n",
+                       patterns[i].stem_filename, i + 1, proposed_corr);
+            } else {
+                printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.6f -> %.6f\n",
+                       patterns[i].stem_filename, i + 1, current_song_correlation, proposed_corr);
             }
+            current_song_correlation = proposed_corr;
+        } else {
+            patterns[i].selection_order = num_selected;
+            printf("[REJECT] %s (Rank %d) proposed correlation %.6f <= current %.6f\n",
+                   patterns[i].stem_filename, i + 1, proposed_corr, current_song_correlation);
         }
     }
 
