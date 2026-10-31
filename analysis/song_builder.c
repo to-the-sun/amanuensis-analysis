@@ -144,50 +144,61 @@ static double compute_correlation_ext(
         return 0.0;
     }
 
-    double total_corr_sum = 0.0;
-    double total_cap_sum = 0.0;
-
+    uint64_t max_frames = 0;
     for (int i = 0; i < count; i++) {
-        int idx_i = candidate_indices[i];
-        const PatternInfo* pat_i = &patterns[idx_i];
-
-        if (!pat_i->recombined_samples || pat_i->total_frames == 0) continue;
-
-        for (uint64_t t = 0; t < pat_i->total_frames; t++) {
-            double cap_i = fabsf(pat_i->recombined_samples[t]);
-            if (cap_i <= 1e-6) continue;
-
-            double sum_other = 0.0;
-            bool has_overlap = false;
-
-            for (int j = 0; j < count; j++) {
-                if (i == j) continue;
-                int idx_j = candidate_indices[j];
-                const PatternInfo* pat_j = &patterns[idx_j];
-
-                if (t < pat_j->total_frames && pat_j->recombined_samples) {
-                    double cap_j = fabsf(pat_j->recombined_samples[t]);
-                    if (cap_j > 1e-6) {
-                        sum_other += cap_j;
-                        has_overlap = true;
-                    }
-                }
-            }
-
-            if (has_overlap) {
-                double corr_mag = (sum_other < cap_i) ? sum_other : cap_i;
-
-                total_corr_sum += corr_mag;
-                total_cap_sum += cap_i;
-            }
+        int idx = candidate_indices[i];
+        const PatternInfo* pat = &patterns[idx];
+        if (pat->recombined_samples && pat->total_frames > max_frames) {
+            max_frames = pat->total_frames;
         }
     }
 
-    if (out_total_corr) *out_total_corr = total_corr_sum;
-    if (out_total_cap) *out_total_cap = total_cap_sum;
+    if (max_frames == 0) {
+        if (out_total_corr) *out_total_corr = 0.0;
+        if (out_total_cap) *out_total_cap = 0.0;
+        return 0.0;
+    }
 
-    if (total_cap_sum <= 1e-6) return 0.0;
-    return (total_corr_sum / total_cap_sum) * 100.0;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    uint64_t qualifying_samples = 0;
+
+    for (uint64_t t = 0; t < max_frames; t++) {
+        double val = 0.0;
+        int active_patterns = 0;
+        for (int i = 0; i < count; i++) {
+            int idx = candidate_indices[i];
+            const PatternInfo* pat = &patterns[idx];
+            if (t < pat->total_frames && pat->recombined_samples) {
+                double smp_val = (double)fabsf(pat->recombined_samples[t]);
+                if (smp_val > 1e-6) {
+                    val += smp_val;
+                    active_patterns++;
+                }
+            }
+        }
+        if (active_patterns > 1) {
+            sum += val;
+            sum_sq += val * val;
+            qualifying_samples++;
+        }
+    }
+
+    if (qualifying_samples == 0) {
+        if (out_total_corr) *out_total_corr = 0.0;
+        if (out_total_cap) *out_total_cap = 0.0;
+        return 0.0;
+    }
+
+    double mean = sum / (double)qualifying_samples;
+    double var = (sum_sq / (double)qualifying_samples) - (mean * mean);
+    if (var < 0.0) var = 0.0;
+    double std_dev = sqrt(var);
+
+    if (out_total_corr) *out_total_corr = std_dev;
+    if (out_total_cap) *out_total_cap = sum;
+
+    return std_dev;
 }
 
 static void compute_judgment_time_correlation_samples(
@@ -477,8 +488,8 @@ static void generate_correlation_html_report(
     fprintf(f, "      <div class=\"stat-value\">%d</div>\n", num_selected);
     fprintf(f, "    </div>\n");
     fprintf(f, "    <div class=\"stat-card\">\n");
-    fprintf(f, "      <div class=\"stat-label\">Final Song Correlation</div>\n");
-    fprintf(f, "      <div class=\"stat-value\" style=\"color: #2196f3;\">%.2f%%</div>\n", final_correlation);
+    fprintf(f, "      <div class=\"stat-label\">Final Song Correlation (Std Dev)</div>\n");
+    fprintf(f, "      <div class=\"stat-value\" style=\"color: #2196f3;\">%.6f</div>\n", final_correlation);
     fprintf(f, "    </div>\n");
     fprintf(f, "  </div>\n");
     fprintf(f, "  <div class=\"toolbar\">\n");
@@ -521,9 +532,7 @@ static void generate_correlation_html_report(
                 pat->judgment_stem_corr_sum,
                 pat->judgment_stem_cap_sum,
                 pat->judgment_stem_corr_pct);
-        fprintf(f, "          <div><strong>Overall Song Corr / Cap if Included:</strong> %.2f / %.2f (%.2f%%)</div>\n",
-                pat->judgment_overall_corr_sum,
-                pat->judgment_overall_cap_sum,
+        fprintf(f, "          <div><strong>Overall Song Correlation (Std Dev) if Included:</strong> %.6f</div>\n",
                 pat->judgment_overall_corr_pct);
         fprintf(f, "        </div>\n");
         fprintf(f, "        <audio controls src=\"%s\" id=\"audio-%d\"></audio>\n", pat->stem_filename, d);
@@ -1166,7 +1175,7 @@ int main(int argc, char** argv) {
 
         current_song_correlation = max_pair_corr;
 
-        printf("[ACCEPT] %s (Rank %d) & %s (Rank %d) selected as seed pair. Song Correlation: %.2f%%\n",
+        printf("[ACCEPT] %s (Rank %d) & %s (Rank %d) selected as seed pair. Song Correlation (Std Dev): %.6f\n",
                patterns[best_pair_i].stem_filename, best_pair_i + 1,
                patterns[best_pair_j].stem_filename, best_pair_j + 1,
                current_song_correlation);
@@ -1203,7 +1212,7 @@ int main(int argc, char** argv) {
             selected_indices[num_selected++] = seed_idx;
             current_song_correlation = proposed_corr;
 
-            printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation: %.2f%%\n",
+            printf("[ACCEPT] %s (Rank %d) added as seed pattern. Song Correlation (Std Dev): %.6f\n",
                    patterns[seed_idx].stem_filename, seed_idx + 1, current_song_correlation);
         }
     }
@@ -1266,7 +1275,7 @@ int main(int argc, char** argv) {
             patterns[best_candidate].judgment_overall_corr_pct = best_proposed_corr;
 
             selected_indices[num_selected++] = best_candidate;
-            printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.2f%% -> %.2f%%\n",
+            printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.6f -> %.6f\n",
                    patterns[best_candidate].stem_filename, best_candidate + 1, current_song_correlation, best_proposed_corr);
             current_song_correlation = best_proposed_corr;
         } else {
@@ -1279,7 +1288,7 @@ int main(int argc, char** argv) {
         if (!patterns[i].selected) {
             patterns[i].selection_order = num_selected;
             if (patterns[i].active_length > 0) {
-                printf("[REJECT] %s (Rank %d) best proposed correlation %.2f%% <= current %.2f%%\n",
+                printf("[REJECT] %s (Rank %d) best proposed correlation %.6f <= current %.6f\n",
                        patterns[i].stem_filename, i + 1, patterns[i].judgment_overall_corr_pct, current_song_correlation);
             }
         }
@@ -1414,7 +1423,7 @@ int main(int argc, char** argv) {
     printf("=====================================================\n");
     printf("Total Candidate Patterns Evaluated : %d\n", num_patterns);
     printf("Patterns Selected into Song        : %d (Successfully copied: %d)\n", num_selected, copy_success_count);
-    printf("Final Song Correlation Metric     : %.2f%%\n", current_song_correlation);
+    printf("Final Song Correlation Metric (Std Dev): %.6f\n", current_song_correlation);
     printf("Output Directory                  : %s\n", song_dir);
     printf("=====================================================\n");
 
