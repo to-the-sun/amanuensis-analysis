@@ -286,21 +286,14 @@ static void generate_correlation_html_report(
     const char* work_dir,
     const PatternInfo* patterns,
     int num_patterns,
-    const int* selected_indices,
     int num_selected,
     double final_correlation
 ) {
     int* display_order = (int*)malloc((size_t)num_patterns * sizeof(int));
     if (!display_order) return;
 
-    int order_count = 0;
-    for (int s = 0; s < num_selected; s++) {
-        display_order[order_count++] = selected_indices[s];
-    }
     for (int i = 0; i < num_patterns; i++) {
-        if (!patterns[i].selected) {
-            display_order[order_count++] = i;
-        }
+        display_order[i] = i;
     }
 
     char js_path[4096];
@@ -1151,7 +1144,6 @@ int main(int argc, char** argv) {
         work_dir,
         patterns,
         num_patterns,
-        selected_indices,
         num_selected,
         current_song_correlation
     );
