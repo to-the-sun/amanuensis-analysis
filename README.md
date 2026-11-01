@@ -22,7 +22,7 @@ Separates an audio file into individual MIDI integer pitch stems ($0..127$, repr
   - **Multi-File Drag & Drop**: Drag single or multiple WAV files (or folders) directly onto `flux_separator.exe` or pass multiple file paths as arguments.
   - **Double-Click Folder Scanning**: Double-clicking `flux_separator.exe` without arguments automatically scans its current folder for all WAV files (ignoring generated stems, `preview.wav`, and `glued.wav`) and processes them simultaneously using POSIX worker threads across all available CPU cores.
   - **Automatic Helper File Moving**:
-    - When `flux_separator.exe` runs, it searches its folder for `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` and automatically moves these files into the newly created `pitch_stems/` folder if found.
+    - When `flux_separator.exe` runs, it searches its folder for `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` and automatically copies these files into the newly created `pitch_stems/` folder if found (the originals stay where they are).
     - When `analyze_group.bat` is executed inside `pitch_stems/`, it executes group stem transience analysis and then searches its folder for `song_builder.exe` and moves it into the newly created `[palettes]/[stems]/` folder.
 
 **Compilation & Usage:**
