@@ -53,8 +53,8 @@ When searching for original audio files to extract audio from for creating `[ste
 1. **`flux_separator.exe`**:
    - When executed, `flux_separator.exe` searches its folder for `analyze_group.bat`, `analyze.exe`, and `song_builder.exe`, and copies any of these helper files found into the newly created `pitch_stems` directory. The originals are left in place.
 
-2. **`analyze_group.bat`**:
-   - When executed, `analyze_group.bat` invokes `analyze.exe --group` to perform group analysis across stems, and then searches its folder for `song_builder.exe` and copies it into the newly created `[palettes]/[stems]` directory, leaving the original in place. The copy step prints verbose diagnostics: the resolved source and destination paths, whether the destination folder had to be created, a write test of that folder, the `copy` exit code, the copied file's size and timestamp, a source/destination size comparison, and a folder listing on failure.
+2. **`analyze.exe` (group mode)**:
+   - `analyze.exe --group` creates `[palettes]` and `[palettes]/[stems]`, and copies `song_builder.exe` from next to `analyze.exe` into `[palettes]/[stems]` as soon as that folder exists. The original is left in place, and if no `song_builder.exe` is found the run notes it and continues. `analyze_group.bat` only launches the analyzer and no longer copies anything.
 
 ## Compilation
 
@@ -70,5 +70,5 @@ To compile the analysis executables:
 
 - **`flux_separator` / `flux_separator.exe`**: Multi-threaded C pitch separator generating spectral flux stems and interactive HTML reports. Automatically copies `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` into `pitch_stems/`.
 - **`analyze` / `analyze.exe`**: C cumulative transience analyzer generating palette pattern maps, loop/stem WAV slices, JSON manifests, and interactive HTML reports.
-- **`analyze_group.bat`**: Batch launcher for group stem analysis. Automatically copies `song_builder.exe` into `[palettes]/[stems]/`, leaving the original in place, with verbose console diagnostics around the copy.
+- **`analyze_group.bat`**: Batch launcher for group stem analysis. Launches `analyze.exe --group`, which copies `song_builder.exe` into `[palettes]/[stems]/` itself, leaving the original in place.
 - **`song_builder` / `song_builder.exe`**: Evaluates correlation across candidate patterns using recombined flux audio envelopes. All prospective patterns in a potential song are added together sample index by sample index to form a summed envelope. The standard deviation across samples where more than one pattern is present (a pattern alone with itself does not count towards standard deviation) serves as the overall correlation metric. Patterns are sorted descending by active length and evaluated sequentially in a unified loop: starting with the longest pattern (zero correlation being better than null/uninitialized correlation), each subsequent candidate pattern in descending length order is tested and accepted if it increases overall standard deviation correlation, or rejected if it decreases or maintains correlation. Selected pattern WAV files are copied into `[stems]/[song]`, mixed into `[song]/finished_song.wav` normalized to peak 1.0 (omitting leading zero samples prior to the first non-zero sample so that the first non-zero sample is at index zero), and exported with an interactive HTML report (`song_correlation_report.html`, displaying patterns in the order they were judged, descending from longest to shortest) and companion JS data file (`song_correlation_waveform_data.js`).
