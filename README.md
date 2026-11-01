@@ -21,9 +21,9 @@ Separates an audio file into individual MIDI integer pitch stems ($0..127$, repr
 - **Double-Click & Drag-and-Drop (Multi-File & Multithreaded)**:
   - **Multi-File Drag & Drop**: Drag single or multiple WAV files (or folders) directly onto `flux_separator.exe` or pass multiple file paths as arguments.
   - **Double-Click Folder Scanning**: Double-clicking `flux_separator.exe` without arguments automatically scans its current folder for all WAV files (ignoring generated stems, `preview.wav`, and `glued.wav`) and processes them simultaneously using POSIX worker threads across all available CPU cores.
-  - **Automatic Helper File Moving**:
+  - **Automatic Helper File Copying**:
     - When `flux_separator.exe` runs, it searches its folder for `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` and automatically copies these files into the newly created `pitch_stems/` folder if found (the originals stay where they are).
-    - When `analyze_group.bat` is executed inside `pitch_stems/`, it executes group stem transience analysis and then searches its folder for `song_builder.exe` and moves it into the newly created `[palettes]/[stems]/` folder.
+    - When `analyze_group.bat` is executed inside `pitch_stems/`, it executes group stem transience analysis and then searches its folder for `song_builder.exe` and copies it into the newly created `[palettes]/[stems]/` folder (the original stays where it is).
 
 **Compilation & Usage:**
 ```bash
@@ -57,7 +57,7 @@ Focuses on identifying rhythmic transient energy, dominant pitch tracking, struc
 Pure C offline cumulative transience analyzer (`analyze` / `analyze.exe`) generating palette pattern maps, loop/stem WAV slices, JSON manifests, and interactive HTML reports.
 
 ### Group Analysis & Song Building (`analyze_group.bat` & `song_builder`)
-- `analyze_group.bat`: Executes multi-file grouped stem analysis across all stems in a palette directory, automatically moving `song_builder.exe` into `[palettes]/[stems]/`.
+- `analyze_group.bat`: Executes multi-file grouped stem analysis across all stems in a palette directory, automatically copying `song_builder.exe` into `[palettes]/[stems]/` while leaving the original in place, and printing verbose diagnostics about that copy.
 - `song_builder`: Evaluates cross-stem correlation metrics inside `[stems]/` using the standard deviation across sections containing more than one pattern of the summed envelope of prospective patterns (a pattern alone with itself does not count towards standard deviation), copies selected pattern stems into `[song]/`, builds `[song]/finished_song.wav` (omitting leading blank space so the first non-zero sample is at index zero), and exports an interactive correlation report (`song_correlation_report.html`).
 
 ### Pitch Tracking & Tuning Regression (`pitch_tracker.py`)
