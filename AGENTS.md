@@ -23,13 +23,35 @@ repo, not just the one that created this file.
   after it exits`.
 - Body: a short paragraph on why the change was made (the problem it fixes), not
   a list of what was edited. Wrap around 72 columns.
-- Every commit keeps this attribution footer, unless the user explicitly asks to
-  drop it:
+- Commits are a collaboration between the user and Codebuff, and every commit
+  credits both. The git author is the user's own GitHub identity, and Codebuff
+  appears as a co-author through this trailer:
 
   ```
   🤖 Generated with Codebuff
   Co-Authored-By: Codebuff <noreply@codebuff.com>
   ```
+
+- The repository's configured git identity is `Codebuff <noreply@codebuff.com>`
+  (the Freebuff default), so pass the user's identity explicitly when committing:
+
+  ```
+  git -c user.name='To the Sun' \
+      -c user.email='4305621+to-the-sun@users.noreply.github.com' \
+      commit -m "$(cat <<'EOF'
+  Subject line here
+
+  Why the change was made.
+
+  🤖 Generated with Codebuff
+  Co-Authored-By: Codebuff <noreply@codebuff.com>
+  EOF
+  )"
+  ```
+
+- Do not commit as Codebuff alone, and do not use the user's identity without the
+  co-author trailer; either one misattributes the commit. Change the credit only
+  when the user explicitly asks.
 
 ## Building the analyzer
 
