@@ -10,7 +10,10 @@ repo, not just the one that created this file.
   the user a GitHub link to open the pull request.
 - Name branches after the change in short hyphenated form, e.g.
   `copy-song-builder-in-analyzer`.
-- One logical change per branch. Keep drive-by edits out of it.
+- Commit as often as the work needs, and keep committing to the same open branch
+  even between merges of other pull requests. A fresh branch is required only
+  when the work is a genuinely different change, not for every commit.
+- One pull request per logical change. Keep unrelated drive-by edits out of it.
 - Do not merge, rebase, force-push, or push to `main`. The user merges the PR.
 
 ## Commit messages
