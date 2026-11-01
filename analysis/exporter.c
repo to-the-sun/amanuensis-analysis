@@ -567,30 +567,164 @@ static int iequals_ext(const char* a, const char* b) {
 
 static void url_encode_filename(const char* src, char* dst, size_t dst_size) {
     size_t d = 0;
-    while (*src && d + 3 < dst_size) {
+    while (*src && d + 4 < dst_size) {
         unsigned char c = (unsigned char)*src;
         if (c == '#') {
-            dst[d++] = '%';
-            dst[d++] = '2';
-            dst[d++] = '3';
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = '3';
         } else if (c == '%') {
-            dst[d++] = '%';
-            dst[d++] = '2';
-            dst[d++] = '5';
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = '5';
+        } else if (c == '&') {
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = '6';
+        } else if (c == '+') {
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = 'B';
         } else if (c == '?') {
-            dst[d++] = '%';
-            dst[d++] = '3';
-            dst[d++] = 'F';
+            dst[d++] = '%'; dst[d++] = '3'; dst[d++] = 'F';
         } else if (c == ' ') {
-            dst[d++] = '%';
-            dst[d++] = '2';
-            dst[d++] = '0';
+            dst[d++] = '%'; dst[d++] = '2'; dst[d++] = '0';
         } else {
             dst[d++] = c;
         }
         src++;
     }
     dst[d] = '\0';
+}
+
+static void normalize_path_slashes(char* path) {
+    if (!path) return;
+    for (char* p = path; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+}
+
+static int get_absolute_path_cross(const char* rel_path, char* abs_buf, size_t abs_buf_sz) {
+    if (!rel_path || !abs_buf || abs_buf_sz == 0) return 0;
+#if defined(_WIN32) || defined(_WIN64)
+    if (_fullpath(abs_buf, rel_path, abs_buf_sz) != NULL) {
+        normalize_path_slashes(abs_buf);
+        return 1;
+    }
+#else
+    if (realpath(rel_path, abs_buf) != NULL) {
+        normalize_path_slashes(abs_buf);
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+static void url_encode_relative_path(const char* rel_path, char* dst, size_t dst_sz) {
+    if (!rel_path || !dst || dst_sz == 0) return;
+    dst[0] = '\0';
+    char temp[4096];
+    strncpy(temp, rel_path, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+    normalize_path_slashes(temp);
+
+    char* seg = strtok(temp, "/");
+    size_t d = 0;
+    int first = 1;
+    while (seg) {
+        if (!first && d < dst_sz - 1) {
+            dst[d++] = '/';
+            dst[d] = '\0';
+        }
+        first = 0;
+        if (strcmp(seg, ".") == 0 || strcmp(seg, "..") == 0) {
+            size_t slen = strlen(seg);
+            if (d + slen < dst_sz) {
+                memcpy(dst + d, seg, slen);
+                d += slen;
+                dst[d] = '\0';
+            }
+        } else {
+            char enc[2048];
+            url_encode_filename(seg, enc, sizeof(enc));
+            size_t elen = strlen(enc);
+            if (d + elen < dst_sz) {
+                memcpy(dst + d, enc, elen);
+                d += elen;
+                dst[d] = '\0';
+            }
+        }
+        seg = strtok(NULL, "/");
+    }
+}
+
+static int compute_relative_path(const char* target_file, const char* from_dir, char* out_rel, size_t out_sz) {
+    if (!target_file || !from_dir || !out_rel || out_sz == 0) return 0;
+    out_rel[0] = '\0';
+
+    char target_abs[4096] = "";
+    char from_abs[4096] = "";
+
+    if (!get_absolute_path_cross(target_file, target_abs, sizeof(target_abs))) {
+        strncpy(target_abs, target_file, sizeof(target_abs) - 1);
+        normalize_path_slashes(target_abs);
+    }
+    if (!get_absolute_path_cross(from_dir, from_abs, sizeof(from_abs))) {
+        strncpy(from_abs, from_dir, sizeof(from_abs) - 1);
+        normalize_path_slashes(from_abs);
+    }
+
+    char* t_segs[128];
+    char* f_segs[128];
+    int t_count = 0, f_count = 0;
+
+    char t_work[4096], f_work[4096];
+    strncpy(t_work, target_abs, sizeof(t_work) - 1); t_work[sizeof(t_work) - 1] = '\0';
+    strncpy(f_work, from_abs, sizeof(f_work) - 1); f_work[sizeof(f_work) - 1] = '\0';
+
+    char* tok = strtok(t_work, "/");
+    while (tok && t_count < 128) {
+        t_segs[t_count++] = tok;
+        tok = strtok(NULL, "/");
+    }
+
+    tok = strtok(f_work, "/");
+    while (tok && f_count < 128) {
+        f_segs[f_count++] = tok;
+        tok = strtok(NULL, "/");
+    }
+
+    if (t_count == 0 || f_count == 0) return 0;
+
+    if (strlen(t_segs[0]) == 2 && t_segs[0][1] == ':') {
+        if (strlen(f_segs[0]) != 2 || tolower((unsigned char)t_segs[0][0]) != tolower((unsigned char)f_segs[0][0])) {
+            return 0;
+        }
+    }
+
+    int common = 0;
+    while (common < t_count - 1 && common < f_count) {
+        int match = 0;
+#if defined(_WIN32) || defined(_WIN64)
+        if (strcasecmp(t_segs[common], f_segs[common]) == 0) match = 1;
+#else
+        if (strcmp(t_segs[common], f_segs[common]) == 0) match = 1;
+#endif
+        if (match) common++;
+        else break;
+    }
+
+    size_t d = 0;
+    for (int i = common; i < f_count; i++) {
+        if (d + 3 < out_sz) {
+            if (d > 0) out_rel[d++] = '/';
+            out_rel[d++] = '.';
+            out_rel[d++] = '.';
+            out_rel[d] = '\0';
+        }
+    }
+    for (int i = common; i < t_count; i++) {
+        size_t slen = strlen(t_segs[i]);
+        if (d + slen + 2 < out_sz) {
+            if (d > 0) out_rel[d++] = '/';
+            memcpy(out_rel + d, t_segs[i], slen);
+            d += slen;
+            out_rel[d] = '\0';
+        }
+    }
+    return 1;
 }
 
 static int is_text_file_ext(const char* filename) {
@@ -1205,7 +1339,8 @@ static int export_single_stem_assets_from_res(
     const char* pattern_filename_prefix,
     const float* recombined_audio,
     int recombined_len,
-    int recombined_sr
+    int recombined_sr,
+    const char* audio_playback_filepath
 ) {
     // Export .ctbin binary file for Pass 2 directly from existing res2
     char ctbin_path[4096];
@@ -1614,8 +1749,19 @@ static int export_single_stem_assets_from_res(
     free(segments);
 
     // Export HTML Report File with full JS renderer functions
-    char encoded_stem_name[2048];
-    url_encode_filename(stem_name, encoded_stem_name, sizeof(encoded_stem_name));
+    char encoded_audio_src[4096];
+    if (audio_playback_filepath && audio_playback_filepath[0] != '\0') {
+        char rel_audio[4096];
+        if (compute_relative_path(audio_playback_filepath, output_dir, rel_audio, sizeof(rel_audio))) {
+            url_encode_relative_path(rel_audio, encoded_audio_src, sizeof(encoded_audio_src));
+        } else {
+            url_encode_filename(audio_playback_filepath, encoded_audio_src, sizeof(encoded_audio_src));
+        }
+    } else {
+        char encoded_stem_name[2048];
+        url_encode_filename(stem_name, encoded_stem_name, sizeof(encoded_stem_name));
+        snprintf(encoded_audio_src, sizeof(encoded_audio_src), "%s.wav", encoded_stem_name);
+    }
 
     char html_filepath[4096];
     snprintf(html_filepath, sizeof(html_filepath), "%s" PATH_SEP_STR "%s.html", output_dir, stem_name);
@@ -1683,7 +1829,7 @@ static int export_single_stem_assets_from_res(
 
         fprintf(f_html, "    <div class=\"section-title\">1. Interactive Audio Waveform & Pattern Map</div>\n");
         fprintf(f_html, "    <div class=\"audio-controls\">\n");
-        fprintf(f_html, "        <audio id=\"audioPlayer\" controls src=\"%s.wav\"></audio>\n", encoded_stem_name);
+        fprintf(f_html, "        <audio id=\"audioPlayer\" controls src=\"%s\"></audio>\n", encoded_audio_src);
         fprintf(f_html, "    </div>\n");
 
         fprintf(f_html, "    <div class=\"canvas-container\">\n");
@@ -2509,7 +2655,8 @@ static int export_all_assets_and_html_internal(
         NULL,
         rec_audio_buf,
         rec_audio_len,
-        rec_audio_sr
+        rec_audio_sr,
+        (orig_path[0] != '\0') ? orig_path : audio_filepath
     );
 
     if (rec_audio_buf) free(rec_audio_buf);
@@ -2992,29 +3139,29 @@ static void process_single_stem_export(
     snprintf(stem_output_dir, sizeof(stem_output_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "%s", parent_dir, stem->stem_name);
     mkdir_p(stem_output_dir);
 
-    // Copy audio WAV file into stem palette output directory as <stem_name>.wav
-    char dst_stem_audio_path[4096];
-    snprintf(dst_stem_audio_path, sizeof(dst_stem_audio_path), "%s" PATH_SEP_STR "%s.wav", stem_output_dir, stem->stem_name);
+    const char* playback_file = (original_audio_filepath && original_audio_filepath[0] != '\0')
+        ? original_audio_filepath
+        : stem->audio_filepath;
 
-    FILE* src_f = fopen(stem->audio_filepath, "rb");
-    if (src_f) {
-        FILE* dst_f = fopen(dst_stem_audio_path, "wb");
-        if (dst_f) {
-            char buf[65536];
-            size_t bytes_read;
-            while ((bytes_read = fread(buf, 1, sizeof(buf), src_f)) > 0) {
-                fwrite(buf, 1, bytes_read, dst_f);
+    // Only copy local stem WAV if there is no original audio file available to play directly
+    if (!original_audio_filepath || original_audio_filepath[0] == '\0') {
+        char dst_stem_audio_path[4096];
+        snprintf(dst_stem_audio_path, sizeof(dst_stem_audio_path), "%s" PATH_SEP_STR "%s.wav", stem_output_dir, stem->stem_name);
+
+        FILE* src_f = fopen(stem->audio_filepath, "rb");
+        if (src_f) {
+            FILE* dst_f = fopen(dst_stem_audio_path, "wb");
+            if (dst_f) {
+                char buf[65536];
+                size_t bytes_read;
+                while ((bytes_read = fread(buf, 1, sizeof(buf), src_f)) > 0) {
+                    fwrite(buf, 1, bytes_read, dst_f);
+                }
+                fclose(dst_f);
             }
-            fclose(dst_f);
+            fclose(src_f);
         }
-        fclose(src_f);
     }
-
-    // Copy matching passes text files into stem palette output directory
-    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-        copy_passes_files_for_audio(original_audio_filepath, stem_output_dir);
-    }
-    copy_passes_files_for_audio(stem->audio_filepath, stem_output_dir);
 
     // Overall [loops] and [stems] target folders inside parent [palettes]
     char overall_loops_dir[4096];
@@ -3051,7 +3198,8 @@ static void process_single_stem_export(
         pattern_prefix,
         NULL,
         0,
-        0
+        0,
+        playback_file
     );
 }
 
@@ -3106,6 +3254,81 @@ static size_t get_common_stem_prefix_length(const GroupStemInput* stems, int num
     return prefix_len;
 }
 
+typedef struct {
+    char* filepath;
+    float* mono_pcm;
+    int len;
+    int sr;
+} CachedAudioBuffer;
+
+typedef struct {
+    CachedAudioBuffer items[256];
+    int count;
+} AudioBufferCache;
+
+static CachedAudioBuffer* get_or_load_cached_audio(AudioBufferCache* cache, const char* filepath) {
+    if (!filepath || filepath[0] == '\0') return NULL;
+    for (int i = 0; i < cache->count; i++) {
+        if (iequals_ext_func(cache->items[i].filepath, filepath)) {
+            return &cache->items[i];
+        }
+    }
+    if (cache->count >= 256) return NULL;
+
+    unsigned int orig_ch = 0, orig_sr = 0;
+    drwav_uint64 orig_frames = 0;
+    float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(filepath, &orig_ch, &orig_sr, &orig_frames, NULL);
+    if (!orig_pcm || orig_frames == 0 || orig_sr == 0) {
+        if (orig_pcm) drwav_free(orig_pcm, NULL);
+        return NULL;
+    }
+
+    float* mono = (float*)malloc(orig_frames * sizeof(float));
+    if (!mono) {
+        drwav_free(orig_pcm, NULL);
+        return NULL;
+    }
+
+    if (orig_ch == 1) {
+        memcpy(mono, orig_pcm, orig_frames * sizeof(float));
+    } else {
+        for (drwav_uint64 f = 0; f < orig_frames; f++) {
+            double sum = 0.0;
+            for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
+                sum += orig_pcm[f * orig_ch + ch_i];
+            }
+            mono[f] = (float)(sum / orig_ch);
+        }
+    }
+    drwav_free(orig_pcm, NULL);
+
+    float max_abs_val = 0.0f;
+    for (drwav_uint64 s = 0; s < orig_frames; s++) {
+        float abs_smp = fabsf(mono[s]);
+        if (abs_smp > max_abs_val) max_abs_val = abs_smp;
+    }
+    if (max_abs_val > 0.0f) {
+        float norm_factor = 1.0f / max_abs_val;
+        for (drwav_uint64 s = 0; s < orig_frames; s++) mono[s] *= norm_factor;
+    }
+
+    CachedAudioBuffer* item = &cache->items[cache->count++];
+    item->filepath = strdup(filepath);
+    item->mono_pcm = mono;
+    item->len = (int)orig_frames;
+    item->sr = (int)orig_sr;
+    return item;
+}
+
+static void free_audio_buffer_cache(AudioBufferCache* cache) {
+    if (!cache) return;
+    for (int i = 0; i < cache->count; i++) {
+        if (cache->items[i].filepath) free(cache->items[i].filepath);
+        if (cache->items[i].mono_pcm) free(cache->items[i].mono_pcm);
+    }
+    cache->count = 0;
+}
+
 int export_group_assets_and_html(
     const GroupStemInput* stems,
     int num_stems,
@@ -3128,14 +3351,42 @@ int export_group_assets_and_html(
     mkdir_p(group_output_dir);
     printf("[Group Mode] Output directory ready: %s\n", group_output_dir);
 
-    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-        copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
-    }
+    // Resolve original audio file for each stem upfront and deduplicate passes text file copying
+    char exe_dir[2048];
+    get_executable_directory(exe_dir, sizeof(exe_dir));
+
+    char** stem_orig_paths = (char**)calloc(num_stems, sizeof(char*));
+    char** copied_passes_audios = (char**)calloc(num_stems + 1, sizeof(char*));
+    int num_copied_passes = 0;
+
     for (int i = 0; i < num_stems; i++) {
-        if (stems[i].audio_filepath) {
-            copy_passes_files_for_audio(stems[i].audio_filepath, group_output_dir);
+        char resolved_path[4096] = "";
+        if (find_original_audio_for_stem(exe_dir, stems[i].audio_filepath, resolved_path, sizeof(resolved_path))) {
+            stem_orig_paths[i] = strdup(resolved_path);
+            printf("[Group Mode] Resolved original audio for stem '%s': %s\n", stems[i].stem_name, resolved_path);
+        } else if (original_audio_filepath && original_audio_filepath[0] != '\0') {
+            stem_orig_paths[i] = strdup(original_audio_filepath);
+        } else {
+            stem_orig_paths[i] = NULL;
+        }
+
+        const char* p_audio = stem_orig_paths[i];
+        if (p_audio && p_audio[0] != '\0') {
+            int already_copied = 0;
+            for (int c = 0; c < num_copied_passes; c++) {
+                if (iequals_ext_func(copied_passes_audios[c], p_audio)) {
+                    already_copied = 1;
+                    break;
+                }
+            }
+            if (!already_copied) {
+                copy_passes_files_for_audio(p_audio, group_output_dir);
+                copied_passes_audios[num_copied_passes++] = strdup(p_audio);
+            }
         }
     }
+    for (int c = 0; c < num_copied_passes; c++) free(copied_passes_audios[c]);
+    free(copied_passes_audios);
 
     // Ensure progress bar mutex is initialized prior to spawning threads
     if (!g_progress_mutex_inited) {
@@ -3487,95 +3738,47 @@ int export_group_assets_and_html(
     free(pass2_gpu_ok);
     group_mutex_destroy(&group_shared_mutex);
 
-    // 4. Obtain group audio buffer: load original audio file for pattern slicing and group report
-    float* mono_combined = NULL;
-    int group_audio_len = 0;
-    int group_audio_sr = common_sr;
-    char loaded_orig_path[4096] = "";
+    // Audio Buffer Cache: cache loaded original audio files so each is loaded and decoded once
+    AudioBufferCache orig_audio_cache;
+    memset(&orig_audio_cache, 0, sizeof(AudioBufferCache));
 
-    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-        unsigned int orig_ch = 0, orig_sr = 0;
-        drwav_uint64 orig_frames = 0;
-        float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(original_audio_filepath, &orig_ch, &orig_sr, &orig_frames, NULL);
-
-        if (orig_pcm && orig_frames > 0 && orig_sr > 0) {
-            mono_combined = (float*)malloc(orig_frames * sizeof(float));
-            if (mono_combined) {
-                group_audio_len = (int)orig_frames;
-                group_audio_sr = (int)orig_sr;
-                strncpy(loaded_orig_path, original_audio_filepath, sizeof(loaded_orig_path) - 1);
-
-                if (orig_ch == 1) {
-                    memcpy(mono_combined, orig_pcm, orig_frames * sizeof(float));
-                } else {
-                    for (drwav_uint64 f = 0; f < orig_frames; f++) {
-                        double sum = 0.0;
-                        for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
-                            sum += orig_pcm[f * orig_ch + ch_i];
-                        }
-                        mono_combined[f] = (float)(sum / orig_ch);
-                    }
-                }
-
-                float max_abs_val = 0.0f;
-                for (int s = 0; s < group_audio_len; s++) {
-                    float abs_smp = fabsf(mono_combined[s]);
-                    if (abs_smp > max_abs_val) max_abs_val = abs_smp;
-                }
-
-                if (max_abs_val > 0.0f) {
-                    float norm_factor = 1.0f / max_abs_val;
-                    for (int s = 0; s < group_audio_len; s++) {
-                        mono_combined[s] *= norm_factor;
-                    }
-                }
-
-                printf("\nUsing original audio file for group analysis and stem pattern sourcing: %s\n", loaded_orig_path);
-            }
-            drwav_free(orig_pcm, NULL);
+    // Construct a fallback summed audio buffer only if any stems lack an original audio file
+    float* fallback_summed_mono = NULL;
+    int fallback_summed_len = 0;
+    int has_any_missing_orig = 0;
+    for (int i = 0; i < num_stems; i++) {
+        if (!stem_orig_paths[i] || stem_orig_paths[i][0] == '\0') {
+            has_any_missing_orig = 1;
+            break;
         }
     }
 
-    if (!mono_combined && max_len > 0) {
-        printf("\nOriginal audio file not found. Reconstructing group audio by summing stems...\n");
-        mono_combined = (float*)calloc(max_len, sizeof(float));
-        if (mono_combined) {
-            group_audio_len = max_len;
-            group_audio_sr = common_sr;
-
+    if (has_any_missing_orig && max_len > 0) {
+        fallback_summed_mono = (float*)calloc(max_len, sizeof(float));
+        if (fallback_summed_mono) {
+            fallback_summed_len = max_len;
             for (int i = 0; i < num_stems; i++) {
                 int stem_len = stems[i].len;
                 const float* stem_data = stems[i].mono_data;
                 if (stem_data) {
                     for (int s = 0; s < stem_len; s++) {
-                        mono_combined[s] += stem_data[s];
+                        fallback_summed_mono[s] += stem_data[s];
                     }
                 }
             }
-
             float max_abs_val = 0.0f;
-            for (int s = 0; s < group_audio_len; s++) {
-                float abs_smp = fabsf(mono_combined[s]);
+            for (int s = 0; s < fallback_summed_len; s++) {
+                float abs_smp = fabsf(fallback_summed_mono[s]);
                 if (abs_smp > max_abs_val) max_abs_val = abs_smp;
             }
-
             if (max_abs_val > 0.0f) {
                 float norm_factor = 1.0f / max_abs_val;
-                for (int s = 0; s < group_audio_len; s++) {
-                    mono_combined[s] *= norm_factor;
-                }
+                for (int s = 0; s < fallback_summed_len; s++) fallback_summed_mono[s] *= norm_factor;
             }
         }
     }
 
-    if (!mono_combined) {
-        printf("\nError: Failed to construct group audio buffer for group report analysis.\n");
-        if (accumulated_contour) free(accumulated_contour);
-        if (contour_evo) free(contour_evo);
-        return 0;
-    }
-
-    // 5. Export individual stem assets & HTML using res2_stems results, sourcing patterns from original audio buffer (mono_combined)
+    // 4. Export individual stem assets & HTML using res2_stems results
     print_progress_bar(0, num_stems, "Exporting Stem Assets & Slicing Pattern WAVs");
 
     GroupExportTask* export_tasks = (GroupExportTask*)calloc(num_stems, sizeof(GroupExportTask));
@@ -3592,6 +3795,9 @@ int export_group_assets_and_html(
             trimmed_stems[i].stem_name = stems[i].stem_name + common_prefix_len;
         }
 
+        const char* stem_orig = stem_orig_paths[i];
+        CachedAudioBuffer* cached = stem_orig ? get_or_load_cached_audio(&orig_audio_cache, stem_orig) : NULL;
+
         export_tasks[i].stem_idx = i;
         export_tasks[i].stem = &trimmed_stems[i];
         export_tasks[i].parent_dir = parent_dir;
@@ -3604,10 +3810,10 @@ int export_group_assets_and_html(
         export_tasks[i].evo_frames = CONTOUR_EVO_FRAMES;
         export_tasks[i].evo_pts = CONTOUR_EVO_PTS;
         export_tasks[i].res2_stem = &res2_stems[i];
-        export_tasks[i].source_audio = mono_combined;
-        export_tasks[i].source_len = group_audio_len;
-        export_tasks[i].source_sr = group_audio_sr;
-        export_tasks[i].original_audio_filepath = original_audio_filepath;
+        export_tasks[i].source_audio = cached ? cached->mono_pcm : fallback_summed_mono;
+        export_tasks[i].source_len = cached ? cached->len : fallback_summed_len;
+        export_tasks[i].source_sr = cached ? cached->sr : common_sr;
+        export_tasks[i].original_audio_filepath = stem_orig;
         export_tasks[i].export_counter = &export_counter;
         export_tasks[i].counter_mutex = &export_mutex;
         export_tasks[i].total_stems = num_stems;
@@ -3642,24 +3848,7 @@ int export_group_assets_and_html(
     }
 #endif
 
-    // Resolve original audio file for each stem and group overlapping patterns per original audio file
-    char exe_dir[2048];
-    get_executable_directory(exe_dir, sizeof(exe_dir));
 
-    char** stem_orig_paths = (char**)calloc(num_stems, sizeof(char*));
-    for (int i = 0; i < num_stems; i++) {
-        char resolved_path[4096] = "";
-        if (find_original_audio_for_stem(exe_dir, stems[i].audio_filepath, resolved_path, sizeof(resolved_path))) {
-            stem_orig_paths[i] = strdup(resolved_path);
-            copy_passes_files_for_audio(resolved_path, group_output_dir);
-            printf("[Group Mode] Resolved original audio for stem '%s': %s\n", stems[i].stem_name, resolved_path);
-        } else if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-            stem_orig_paths[i] = strdup(original_audio_filepath);
-        } else {
-            stem_orig_paths[i] = NULL;
-        }
-        export_tasks[i].original_audio_filepath = stem_orig_paths[i];
-    }
 
     typedef struct {
         double start_ms;
@@ -3767,46 +3956,22 @@ int export_group_assets_and_html(
         int grp_audio_sr = common_sr;
         float* grp_audio_buf = NULL;
 
-        if (grp_orig_path && grp_orig_path[0] != '\0') {
-            unsigned int orig_ch = 0, orig_sr = 0;
-            drwav_uint64 orig_frames = 0;
-            float* orig_pcm = drwav_open_file_and_read_pcm_frames_f32(grp_orig_path, &orig_ch, &orig_sr, &orig_frames, NULL);
-            if (orig_pcm && orig_frames > 0 && orig_sr > 0) {
-                grp_audio_buf = (float*)malloc(orig_frames * sizeof(float));
-                if (grp_audio_buf) {
-                    grp_audio_len = (int)orig_frames;
-                    grp_audio_sr = (int)orig_sr;
-                    if (orig_ch == 1) {
-                        memcpy(grp_audio_buf, orig_pcm, orig_frames * sizeof(float));
-                    } else {
-                        for (drwav_uint64 f = 0; f < orig_frames; f++) {
-                            double sum = 0.0;
-                            for (unsigned int ch_i = 0; ch_i < orig_ch; ch_i++) {
-                                sum += orig_pcm[f * orig_ch + ch_i];
-                            }
-                            grp_audio_buf[f] = (float)(sum / orig_ch);
-                        }
-                    }
-                    float max_abs_val = 0.0f;
-                    for (int s = 0; s < grp_audio_len; s++) {
-                        float abs_smp = fabsf(grp_audio_buf[s]);
-                        if (abs_smp > max_abs_val) max_abs_val = abs_smp;
-                    }
-                    if (max_abs_val > 0.0f) {
-                        float norm_factor = 1.0f / max_abs_val;
-                        for (int s = 0; s < grp_audio_len; s++) grp_audio_buf[s] *= norm_factor;
-                    }
-                }
-                drwav_free(orig_pcm, NULL);
+        CachedAudioBuffer* grp_cached = grp_orig_path ? get_or_load_cached_audio(&orig_audio_cache, grp_orig_path) : NULL;
+        if (grp_cached) {
+            grp_audio_len = grp_cached->len;
+            grp_audio_sr = grp_cached->sr;
+            grp_audio_buf = (float*)malloc(grp_audio_len * sizeof(float));
+            if (grp_audio_buf) {
+                memcpy(grp_audio_buf, grp_cached->mono_pcm, grp_audio_len * sizeof(float));
             }
         }
 
-        if (!grp_audio_buf) {
-            grp_audio_buf = (float*)malloc(group_audio_len * sizeof(float));
+        if (!grp_audio_buf && fallback_summed_mono && fallback_summed_len > 0) {
+            grp_audio_buf = (float*)malloc(fallback_summed_len * sizeof(float));
             if (grp_audio_buf) {
-                memcpy(grp_audio_buf, mono_combined, group_audio_len * sizeof(float));
-                grp_audio_len = group_audio_len;
-                grp_audio_sr = group_audio_sr;
+                memcpy(grp_audio_buf, fallback_summed_mono, fallback_summed_len * sizeof(float));
+                grp_audio_len = fallback_summed_len;
+                grp_audio_sr = common_sr;
             }
         }
 
@@ -3970,7 +4135,8 @@ int export_group_assets_and_html(
                     NULL,
                     NULL,
                     0,
-                    0
+                    0,
+                    group_wav_path
                 );
                 if (export_ok) {
                     printf("SUCCESS: Group HTML Report generated successfully: %s" PATH_SEP_STR "%s.html\n", group_output_dir, group_stem_name);
@@ -3982,7 +4148,6 @@ int export_group_assets_and_html(
                 printf("Error: Failed to perform transience analysis for Group HTML Report '%s'.\n", group_stem_name);
             }
         }
-
         if (grp_rec_buf) free(grp_rec_buf);
         if (grp_audio_buf) free(grp_audio_buf);
     }
@@ -4001,13 +4166,10 @@ int export_group_assets_and_html(
     free(export_tasks);
     group_mutex_destroy(&export_mutex);
 
-    if (original_audio_filepath && original_audio_filepath[0] != '\0') {
-        copy_passes_files_for_audio(original_audio_filepath, group_output_dir);
+    if (fallback_summed_mono) {
+        free(fallback_summed_mono);
     }
-
-    if (mono_combined) {
-        free(mono_combined);
-    }
+    free_audio_buffer_cache(&orig_audio_cache);
 
     if (accumulated_contour) free(accumulated_contour);
     if (contour_evo) free(contour_evo);
