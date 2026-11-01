@@ -56,6 +56,10 @@ When searching for original audio files to extract audio from for creating `[ste
 2. **`analyze.exe` (group mode)**:
    - `analyze.exe --group` creates `[palettes]` and `[palettes]/[stems]`, and copies `song_builder.exe` from next to `analyze.exe` into `[palettes]/[stems]` as soon as that folder exists. The original is left in place, and if no `song_builder.exe` is found the run notes it and continues. `analyze_group.bat` only launches the analyzer and no longer copies anything.
 
+## Existing Pitch Stem Skip Check
+
+Before a WAV file is decoded, `flux_separator` checks the `pitch_stems` folder and its `[flux]` subfolder for pitch stems already exported for that file (any WAV named `<basename>_pitch_<nnn>_<note>...`). When at least one is found, the analysis for that file is skipped entirely and the run moves on to the next file; the console and the batch dashboard report the file as skipped rather than complete or failed. Files without existing stems in the same batch are still processed normally.
+
 ## Compilation
 
 To compile the analysis executables:
