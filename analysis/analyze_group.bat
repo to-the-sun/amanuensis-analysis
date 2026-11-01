@@ -32,10 +32,12 @@ if defined MATCHED_WAV (
 
 if exist "%~dp0song_builder.exe" (
     if not exist "[palettes]\[stems]" mkdir "[palettes]\[stems]"
-    move /y "%~dp0song_builder.exe" "[palettes]\[stems]\" >nul
+    copy /y "%~dp0song_builder.exe" "[palettes]\[stems]\" >nul
+    if errorlevel 1 echo ERROR: failed to copy "%~dp0song_builder.exe" to "[palettes]\[stems]\".
 ) else if exist "song_builder.exe" (
     if not exist "[palettes]\[stems]" mkdir "[palettes]\[stems]"
-    move /y "song_builder.exe" "[palettes]\[stems]\" >nul
+    copy /y "song_builder.exe" "[palettes]\[stems]\" >nul
+    if errorlevel 1 echo ERROR: failed to copy "song_builder.exe" to "[palettes]\[stems]\".
 )
 
 pause
