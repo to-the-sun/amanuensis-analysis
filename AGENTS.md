@@ -8,6 +8,14 @@ repo, not just the one that created this file.
 - Never commit directly to `main`.
 - For each change, create a new branch, commit there, push the branch, and give
   the user a GitHub link to open the pull request.
+- Every push ends with two things handed to the user, without being asked:
+  - a link they can click to open the pull request for the pushed branch, and
+  - a zip file they can download holding every file the push changed or added,
+    with paths relative to the repo root preserved. Save it inside the
+    workspace under `artifacts/`, named after the branch, e.g.
+    `artifacts/<branch-name>-changes.zip`, and link it. A zip cannot record a
+    deletion, so name any files the push removed in the message, and list the
+    zip's contents so the user can see nothing is missing.
 - Name branches after the change in short hyphenated form, e.g.
   `copy-song-builder-in-analyzer`.
 - Commit as often as the work needs, and keep committing to the same open branch
