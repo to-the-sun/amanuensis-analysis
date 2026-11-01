@@ -1,0 +1,4 @@
+# Batch files must keep CRLF endings: cmd.exe cannot resolve goto labels in
+# scripts that only have Unix (LF) endings ("The system cannot find the batch
+# label specified"), which silently breaks the loop in analyze_group.bat.
+*.bat text eol=crlf
