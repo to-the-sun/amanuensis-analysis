@@ -23,23 +23,48 @@ repo, not just the one that created this file.
   after it exits`.
 - Body: a short paragraph on why the change was made (the problem it fixes), not
   a list of what was edited. Wrap around 72 columns.
-- Every commit keeps this attribution footer, unless the user explicitly asks to
-  drop it:
+- Commits are a collaboration between the user and Codebuff, and every commit
+  credits both. The git author is the user's own GitHub identity, and Codebuff
+  appears as a co-author through this trailer:
 
   ```
   🤖 Generated with Codebuff
   Co-Authored-By: Codebuff <noreply@codebuff.com>
   ```
 
+- The repository's configured git identity is `Codebuff <noreply@codebuff.com>`
+  (the Freebuff default), so pass the user's identity explicitly when committing:
+
+  ```
+  git -c user.name='To the Sun' \
+      -c user.email='4305621+to-the-sun@users.noreply.github.com' \
+      commit -m "$(cat <<'EOF'
+  Subject line here
+
+  Why the change was made.
+
+  🤖 Generated with Codebuff
+  Co-Authored-By: Codebuff <noreply@codebuff.com>
+  EOF
+  )"
+  ```
+
+- Do not commit as Codebuff alone, and do not use the user's identity without the
+  co-author trailer; either one misattributes the commit. Change the credit only
+  when the user explicitly asks.
+
 ## Building the analyzer
 
-- `analysis/` holds the C analyzer. Sources: `analyze.c`, `exporter.c`,
-  `cumulative_transience.c`, `crossfade.c`.
+- `analysis/` holds the C tools. `analyze.exe` builds from `analyze.c`,
+  `exporter.c`, `cumulative_transience.c`, and `crossfade.c`;
+  `flux_separator.exe` builds from `flux_separator.c`.
 - Windows build: `make analyze.exe` in `analysis/` with mingw-w64
   (`x86_64-w64-mingw32-gcc`) on PATH.
-- `analysis/analyze.exe` and `analysis/song_builder.exe` are tracked in git on
-  purpose. When C sources change, rebuild `analyze.exe` and commit the new
-  binary together with the source change.
+- `analysis/analyze.exe`, `analysis/song_builder.exe`, and
+  `analysis/flux_separator.exe` are tracked in git on purpose. Whenever the
+  underlying C sources change, rebuild each affected `.exe` for Windows
+  (`make analyze.exe`, `make flux_separator.exe` in `analysis/`) and commit the
+  new binary together with the source change.
 - A cloud sandbox has no Windows runtime, so a rebuilt `.exe` can be compiled but
   not executed there. Say so plainly instead of implying it was tested; a Linux
   build of the same sources can be used to exercise the logic.
