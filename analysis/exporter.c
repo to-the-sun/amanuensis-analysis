@@ -178,6 +178,56 @@ void get_executable_directory(char* out_dir, size_t out_size) {
     out_dir[out_size - 1] = '\0';
 }
 
+// Copies song_builder.exe from beside this executable into a finished output
+// folder, leaving the original in place.  Called as soon as the folder exists so
+// the report can be built without a launcher step afterwards.
+static void copy_song_builder_into_dir(const char* dest_dir) {
+    if (!dest_dir || dest_dir[0] == '\0') return;
+
+    char exe_dir[2048];
+    get_executable_directory(exe_dir, sizeof(exe_dir));
+
+    char src_path[4096];
+    snprintf(src_path, sizeof(src_path), "%s" PATH_SEP_STR "song_builder.exe", exe_dir);
+
+    FILE* src = fopen(src_path, "rb");
+    if (!src) {
+        snprintf(src_path, sizeof(src_path), "song_builder.exe");
+        src = fopen(src_path, "rb");
+    }
+    if (!src) {
+        printf("Note: song_builder.exe was not found next to the analyzer, so none was\n"
+               "      copied into %s\n", dest_dir);
+        return;
+    }
+
+    char dst_path[4096];
+    snprintf(dst_path, sizeof(dst_path), "%s" PATH_SEP_STR "song_builder.exe", dest_dir);
+
+    FILE* dst = fopen_diag(dst_path, "wb", "copy song_builder.exe into the output folder");
+    if (!dst) {
+        fclose(src);
+        return;
+    }
+
+    char buf[65536];
+    size_t bytes_read;
+    int ok = 1;
+    while ((bytes_read = fread(buf, 1, sizeof(buf), src)) > 0) {
+        if (fwrite(buf, 1, bytes_read, dst) != bytes_read) {
+            report_fs_failure("write song_builder.exe copy", dst_path, errno ? errno : EIO);
+            ok = 0;
+            break;
+        }
+    }
+    fclose(src);
+    if (!fclose_diag(dst, dst_path, "copy song_builder.exe into the output folder")) ok = 0;
+
+    if (ok) {
+        printf("Copied song_builder.exe into the output folder: %s\n", dst_path);
+    }
+}
+
 static int get_parent_directory(const char* dir_path, char* out_parent, size_t out_size) {
     if (!dir_path || dir_path[0] == '\0') {
         out_parent[0] = '\0';
@@ -3875,6 +3925,14 @@ int export_group_assets_and_html(
         ERRPRINTF("Error: could not create the group output folder: %s\n", group_output_dir);
     }
     printf("[Group Mode] Output directory ready: %s\n", group_output_dir);
+
+    // Create [palettes]/[stems] up front and put song_builder.exe in it as soon as
+    // it exists, so the finished folder works without a launcher script.
+    char stems_helper_dir[4096];
+    snprintf(stems_helper_dir, sizeof(stems_helper_dir), "%s" PATH_SEP_STR "[stems]", group_output_dir);
+    if (mkdir_p(stems_helper_dir) == 0) {
+        copy_song_builder_into_dir(stems_helper_dir);
+    }
 
     // 1b. Resolve the original audio file for every stem up front so stem exports, pattern
     // slicing and group reports all use the same resolved original audio.
