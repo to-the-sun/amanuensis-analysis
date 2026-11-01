@@ -21,8 +21,12 @@ all: $(TARGET) $(WIN_TARGET) $(SONG_TARGET) $(SONG_WIN_TARGET) $(FLUX_TARGET) $(
 $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) $(OBJECTS) -o $@ $(LDFLAGS) || $(CC) $(CFLAGS) $(OBJECTS) -o $@ -lm -lpthread
 
+# Windows reserves 1 MB of stack by default, and the report exporter's deep call
+# chains overran it; keep a generous reserve on the executable.
+WIN_STACK = -Wl,--stack,33554432
+
 $(WIN_TARGET): $(SOURCES)
-	$(WIN_CC) $(CFLAGS) $(SOURCES) -o $@ -lm -lpthread -lOpenCL || $(WIN_CC) $(CFLAGS) $(SOURCES) -o $@ -lm
+	$(WIN_CC) $(CFLAGS) $(SOURCES) -o $@ $(WIN_STACK) -lm -lpthread -lOpenCL || $(WIN_CC) $(CFLAGS) $(SOURCES) -o $@ $(WIN_STACK) -lm
 
 $(SONG_TARGET): $(SONG_SOURCES)
 	$(CC) $(CFLAGS) $(SONG_SOURCES) -o $@ -lm
