@@ -14,11 +14,59 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <direct.h>
+#include <sys/stat.h>
 #define mkdir_cross(dir) _mkdir(dir)
 #else
 #include <sys/stat.h>
 #define mkdir_cross(dir) mkdir(dir, 0755)
 #endif
+
+// ---------------------------------------------------------------------------
+// Diagnostics for filesystem and analysis failures.
+//
+// Error text is flushed as it is written: when stdout is redirected to a file
+// it is block-buffered, so anything still pending when the process dies is lost
+// and the run looks as if it simply stopped without any errors.  A folder that
+// was created but left empty is otherwise indistinguishable from a run that
+// failed silently.
+// ---------------------------------------------------------------------------
+#define ERRPRINTF(...) do { printf(__VA_ARGS__); fflush(stdout); } while (0)
+
+// Windows refuses paths of MAX_PATH (260) characters or more unless long-path
+// support is enabled, which is exactly how a report folder can be created while
+// every file inside it fails to open.
+#define DIAG_PATH_WARN_LEN 240
+
+static void report_fs_failure(const char* what, const char* path, int err) {
+    int path_len = path ? (int)strlen(path) : 0;
+    ERRPRINTF("Error: %s failed for path: %s\n", what, path ? path : "(null)");
+    ERRPRINTF("       reason: %s (errno=%d), path length: %d chars\n",
+              err ? strerror(err) : "no errno reported", err, path_len);
+    if (path_len >= DIAG_PATH_WARN_LEN) {
+        ERRPRINTF("       NOTE: this path is close to or past the Windows MAX_PATH limit of 260\n"
+                  "       characters, so the folder can exist while files inside it cannot be written.\n");
+    }
+}
+
+static FILE* fopen_diag(const char* path, const char* mode, const char* what) {
+    errno = 0;
+    FILE* f = fopen(path, mode);
+    if (!f) report_fs_failure(what, path, errno);
+    return f;
+}
+
+static int fclose_diag(FILE* f, const char* path, const char* what) {
+    if (!f) return 0;
+    int pending = ferror(f) ? (errno ? errno : EIO) : 0;
+    errno = 0;
+    int rc = fclose(f);
+    int err = (rc != 0) ? (errno ? errno : EIO) : pending;
+    if (err) {
+        report_fs_failure(what, path, err);
+        return 0;
+    }
+    return 1;
+}
 
 void group_mutex_init(GroupMutex* mutex) {
     if (!mutex) return;
@@ -495,27 +543,44 @@ static void write_stem_pattern_wav(
     }
 }
 
+// Returns 0 when the directory exists afterwards (created now or already
+// present) and -1 on a real failure, reporting the failing component and the
+// reason.  A silently ignored failure here is what leaves an empty folder.
 int mkdir_p(const char* path) {
-    if (!path || !*path) return 0;
+    if (!path || !*path) return -1;
     char tmp[4096];
-    snprintf(tmp, sizeof(tmp), "%s", path);
+    int written = snprintf(tmp, sizeof(tmp), "%s", path);
+    if (written < 0 || (size_t)written >= sizeof(tmp)) {
+        ERRPRINTF("Error: directory path is too long to handle (%d chars): %s\n", written, path);
+        return -1;
+    }
     size_t len = strlen(tmp);
     while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
         tmp[len - 1] = '\0';
         len--;
     }
 
+    int ok = 1;
     char* p = NULL;
     for (p = tmp + 1; *p; p++) {
         if (*p == '/' || *p == '\\') {
             *p = '\0';
             if (strlen(tmp) > 0) {
-                mkdir_cross(tmp);
+                errno = 0;
+                if (mkdir_cross(tmp) != 0 && errno != EEXIST) {
+                    report_fs_failure("create directory", tmp, errno);
+                    ok = 0;
+                }
             }
             *p = '/';
         }
     }
-    return mkdir_cross(tmp);
+    errno = 0;
+    if (mkdir_cross(tmp) != 0 && errno != EEXIST) {
+        report_fs_failure("create directory", tmp, errno);
+        ok = 0;
+    }
+    return ok ? 0 : -1;
 }
 
 typedef struct {
@@ -1019,7 +1084,7 @@ int export_ctbin_from_res(const char* output_filepath, const FullAnalysisResult*
     if (window_ms > 15000) window_ms = 15000;
     if (window_ms < 5000) window_ms = 5000;
 
-    FILE* f = fopen(output_filepath, "wb");
+    FILE* f = fopen_diag(output_filepath, "wb", "create .ctbin asset");
     if (!f) return 0;
 
     int32_t total_peaks = 0;
@@ -1038,7 +1103,8 @@ int export_ctbin_from_res(const char* output_filepath, const FullAnalysisResult*
     header.total_peaks = total_peaks;
 
     if (!write_bytes(f, &header, sizeof(CTBinHeader), 1)) {
-        fclose(f);
+        ERRPRINTF("Error: failed to write the .ctbin header to %s\n", output_filepath);
+        fclose_diag(f, output_filepath, "write .ctbin asset");
         return 0;
     }
 
@@ -1092,7 +1158,7 @@ int export_ctbin_from_res(const char* output_filepath, const FullAnalysisResult*
         }
     }
 
-    fclose(f);
+    if (!fclose_diag(f, output_filepath, "write .ctbin asset")) return 0;
     return 1;
 }
 
@@ -1110,6 +1176,61 @@ int export_ctbin(const char* output_filepath, const float* y, int len, int sr, i
     return ret;
 }
 
+static int analysis_alloc_failed(const void* ptr, size_t bytes, const char* what, int num_frames) {
+    if (ptr) return 0;
+    ERRPRINTF("Error: out of memory during analysis: %s (%llu bytes for %d frames).\n",
+              what ? what : "buffer", (unsigned long long)bytes, num_frames);
+    return 1;
+}
+
+// Frees only the buffers built up by analyzer_batch_analyze_shared, so a
+// partially filled result can be released without touching anything the caller
+// owns.  The result struct is zeroed when the analysis starts.
+static void free_analysis_buffers_partial(FullAnalysisResult* r) {
+    if (!r) return;
+    free(r->times); r->times = NULL;
+    free(r->ratings); r->ratings = NULL;
+    free(r->std_devs); r->std_devs = NULL;
+    free(r->means); r->means = NULL;
+    free(r->contrasts); r->contrasts = NULL;
+    free(r->stability_scores); r->stability_scores = NULL;
+    free(r->highest_peaks_ms); r->highest_peaks_ms = NULL;
+    free(r->demarcation_lines); r->demarcation_lines = NULL;
+    free(r->rolling_global_flux_avg); r->rolling_global_flux_avg = NULL;
+    free(r->rolling_global_smoothing_avg); r->rolling_global_smoothing_avg = NULL;
+    for (int b = 0; b < r->num_bands; b++) {
+        BandAnalysis* band = &r->bands[b];
+        free(band->envelope); band->envelope = NULL;
+        free(band->rolling_dynamic_smoothing); band->rolling_dynamic_smoothing = NULL;
+        free(band->rolling_prominence); band->rolling_prominence = NULL;
+        free(band->rolling_prominence_avg); band->rolling_prominence_avg = NULL;
+        free(band->rolling_prominence_half_max); band->rolling_prominence_half_max = NULL;
+        free(band->rolling_smoothing_avg); band->rolling_smoothing_avg = NULL;
+        free(band->rolling_flux_avg); band->rolling_flux_avg = NULL;
+        free(band->rolling_threshold); band->rolling_threshold = NULL;
+        free(band->rolling_lookback); band->rolling_lookback = NULL;
+        free(band->rolling_avg_delta); band->rolling_avg_delta = NULL;
+        free(band->rolling_total_delta); band->rolling_total_delta = NULL;
+        free(band->rolling_p_count); band->rolling_p_count = NULL;
+        free(band->peaks); band->peaks = NULL;
+        band->num_peaks = 0;
+    }
+    r->num_frames = 0;
+}
+
+// Used inside analyzer_batch_analyze_shared only: they jump to its
+// analysis_fail label so a partially built result is released and the failure
+// is reported instead of leaving a half-written report behind.
+#define MALLOC_OR_FAIL(field, bytes, what) do { \
+        (field) = malloc(bytes); \
+        if (analysis_alloc_failed((field), (size_t)(bytes), (what), num_f)) goto analysis_fail; \
+    } while (0)
+
+#define CALLOC_OR_FAIL(field, count, elem_size, what) do { \
+        (field) = calloc((count), (elem_size)); \
+        if (analysis_alloc_failed((field), (size_t)(count) * (size_t)(elem_size), (what), num_f)) goto analysis_fail; \
+    } while (0)
+
 static int analyzer_batch_analyze_shared(
     const float* y,
     int len,
@@ -1120,56 +1241,119 @@ static int analyzer_batch_analyze_shared(
     FullAnalysisResult* result_out,
     int is_direct_flux
 ) {
+    TransientAnalyzer* a = NULL;
+    ChunkAnalysisResult* res = NULL;
+    PeakResult* pband[MAX_BANDS];
+    int pcap[MAX_BANDS];
+    float* gpu_flux = NULL;
+    int gpu_ok = 0;
+    int step = 1;
+    int flush_samples = 0;
+    for (int b = 0; b < MAX_BANDS; b++) { pband[b] = NULL; pcap[b] = 0; }
+
     if (window_ms > 15000) window_ms = 15000;
     if (window_ms <= 0) window_ms = 15000;
     if (num_bands <= 0 || num_bands > MAX_BANDS) num_bands = MAX_BANDS;
-    result_out->num_bands = num_bands;
-    int hop = (int)(sr * 0.001), num_f = (len + hop - 1) / hop;
-    result_out->num_frames = num_f; result_out->times = (float*)malloc(sizeof(float) * num_f); if(!result_out->times) return 0;
-    for (int i = 0; i < num_f; i++) result_out->times[i] = (float)i * (float)hop / (float)sr;
-    result_out->ratings = (double*)malloc(sizeof(double) * num_f);
-    result_out->std_devs = (double*)malloc(sizeof(double) * num_f);
-    result_out->means = (double*)malloc(sizeof(double) * num_f);
-    result_out->contrasts = (double*)malloc(sizeof(double) * num_f);
-    result_out->stability_scores = (double*)malloc(sizeof(double) * num_f);
-    result_out->highest_peaks_ms = (double*)malloc(sizeof(double) * num_f);
-    result_out->demarcation_lines = (double*)malloc(sizeof(double) * num_f);
-    result_out->rolling_global_flux_avg = (float*)calloc(num_f, sizeof(float));
-    result_out->rolling_global_smoothing_avg = (float*)calloc(num_f, sizeof(float));
-    for (int b = 0; b < num_bands; b++) {
-        result_out->bands[b].envelope = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_dynamic_smoothing = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_prominence = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_prominence_avg = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_prominence_half_max = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_smoothing_avg = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_flux_avg = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_threshold = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_lookback = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_avg_delta = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_total_delta = (float*)calloc(num_f, sizeof(float));
-        result_out->bands[b].rolling_p_count = (int*)calloc(num_f, sizeof(int));
-        result_out->bands[b].peaks = NULL;
-        result_out->bands[b].num_peaks = 0;
+
+    // Group mode analyses a whole original recording, so an out-of-memory
+    // condition or a corrupt peak list is far more likely here than for a short
+    // stem.  Every failure below reports the buffer, its size and the frame
+    // count, so an empty report folder can be explained from the log alone.
+    if (!y || len <= 0 || sr <= 0) {
+        ERRPRINTF("Error: analysis called with invalid input (%d samples, %d Hz, %d ms window).\n",
+                  len, sr, window_ms);
+        return 0;
     }
-    float* gpu_flux = NULL;
-    int gpu_ok = 0;
+
+    memset(result_out, 0, sizeof(*result_out));
+    result_out->num_bands = num_bands;
+
+    int hop = (int)(sr * 0.001);
+    if (hop <= 0) hop = 1;
+    long long num_f_ll = ((long long)len + (long long)hop - 1) / (long long)hop;
+    if (num_f_ll <= 0 || num_f_ll > 100000000LL) {
+        ERRPRINTF("Error: analysis frame count is not usable (%lld frames from %d samples at %d Hz).\n",
+                  num_f_ll, len, sr);
+        return 0;
+    }
+    int num_f = (int)num_f_ll;
+    result_out->num_frames = num_f;
+
+    size_t band_frame_bytes = 11 * sizeof(float) + sizeof(int);
+    size_t per_frame_bytes = sizeof(float) + 8 * sizeof(double) + 2 * sizeof(float)
+                           + (size_t)num_bands * band_frame_bytes;
+    ERRPRINTF("[Analysis] %d samples @ %d Hz (%.2f s) -> %d frames, %d bands, ~%.1f MB of buffers, %s path.\n",
+              len, sr, (double)len / (double)sr, num_f, num_bands,
+              (double)(per_frame_bytes * (size_t)num_f) / (1024.0 * 1024.0),
+              is_direct_flux ? "direct-flux" : "STFT");
+
+    MALLOC_OR_FAIL(result_out->times, sizeof(float) * (size_t)num_f, "times");
+    MALLOC_OR_FAIL(result_out->ratings, sizeof(double) * (size_t)num_f, "ratings");
+    MALLOC_OR_FAIL(result_out->std_devs, sizeof(double) * (size_t)num_f, "std_devs");
+    MALLOC_OR_FAIL(result_out->means, sizeof(double) * (size_t)num_f, "means");
+    MALLOC_OR_FAIL(result_out->contrasts, sizeof(double) * (size_t)num_f, "contrasts");
+    MALLOC_OR_FAIL(result_out->stability_scores, sizeof(double) * (size_t)num_f, "stability_scores");
+    MALLOC_OR_FAIL(result_out->highest_peaks_ms, sizeof(double) * (size_t)num_f, "highest_peaks_ms");
+    MALLOC_OR_FAIL(result_out->demarcation_lines, sizeof(double) * (size_t)num_f, "demarcation_lines");
+    CALLOC_OR_FAIL(result_out->rolling_global_flux_avg, (size_t)num_f, sizeof(float), "rolling_global_flux_avg");
+    CALLOC_OR_FAIL(result_out->rolling_global_smoothing_avg, (size_t)num_f, sizeof(float), "rolling_global_smoothing_avg");
+
+    for (int i = 0; i < num_f; i++) result_out->times[i] = (float)i * (float)hop / (float)sr;
+
+    for (int b = 0; b < num_bands; b++) {
+        BandAnalysis* band = &result_out->bands[b];
+        CALLOC_OR_FAIL(band->envelope, (size_t)num_f, sizeof(float), "band envelope");
+        CALLOC_OR_FAIL(band->rolling_dynamic_smoothing, (size_t)num_f, sizeof(float), "band dynamic smoothing");
+        CALLOC_OR_FAIL(band->rolling_prominence, (size_t)num_f, sizeof(float), "band prominence");
+        CALLOC_OR_FAIL(band->rolling_prominence_avg, (size_t)num_f, sizeof(float), "band prominence average");
+        CALLOC_OR_FAIL(band->rolling_prominence_half_max, (size_t)num_f, sizeof(float), "band prominence half max");
+        CALLOC_OR_FAIL(band->rolling_smoothing_avg, (size_t)num_f, sizeof(float), "band smoothing average");
+        CALLOC_OR_FAIL(band->rolling_flux_avg, (size_t)num_f, sizeof(float), "band flux average");
+        CALLOC_OR_FAIL(band->rolling_threshold, (size_t)num_f, sizeof(float), "band threshold");
+        CALLOC_OR_FAIL(band->rolling_lookback, (size_t)num_f, sizeof(float), "band lookback");
+        CALLOC_OR_FAIL(band->rolling_avg_delta, (size_t)num_f, sizeof(float), "band average delta");
+        CALLOC_OR_FAIL(band->rolling_total_delta, (size_t)num_f, sizeof(float), "band total delta");
+        CALLOC_OR_FAIL(band->rolling_p_count, (size_t)num_f, sizeof(int), "band peak count");
+        band->peaks = NULL;
+        band->num_peaks = 0;
+    }
+
     if (!is_direct_flux) {
-        gpu_flux = (float*)malloc(sizeof(float) * num_bands * num_f);
-        if (gpu_flux) {
+        gpu_flux = (float*)malloc(sizeof(float) * (size_t)num_bands * (size_t)num_f);
+        if (!gpu_flux) {
+            ERRPRINTF("Warning: no memory for the GPU STFT buffer (%llu bytes); using the CPU path.\n",
+                      (unsigned long long)(sizeof(float) * (size_t)num_bands * (size_t)num_f));
+        } else {
             gpu_ok = gpu_stft_process(y, len, sr, gpu_flux, num_f, num_bands);
         }
     }
 
-    TransientAnalyzer* a = analyzer_create(1.0, shared_buffer, NULL, NULL, NULL, window_ms, num_bands);
-    if (!a) { if (gpu_flux) free(gpu_flux); return 0; }
-    analyzer_set_sample_rate(a, sr); int step = hop * 100;
-    PeakResult* pband[MAX_BANDS]; int pcap[MAX_BANDS];
-    for(int b=0; b<num_bands; b++) { pcap[b] = 1024; pband[b] = (PeakResult*)malloc(sizeof(PeakResult) * pcap[b]); }
-    int flush_samples = (int)(sr * 0.3);
+    a = analyzer_create(1.0, shared_buffer, NULL, NULL, NULL, window_ms, num_bands);
+    if (!a) {
+        ERRPRINTF("Error: analyzer_create failed (%d bands, %d ms window, %d frames).\n",
+                  num_bands, window_ms, num_f);
+        goto analysis_fail;
+    }
+    analyzer_set_sample_rate(a, sr);
+    step = hop * 100;
+    if (step <= 0) step = 1;
+    for (int b = 0; b < num_bands; b++) {
+        pcap[b] = 1024;
+        pband[b] = (PeakResult*)malloc(sizeof(PeakResult) * (size_t)pcap[b]);
+        if (!pband[b]) {
+            ERRPRINTF("Error: out of memory for the peak buffer of band %d (%d peaks, %llu bytes).\n",
+                      b, pcap[b], (unsigned long long)(sizeof(PeakResult) * (size_t)pcap[b]));
+            goto analysis_fail;
+        }
+    }
+    flush_samples = (int)(sr * 0.3);
 
-    ChunkAnalysisResult* res = (ChunkAnalysisResult*)malloc(sizeof(ChunkAnalysisResult));
-    if (!res) { analyzer_destroy(a); if (gpu_flux) free(gpu_flux); return 0; }
+    res = (ChunkAnalysisResult*)malloc(sizeof(ChunkAnalysisResult));
+    if (!res) {
+        ERRPRINTF("Error: out of memory for the chunk result buffer (%llu bytes).\n",
+                  (unsigned long long)sizeof(ChunkAnalysisResult));
+        goto analysis_fail;
+    }
 
     int total_chunks = (len + flush_samples + step - 1) / step;
     if (total_chunks < 1) total_chunks = 1;
@@ -1182,7 +1366,12 @@ static int analyzer_batch_analyze_shared(
         print_progress_bar(chunk_idx, total_chunks, "Analyzing Group Audio");
         int act_s = last_t - (int)(sr * 0.2), win_s = act_s - (int)(sr * (window_ms / 1000.0)); if (win_s < 0) win_s = 0;
         memset(res, 0, sizeof(ChunkAnalysisResult));
-        float* push_ptr = (float*)calloc(step, sizeof(float));
+        float* push_ptr = (float*)calloc((size_t)step, sizeof(float));
+        if (!push_ptr) {
+            ERRPRINTF("Error: out of memory for the chunk input buffer (%d samples, %llu bytes) in chunk %d of %d.\n",
+                      step, (unsigned long long)(sizeof(float) * (size_t)step), chunk_idx, total_chunks);
+            goto analysis_fail;
+        }
         if (last_t < len) {
             int rem = len - last_t;
             memcpy(push_ptr, y + last_t, sizeof(float) * (rem < step ? rem : step));
@@ -1219,23 +1408,63 @@ static int analyzer_batch_analyze_shared(
         for (int i = 0; i < 100; i++) { int f = act_s / hop + i; if (f >= 0 && f < num_f) { result_out->ratings[f] = res->metrics.rating; result_out->std_devs[f] = res->metrics.std_dev; result_out->means[f] = res->metrics.mean; result_out->contrasts[f] = res->metrics.contrast; result_out->stability_scores[f] = res->metrics.stability_score; result_out->highest_peaks_ms[f] = res->metrics.highest_peak_valid ? res->metrics.highest_peak_ms : -999.0; result_out->demarcation_lines[f] = res->metrics.demarcation_line; result_out->rolling_global_flux_avg[f] = (float)res->metrics.global_flux_avg; result_out->rolling_global_smoothing_avg[f] = (float)res->metrics.global_smoothing_avg; } }
         for (int i = 0; i < res->peak_list.num_peaks; i++) {
             PeakResult* pr = &res->peak_list.peaks[i]; int b = pr->band_idx;
-            if (result_out->bands[b].num_peaks >= pcap[b]) { pcap[b] *= 2; PeakResult* np = realloc(pband[b], sizeof(PeakResult) * pcap[b]); if(np) pband[b] = np; }
+            if (b < 0 || b >= num_bands) {
+                ERRPRINTF("Error: invalid band index %d (expected 0..%d) on peak %d of %d in chunk %d; skipping it.\n",
+                          b, num_bands - 1, i, res->peak_list.num_peaks, chunk_idx);
+                continue;
+            }
+            if (result_out->bands[b].num_peaks >= pcap[b]) {
+                int new_cap = pcap[b] * 2;
+                PeakResult* np = (PeakResult*)realloc(pband[b], sizeof(PeakResult) * (size_t)new_cap);
+                if (!np) {
+                    ERRPRINTF("Error: out of memory growing the peak buffer for band %d (%d -> %d peaks, %llu bytes).\n",
+                              b, pcap[b], new_cap, (unsigned long long)(sizeof(PeakResult) * (size_t)new_cap));
+                    goto analysis_fail;
+                }
+                pband[b] = np;
+                pcap[b] = new_cap;
+            }
             memcpy(&pband[b][result_out->bands[b].num_peaks++], pr, sizeof(PeakResult));
         }
     }
-    free(res);
-    if (gpu_flux) free(gpu_flux);
+    free(res); res = NULL;
+    if (gpu_flux) { free(gpu_flux); gpu_flux = NULL; }
     result_out->max_peak_value = (float)analyzer_get_max_peak(a);
     result_out->min_score_seen = shared_buffer ? shared_buffer->min_score_seen : a->private_min_score_seen;
     result_out->max_score_seen = shared_buffer ? shared_buffer->max_score_seen : a->private_max_score_seen;
     result_out->tolerance = a->tolerance;
-    for(int b=0; b<num_bands; b++) {
-        int n = result_out->bands[b].num_peaks; result_out->bands[b].peaks = (PeakResult*)malloc(sizeof(PeakResult) * n);
-        if(result_out->bands[b].peaks) memcpy(result_out->bands[b].peaks, pband[b], sizeof(PeakResult) * n);
-        free(pband[b]);
+    for (int b = 0; b < num_bands; b++) {
+        int n = result_out->bands[b].num_peaks;
+        if (n <= 0) {
+            result_out->bands[b].peaks = NULL;
+            free(pband[b]); pband[b] = NULL;
+            continue;
+        }
+        result_out->bands[b].peaks = (PeakResult*)malloc(sizeof(PeakResult) * (size_t)n);
+        if (!result_out->bands[b].peaks) {
+            ERRPRINTF("Error: out of memory copying %d peak(s) for band %d (%llu bytes); analysis aborted.\n",
+                      n, b, (unsigned long long)(sizeof(PeakResult) * (size_t)n));
+            goto analysis_fail;
+        }
+        memcpy(result_out->bands[b].peaks, pband[b], sizeof(PeakResult) * (size_t)n);
+        free(pband[b]); pband[b] = NULL;
     }
-    analyzer_destroy(a); return 1;
+    analyzer_destroy(a);
+    return 1;
+
+analysis_fail:
+    if (res) free(res);
+    for (int b = 0; b < MAX_BANDS; b++) {
+        if (pband[b]) free(pband[b]);
+    }
+    if (a) analyzer_destroy(a);
+    if (gpu_flux) free(gpu_flux);
+    free_analysis_buffers_partial(result_out);
+    return 0;
 }
+
+#undef MALLOC_OR_FAIL
+#undef CALLOC_OR_FAIL
 
 static int derive_stem_patterns_and_segments(
     int len,
@@ -1407,13 +1636,23 @@ static int export_single_stem_assets_from_res(
     // Export .ctbin binary file for Pass 2 directly from existing res2
     char ctbin_path[4096];
     snprintf(ctbin_path, sizeof(ctbin_path), "%s" PATH_SEP_STR "%s.ctbin", output_dir, stem_name);
-    export_ctbin_from_res(ctbin_path, res2, sr, pass2_win_ms);
+    if (!export_ctbin_from_res(ctbin_path, res2, sr, pass2_win_ms)) {
+        ERRPRINTF("Error: the .ctbin asset could not be written for report '%s'; the report folder will be incomplete.\n", stem_name);
+    }
 
     // Segment transience grouping & pattern derivation
     double total_duration_ms = ((double)len / (double)sr) * 1000.0;
     SegmentInfo* segments = NULL;
     int num_segments = 0;
-    PatternDef patterns[256];
+    // Heap, not stack: PatternDef is ~2 KB, so a 256-entry array costs ~534 KB of
+    // stack, which overran the 1 MB stack Windows reserves for the process.
+    PatternDef* patterns = (PatternDef*)calloc(256, sizeof(PatternDef));
+    if (!patterns) {
+        ERRPRINTF("Error: out of memory for the pattern list (%llu bytes) for report '%s'.\n",
+                  (unsigned long long)(sizeof(PatternDef) * 256), stem_name);
+        free(segments);
+        return 0;
+    }
     int num_patterns = derive_stem_patterns_and_segments(
         len, sr, best_bar_length_ms, res2, y, &segments, &num_segments, patterns, 256
     );
@@ -1525,48 +1764,71 @@ static int export_single_stem_assets_from_res(
 
     char snap_bin_path[4096];
     snprintf(snap_bin_path, sizeof(snap_bin_path), "%s" PATH_SEP_STR "snapshots.bin", output_dir);
-    FILE* f_snap = fopen(snap_bin_path, "wb");
+    FILE* f_snap = fopen_diag(snap_bin_path, "wb", "create snapshots.bin");
 
     int snap_len = pass2_win_ms + 1;
-    size_t float32_bytes_per_snap = snap_len * sizeof(float);
-    size_t total_snap_bytes = total_peaks * float32_bytes_per_snap;
+    size_t float32_bytes_per_snap = (size_t)snap_len * sizeof(float);
+    size_t total_snap_bytes = (size_t)total_peaks * float32_bytes_per_snap;
     uint8_t* all_snap_buf = (uint8_t*)malloc(total_snap_bytes ? total_snap_bytes : 1);
+    if (!all_snap_buf) {
+        ERRPRINTF("Error: out of memory for the snapshots.js payload (%llu bytes = %d peaks x %d samples); snapshots.js cannot be written.\n",
+                  (unsigned long long)total_snap_bytes, total_peaks, snap_len);
+    }
 
     size_t snap_offset = 0;
-    for (int b = 0; b < res2->num_bands; b++) {
+    int snap_stopped = 0;
+    for (int b = 0; b < res2->num_bands && !snap_stopped; b++) {
         for (int k = 0; k < res2->bands[b].num_peaks; k++) {
             PeakResult* pr = &res2->bands[b].peaks[k];
-            float* float32_snap = (float*)malloc(snap_len * sizeof(float));
+            float* float32_snap = (float*)malloc((size_t)snap_len * sizeof(float));
+            if (!float32_snap) {
+                ERRPRINTF("Error: out of memory for a peak snapshot (%d samples, %llu bytes) at band %d peak %d; snapshots.bin cannot be completed.\n",
+                          snap_len, (unsigned long long)((size_t)snap_len * sizeof(float)), b, k);
+                snap_stopped = 1;
+                break;
+            }
             for (int i = 0; i < snap_len; i++) float32_snap[i] = (float)pr->snapshot[i];
 
-            if (f_snap) fwrite(float32_snap, sizeof(float), snap_len, f_snap);
+            if (f_snap) {
+                size_t wrote = fwrite(float32_snap, sizeof(float), (size_t)snap_len, f_snap);
+                if (wrote != (size_t)snap_len) {
+                    report_fs_failure("write snapshots.bin", snap_bin_path, errno ? errno : EIO);
+                    fclose_diag(f_snap, snap_bin_path, "write snapshots.bin");
+                    f_snap = NULL;
+                }
+            }
             if (all_snap_buf) memcpy(all_snap_buf + snap_offset, float32_snap, float32_bytes_per_snap);
 
             snap_offset += float32_bytes_per_snap;
             free(float32_snap);
         }
     }
-    if (f_snap) fclose(f_snap);
+    if (f_snap) fclose_diag(f_snap, snap_bin_path, "write snapshots.bin");
 
     char snap_js_path[4096];
     snprintf(snap_js_path, sizeof(snap_js_path), "%s" PATH_SEP_STR "snapshots.js", output_dir);
-    FILE* f_snap_js = fopen(snap_js_path, "w");
+    FILE* f_snap_js = fopen_diag(snap_js_path, "w", "create snapshots.js");
     if (f_snap_js && all_snap_buf) {
         size_t b64_len = 4 * ((total_snap_bytes + 2) / 3);
         char* b64_str = (char*)malloc(b64_len + 1);
-        if (b64_str) {
+        if (!b64_str) {
+            ERRPRINTF("Error: out of memory for the base64 snapshot string (%llu bytes); snapshots.js will be empty.\n",
+                      (unsigned long long)(b64_len + 1));
+        } else {
             base64_encode(all_snap_buf, total_snap_bytes, b64_str);
             fprintf(f_snap_js, "window.snapshotsBase64 = '%s';\n", b64_str);
             free(b64_str);
         }
-        fclose(f_snap_js);
+    } else if (f_snap_js) {
+        ERRPRINTF("Error: snapshots.js was created without data because the snapshot buffer allocation failed.\n");
     }
+    if (f_snap_js) fclose_diag(f_snap_js, snap_js_path, "write snapshots.js");
     free(all_snap_buf);
 
     // Export manifest.json
     char manifest_path[4096];
     snprintf(manifest_path, sizeof(manifest_path), "%s" PATH_SEP_STR "manifest.json", output_dir);
-    FILE* f_mf = fopen(manifest_path, "w");
+    FILE* f_mf = fopen_diag(manifest_path, "w", "create manifest.json");
     if (f_mf) {
         fprintf(f_mf, "{\n");
         fprintf(f_mf, "  \"version\": 1,\n");
@@ -1615,17 +1877,17 @@ static int export_single_stem_assets_from_res(
         }
         fprintf(f_mf, "  ]\n");
         fprintf(f_mf, "}\n");
-        fclose(f_mf);
+        fclose_diag(f_mf, manifest_path, "write manifest.json");
     }
 
     // Export report_data.json and report_data.js using direct streaming writes
     char r_data_json_path[4096];
     snprintf(r_data_json_path, sizeof(r_data_json_path), "%s" PATH_SEP_STR "report_data.json", output_dir);
-    FILE* f_rd = fopen(r_data_json_path, "w");
+    FILE* f_rd = fopen_diag(r_data_json_path, "w", "create report_data.json");
 
     char r_data_js_path[4096];
     snprintf(r_data_js_path, sizeof(r_data_js_path), "%s" PATH_SEP_STR "report_data.js", output_dir);
-    FILE* f_rd_js = fopen(r_data_js_path, "w");
+    FILE* f_rd_js = fopen_diag(r_data_js_path, "w", "create report_data.js");
 
     if (f_rd || f_rd_js) {
         int num_pts = 1500;
@@ -1803,12 +2065,13 @@ static int export_single_stem_assets_from_res(
             if (fp == f_rd_js) fprintf(fp, ";\n");
         }
 
-        if (f_rd) fclose(f_rd);
-        if (f_rd_js) fclose(f_rd_js);
+        if (f_rd) fclose_diag(f_rd, r_data_json_path, "write report_data.json");
+        if (f_rd_js) fclose_diag(f_rd_js, r_data_js_path, "write report_data.js");
         free(wf_min);
         free(wf_max);
     }
     free(segments);
+    free(patterns);
 
     // Export HTML Report File with full JS renderer functions
     // Play the on-disk original audio file directly when one is supplied (group reports)
@@ -1829,9 +2092,9 @@ static int export_single_stem_assets_from_res(
 
     char html_filepath[4096];
     snprintf(html_filepath, sizeof(html_filepath), "%s" PATH_SEP_STR "%s.html", output_dir, stem_name);
-    FILE* f_html = fopen(html_filepath, "w");
+    FILE* f_html = fopen_diag(html_filepath, "w", "create HTML report");
     if (!f_html) {
-        printf("Error: Could not open HTML report file for writing: %s\n", html_filepath);
+        ERRPRINTF("Error: Could not open HTML report file for writing: %s\n", html_filepath);
         return 0;
     }
     if (f_html) {
@@ -2537,7 +2800,10 @@ static int export_single_stem_assets_from_res(
         fprintf(f_html, "</script>\n");
         fprintf(f_html, "</body>\n");
         fprintf(f_html, "</html>\n");
-        fclose(f_html);
+        if (!fclose_diag(f_html, html_filepath, "write HTML report")) {
+            ERRPRINTF("Error: Failed to finish writing the HTML report: %s\n", html_filepath);
+            return 0;
+        }
     }
 
     return 1;
@@ -3201,7 +3467,9 @@ static void process_single_stem_export(
 ) {
     char stem_output_dir[4096];
     snprintf(stem_output_dir, sizeof(stem_output_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "%s", parent_dir, stem->stem_name);
-    mkdir_p(stem_output_dir);
+    if (mkdir_p(stem_output_dir) != 0) {
+        ERRPRINTF("Error: could not create the report folder for stem '%s': %s\n", stem->stem_name, stem_output_dir);
+    }
 
     // Copy audio WAV file into stem palette output directory as <stem_name>.wav
     char dst_stem_audio_path[4096];
@@ -3209,16 +3477,23 @@ static void process_single_stem_export(
 
     FILE* src_f = fopen(stem->audio_filepath, "rb");
     if (src_f) {
-        FILE* dst_f = fopen(dst_stem_audio_path, "wb");
+        FILE* dst_f = fopen_diag(dst_stem_audio_path, "wb", "copy stem audio into the report folder");
         if (dst_f) {
             char buf[65536];
             size_t bytes_read;
             while ((bytes_read = fread(buf, 1, sizeof(buf), src_f)) > 0) {
-                fwrite(buf, 1, bytes_read, dst_f);
+                size_t wrote = fwrite(buf, 1, bytes_read, dst_f);
+                if (wrote != bytes_read) {
+                    report_fs_failure("write stem audio copy", dst_stem_audio_path, errno ? errno : EIO);
+                    break;
+                }
             }
-            fclose(dst_f);
+            fclose_diag(dst_f, dst_stem_audio_path, "copy stem audio into the report folder");
         }
         fclose(src_f);
+    } else {
+        ERRPRINTF("Error: could not read the stem audio for '%s': %s\n",
+                  stem->stem_name, stem->audio_filepath ? stem->audio_filepath : "(null)");
     }
 
     // Overall [loops] and [stems] target folders inside parent [palettes]
@@ -3314,6 +3589,40 @@ static size_t get_common_stem_prefix_length(const GroupStemInput* stems, int num
     return prefix_len;
 }
 
+// Lists the files a finished group report folder should contain and reports
+// which of them are present, so an empty or incomplete folder explains itself.
+static void report_output_dir_audit(const char* dir, const char* base_name) {
+    const struct { const char* suffix; int uses_base_name; } expected[] = {
+        { ".ctbin", 1 },
+        { "snapshots.bin", 0 },
+        { "snapshots.js", 0 },
+        { "manifest.json", 0 },
+        { "report_data.json", 0 },
+        { "report_data.js", 0 },
+        { ".html", 1 }
+    };
+    const int expected_count = (int)(sizeof(expected) / sizeof(expected[0]));
+    int present = 0;
+    ERRPRINTF("       Audit of report folder: %s (%d chars)\n", dir, (int)strlen(dir));
+    for (int i = 0; i < expected_count; i++) {
+        char path[4096];
+        if (expected[i].uses_base_name) {
+            snprintf(path, sizeof(path), "%s" PATH_SEP_STR "%s%s", dir, base_name, expected[i].suffix);
+        } else {
+            snprintf(path, sizeof(path), "%s" PATH_SEP_STR "%s", dir, expected[i].suffix);
+        }
+        struct stat st;
+        errno = 0;
+        if (stat(path, &st) == 0) {
+            ERRPRINTF("         present: %s (%ld bytes)\n", path, (long)st.st_size);
+            present++;
+        } else {
+            ERRPRINTF("         missing: %s (%s)\n", path, errno ? strerror(errno) : "not found");
+        }
+    }
+    ERRPRINTF("       %d of %d expected file(s) present.\n", present, expected_count);
+}
+
 static int export_group_html_report_for_original(
     const char* parent_dir,
     const char* report_stem_name,
@@ -3338,21 +3647,39 @@ static int export_group_html_report_for_original(
 
     // Each group report gets its own subfolder so companion assets never collide between groups
     char report_dir[4096];
-    snprintf(report_dir, sizeof(report_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "%s", parent_dir, report_stem_name);
-    mkdir_p(report_dir);
+    int dir_written = snprintf(report_dir, sizeof(report_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "%s", parent_dir, report_stem_name);
+    if (dir_written < 0 || (size_t)dir_written >= sizeof(report_dir)) {
+        ERRPRINTF("Error: the group report folder path for '%s' is too long (%d chars) and was truncated.\n",
+                  report_stem_name, dir_written);
+        return 0;
+    }
 
-    printf("\n[Group Mode] Generating group HTML report '%s' keyed to original audio: %s\n",
-           report_stem_name, original_audio_path);
+    ERRPRINTF("\n[Group Mode] Generating group HTML report '%s' keyed to original audio: %s\n",
+              report_stem_name, original_audio_path);
+    ERRPRINTF("[Group Mode] Report folder: %s (%d chars)\n", report_dir, dir_written);
+
+    if (mkdir_p(report_dir) != 0) {
+        ERRPRINTF("Error: the group report folder could not be created: %s\n"
+                  "       No report assets will be written for '%s'.\n",
+                  report_dir, report_stem_name);
+        return 0;
+    }
 
     FullAnalysisResult res2_group;
     memset(&res2_group, 0, sizeof(res2_group));
 
+    ERRPRINTF("[Group Mode] Analyzing group audio for '%s': %d samples @ %d Hz (%.2f s), window %d ms...\n",
+              report_stem_name, group_audio_len, group_audio_sr,
+              (double)group_audio_len / (double)group_audio_sr, pass2_win_ms);
+
     if (!analyzer_batch_analyze_shared(group_audio, group_audio_len, group_audio_sr, pass2_win_ms, 1, NULL, &res2_group, 1)) {
-        printf("Error: Failed to perform transience analysis for group HTML report '%s'.\n", report_stem_name);
+        ERRPRINTF("Error: Failed to perform transience analysis for group HTML report '%s'.\n"
+                  "       The folder %s was created but no assets were written to it.\n",
+                  report_stem_name, report_dir);
         return 0;
     }
 
-    printf("[Group Mode] Transience analysis completed for group HTML report. Writing assets...\n");
+    ERRPRINTF("[Group Mode] Transience analysis completed for group HTML report. Writing assets...\n");
 
     int export_ok = export_single_stem_assets_from_res(
         report_dir,
@@ -3385,10 +3712,11 @@ static int export_group_html_report_for_original(
     analyzer_free_analysis(&res2_group);
 
     if (export_ok) {
-        printf("SUCCESS: Group HTML Report generated: %s" PATH_SEP_STR "%s.html (plays original audio: %s)\n",
-               report_dir, report_stem_name, original_audio_path);
+        ERRPRINTF("SUCCESS: Group HTML Report generated: %s" PATH_SEP_STR "%s.html (plays original audio: %s)\n",
+                  report_dir, report_stem_name, original_audio_path);
     } else {
-        printf("Error: Failed to write Group HTML report %s" PATH_SEP_STR "%s.html\n", report_dir, report_stem_name);
+        ERRPRINTF("Error: Failed to write Group HTML report %s" PATH_SEP_STR "%s.html\n", report_dir, report_stem_name);
+        report_output_dir_audit(report_dir, report_stem_name);
     }
 
     return export_ok;
@@ -3543,7 +3871,9 @@ int export_group_assets_and_html(
     // 1. Setup Group Output Directory: parent_dir/[palettes] directly
     char group_output_dir[4096];
     snprintf(group_output_dir, sizeof(group_output_dir), "%s" PATH_SEP_STR "[palettes]", parent_dir);
-    mkdir_p(group_output_dir);
+    if (mkdir_p(group_output_dir) != 0) {
+        ERRPRINTF("Error: could not create the group output folder: %s\n", group_output_dir);
+    }
     printf("[Group Mode] Output directory ready: %s\n", group_output_dir);
 
     // 1b. Resolve the original audio file for every stem up front so stem exports, pattern
@@ -4056,11 +4386,15 @@ int export_group_assets_and_html(
 
     char overall_loops_dir[4096];
     snprintf(overall_loops_dir, sizeof(overall_loops_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[loops]", parent_dir);
-    mkdir_p(overall_loops_dir);
+    if (mkdir_p(overall_loops_dir) != 0) {
+        ERRPRINTF("Error: could not create the group loops folder: %s\n", overall_loops_dir);
+    }
 
     char overall_stems_dir[4096];
     snprintf(overall_stems_dir, sizeof(overall_stems_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "[stems]", parent_dir);
-    mkdir_p(overall_stems_dir);
+    if (mkdir_p(overall_stems_dir) != 0) {
+        ERRPRINTF("Error: could not create the group stems folder: %s\n", overall_stems_dir);
+    }
 
     PassInfo passes[257];
     int total_passes = 0;
@@ -4071,6 +4405,7 @@ int export_group_assets_and_html(
 
     char used_report_names[64][256];
     int used_report_name_count = 0;
+    int group_report_failures = 0;
 
     for (int i = 0; i < num_stems; i++) {
         if (assigned[i]) continue;
@@ -4101,7 +4436,13 @@ int export_group_assets_and_html(
 
         for (int k = 0; k < group_num_stems; k++) {
             int s_idx = group_stem_indices[k];
-            PatternDef stem_pats[256];
+            // Heap, not stack: see export_single_stem_assets_from_res.
+            PatternDef* stem_pats = (PatternDef*)calloc(256, sizeof(PatternDef));
+            if (!stem_pats) {
+                ERRPRINTF("Error: out of memory for the per-stem pattern list (%llu bytes); skipping this stem.\n",
+                          (unsigned long long)(sizeof(PatternDef) * 256));
+                continue;
+            }
             int num_p = derive_stem_patterns_and_segments(
                 stems[s_idx].len, stems[s_idx].sr, best_bar_length_ms, &res2_stems[s_idx], NULL, NULL, NULL, stem_pats, 256
             );
@@ -4112,6 +4453,7 @@ int export_group_assets_and_html(
                     grp_total_raw++;
                 }
             }
+            free(stem_pats);
         }
 
         for (int r1 = 0; r1 < grp_total_raw - 1; r1++) {
@@ -4265,7 +4607,7 @@ int export_group_assets_and_html(
                 grp_orig_path, group_name, used_report_names, &used_report_name_count,
                 report_name, sizeof(report_name)
             );
-            export_group_html_report_for_original(
+            if (!export_group_html_report_for_original(
                 parent_dir,
                 report_name,
                 grp_orig_path,
@@ -4278,7 +4620,9 @@ int export_group_assets_and_html(
                 contour_len,
                 contour_sample_count,
                 contour_evo
-            );
+            )) {
+                group_report_failures++;
+            }
         } else if (grp_orig_path && grp_orig_path[0] != '\0') {
             printf("\nError: Could not load the original audio file '%s' for the group of %d stem(s) led by '%s'. Skipping its group HTML report.\n",
                    grp_orig_path, group_num_stems, stems[group_stem_indices[0]].stem_name);
@@ -4310,5 +4654,10 @@ int export_group_assets_and_html(
 
     if (accumulated_contour) free(accumulated_contour);
     if (contour_evo) free(contour_evo);
+
+    if (group_report_failures > 0) {
+        ERRPRINTF("\nError: %d group HTML report(s) failed to be written. Their folders under %s" PATH_SEP_STR "[palettes] may be empty or incomplete; the reasons are logged above.\n",
+                  group_report_failures, parent_dir);
+    }
     return 1;
 }
