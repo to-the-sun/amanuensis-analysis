@@ -39,15 +39,16 @@ set "WAV_NAME=%~2"
 set "TARGET_DIR=%~3"
 if not defined TARGET_DIR set "TARGET_DIR=!CURR_DIR_NAME!"
 
-:: Calculate character length of WAV_NAME
-set "STR=%WAV_NAME%"
+:: Calculate character length of WAV_NAME.
+:: A bounded for /l loop is used instead of a goto label, because cmd.exe cannot
+:: resolve labels in a script that only has Unix (LF) line endings: it printed
+:: "The system cannot find the batch label specified - len_loop", abandoned the
+:: loop after one character, and so never matched a WAV to pass with --original.
+set "STR=!WAV_NAME!"
 set "WAV_LEN=0"
-
-:len_loop
-if defined STR (
-    set "STR=%STR:~1%"
+for /l %%N in (1,1,260) do if defined STR (
+    set "STR=!STR:~1!"
     set /a WAV_LEN+=1
-    goto :len_loop
 )
 
 if %WAV_LEN% gtr 0 (
