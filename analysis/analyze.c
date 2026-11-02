@@ -290,19 +290,6 @@ static int process_single_file(const char* audio_filepath, int window_ms) {
     snprintf(output_dir, sizeof(output_dir), "%s[palettes]" PATH_SEP_STR "%s", dir_path, stem_name);
     mkdir_p(output_dir);
 
-    const char* last_slash = strrchr(audio_filepath, '/');
-    const char* last_backslash = strrchr(audio_filepath, '\\');
-    const char* audio_filename = audio_filepath;
-    if (last_slash && last_slash >= audio_filename) audio_filename = last_slash + 1;
-    if (last_backslash && last_backslash >= audio_filename) audio_filename = last_backslash + 1;
-
-    char dst_audio_path[4096];
-    snprintf(dst_audio_path, sizeof(dst_audio_path), "%s" PATH_SEP_STR "%s", output_dir, audio_filename);
-
-    if (copy_file(audio_filepath, dst_audio_path)) {
-        printf("Copied audio file to destination: %s -> %s\n", audio_filepath, dst_audio_path);
-    }
-
     copy_matching_passes_text_files(dir_path, stem_name, output_dir);
 
     printf("\nRunning standalone transience analysis, pattern finding, & asset exports in pure C...\n");
