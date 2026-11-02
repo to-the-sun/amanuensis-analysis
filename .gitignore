@@ -26,9 +26,7 @@ additive_synthesis/complex/
 analysis/flux_separator
 analysis/analyze
 analysis/song_builder
-analysis/flux_report
 !analysis/flux_separator.exe
 !analysis/analyze.exe
 !analysis/song_builder.exe
-!analysis/flux_report.exe
 *_pitch_stems/
