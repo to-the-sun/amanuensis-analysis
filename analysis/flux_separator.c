@@ -5,17 +5,20 @@
  * Multi-File, Directory Scanning & Multi-Threaded Concurrent Execution
  *
  * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
- * identifying peak and trough markers, generating modified flux envelopes via peak salience,
- * exporting companion _modified_flux.wav files next to the pitch stems,
- * and producing interactive HTML reports in [flux]/<basename>_index.html as well as
- * a master batch dashboard in [flux]/index.html.
+ * generating modified flux envelopes via peak salience, and exporting companion
+ * _modified_flux.wav files next to the pitch stems.
+ *
+ * The [flux] report data and dashboards are no longer built during separation:
+ * flux_report.exe is copied into pitch_stems/ and rebuilds them on demand from
+ * the WAVs left on disk, so no multi-gigabyte data file is written here.
  *
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
  * using CPU multithreading with live per-file console progress bars).
  *
- * Highly optimized memory footprint: WAV outputs and compact JS report data are generated
- * stream-style per pitch stem so memory footprint remains extremely low (~300MB per file).
+ * Highly optimized memory footprint: each pitch stem's modified flux WAV is written
+ * and released as soon as it is finished, so memory footprint stays very low
+ * (~300MB per file).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -45,6 +48,9 @@
 #define MKDIR(dir) mkdir(dir, 0755)
 #endif
 
+#include "flux_shared.h"
+#include "flux_envelope.h"
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -60,48 +66,7 @@ double g_noise_floor_ratio = 0.19;
 /* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
 double g_silence_threshold = 0.009;
 
-static pthread_mutex_t g_console_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-typedef struct {
-    double r;
-    double i;
-} Complex;
-
-typedef struct {
-    float r;
-    float i;
-} ComplexFloat;
-
-typedef struct {
-    uint32_t sample_rate;
-    uint16_t num_channels;
-    uint16_t bits_per_sample;
-    uint16_t audio_format; // 1 = PCM integer, 3 = IEEE float
-    uint32_t total_samples; // samples per channel
-    double *data; // interleaved: data[c + ch * num_channels]
-} WAVFile;
-
-typedef struct {
-    char input_path[1024];
-    char basename[512];
-    uint32_t sample_rate;
-    uint16_t num_channels;
-    uint32_t total_samples;
-    double duration;
-    int stem_count;
-    double elapsed_sec;
-    double speed_ratio;
-    int success;
-    int skipped;
-} FileBatchResult;
-
-const char *NOTE_NAMES[12] = {
-    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
-};
-
-double midi_to_frequency(int midi_pitch);
-static const char b64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 void enable_ansi_terminal(void) {
 #if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
@@ -114,161 +79,6 @@ void enable_ansi_terminal(void) {
         }
     }
 #endif
-}
-
-char* encode_base64_bytes(const uint8_t *data, size_t input_len) {
-    size_t output_len = 4 * ((input_len + 2) / 3);
-    char *encoded = (char*)malloc(output_len + 1);
-    if (!encoded) return NULL;
-
-    size_t i = 0, j = 0;
-    for (i = 0; i < input_len; ) {
-        uint32_t octet_a = i < input_len ? data[i++] : 0;
-        uint32_t octet_b = i < input_len ? data[i++] : 0;
-        uint32_t octet_c = i < input_len ? data[i++] : 0;
-
-        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
-
-        encoded[j++] = b64_chars[(triple >> 18) & 0x3F];
-        encoded[j++] = b64_chars[(triple >> 12) & 0x3F];
-
-        if (i == input_len && (input_len % 3 == 1)) {
-            encoded[j++] = '=';
-            encoded[j++] = '=';
-        } else if (i == input_len && (input_len % 3 == 2)) {
-            encoded[j++] = b64_chars[(triple >> 6) & 0x3F];
-            encoded[j++] = '=';
-        } else {
-            encoded[j++] = b64_chars[(triple >> 6) & 0x3F];
-            encoded[j++] = b64_chars[triple & 0x3F];
-        }
-    }
-    encoded[j] = '\0';
-    return encoded;
-}
-
-#define FLUX_FFT_SIZE 2048
-#define FLUX_HOP_SIZE 512
-
-/* Pre-calculated FFT lookup tables */
-static Complex g_twiddle_fwd[FFT_SIZE];
-static Complex g_twiddle_inv[FFT_SIZE];
-static int g_bit_rev[FFT_SIZE];
-static int g_fft_tables_initialized = 0;
-
-static Complex g_flux_twiddle_fwd[FLUX_FFT_SIZE];
-static int g_flux_bit_rev[FLUX_FFT_SIZE];
-static int g_flux_tables_initialized = 0;
-
-void init_flux_fft_tables(void) {
-    if (g_flux_tables_initialized) return;
-
-    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
-        double angle_fwd = -2.0 * M_PI * i / FLUX_FFT_SIZE;
-        g_flux_twiddle_fwd[i].r = cos(angle_fwd);
-        g_flux_twiddle_fwd[i].i = sin(angle_fwd);
-    }
-
-    for (int i = 0, j = 0; i < FLUX_FFT_SIZE; i++) {
-        g_flux_bit_rev[i] = j;
-        int bit = FLUX_FFT_SIZE >> 1;
-        for (; j & bit; bit >>= 1) {
-            j ^= bit;
-        }
-        j ^= bit;
-    }
-
-    g_flux_tables_initialized = 1;
-}
-
-void fft_2048(Complex *x) {
-    init_flux_fft_tables();
-
-    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
-        int j = g_flux_bit_rev[i];
-        if (i < j) {
-            Complex temp = x[i];
-            x[i] = x[j];
-            x[j] = temp;
-        }
-    }
-
-    for (int len = 2; len <= FLUX_FFT_SIZE; len <<= 1) {
-        int half_len = len >> 1;
-        int step = FLUX_FFT_SIZE / len;
-        for (int i = 0; i < FLUX_FFT_SIZE; i += len) {
-            for (int j = 0; j < half_len; j++) {
-                Complex w = g_flux_twiddle_fwd[j * step];
-                Complex u = x[i + j];
-                Complex v = {
-                    x[i + j + half_len].r * w.r - x[i + j + half_len].i * w.i,
-                    x[i + j + half_len].r * w.i + x[i + j + half_len].i * w.r
-                };
-                x[i + j].r = u.r + v.r;
-                x[i + j].i = u.i + v.i;
-                x[i + j + half_len].r = u.r - v.r;
-                x[i + j + half_len].i = u.i - v.i;
-            }
-        }
-    }
-}
-
-typedef struct {
-    int pitch;
-    char note_name[32];
-    double max_flux_peak;
-    double rms_flux;
-    int16_t *raw_flux_i16; // mono averaged int16_t PCM array for JS report data
-    int16_t *mod_flux_i16; // mono averaged int16_t PCM array for JS report data
-    int *peaks;
-    int num_peaks;
-    int *troughs;
-    int num_troughs;
-    char mod_filename[1024];
-} FluxStem;
-
-static int ends_with_icase(const char *str, const char *suffix) {
-    if (!str || !suffix) return 0;
-    size_t str_len = strlen(str);
-    size_t suf_len = strlen(suffix);
-    if (str_len < suf_len) return 0;
-    const char *p = str + str_len - suf_len;
-    for (size_t i = 0; i < suf_len; i++) {
-        if (tolower((unsigned char)p[i]) != tolower((unsigned char)suffix[i])) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static int contains_icase(const char *haystack, const char *needle) {
-    if (!haystack || !needle) return 0;
-    size_t hlen = strlen(haystack);
-    size_t nlen = strlen(needle);
-    if (hlen < nlen) return 0;
-    for (size_t i = 0; i <= hlen - nlen; i++) {
-        int match = 1;
-        for (size_t j = 0; j < nlen; j++) {
-            if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) return 1;
-    }
-    return 0;
-}
-
-static int starts_with_icase(const char *str, const char *prefix) {
-    if (!str || !prefix) return 0;
-    size_t plen = strlen(prefix);
-    if (strlen(str) < plen) return 0;
-    for (size_t i = 0; i < plen; i++) {
-        if (tolower((unsigned char)str[i]) != tolower((unsigned char)prefix[i])) {
-            return 0;
-        }
-    }
-    return 1;
 }
 
 /*
@@ -299,6 +109,21 @@ static int dir_contains_pitch_stems_for(const char *dir_path, const char *basena
 
 static int pitch_stems_exist_for(const char *stem_dir, const char *basename) {
     return dir_contains_pitch_stems_for(stem_dir, basename);
+}
+
+/*
+ * The deferred report needs the raw flux envelopes and their markers. When they
+ * are missing (a folder from before the reports became on-demand), the file is
+ * not considered finished and is separated again so flux_report can rebuild it.
+ */
+static int flux_report_data_exists(const char *stem_dir, const char *basename) {
+    char path[8192];
+    snprintf(path, sizeof(path), "%s/[flux]/%s_flux_envelopes.bin", stem_dir, basename);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
 }
 
 int is_valid_input_wav(const char *path) {
@@ -419,1013 +244,11 @@ void print_multithreaded_progress(
     pthread_mutex_unlock(&g_console_mutex);
 }
 
-static int find_prev_peak(const double *env, uint32_t n, int start_x) {
-    if (start_x >= (int)n - 1) {
-        start_x = (int)n - 2;
-    }
-    for (int i = start_x; i >= 1; i--) {
-        if (env[i] > env[i + 1]) {
-            int L = i;
-            while (L > 0 && env[L - 1] == env[i]) {
-                L--;
-            }
-            if (L > 0 && env[L - 1] < env[i]) {
-                int R = i;
-                return (L + R) / 2;
-            }
-            i = L;
-        }
-    }
-    return -1;
-}
-
-static int find_trough_left(const double *env, uint32_t n, int x) {
-    for (int i = x - 1; i >= 1; i--) {
-        if (env[i] < env[i + 1]) {
-            int L = i;
-            while (L > 0 && env[L - 1] == env[i]) {
-                L--;
-            }
-            if (L > 0 && env[L - 1] > env[i]) {
-                int R = i;
-                return R;
-            }
-            i = L;
-        }
-    }
-    return 0;
-}
-
-static int find_trough_right(const double *env, uint32_t n, int x) {
-    for (int i = x + 1; i < (int)n - 1; i++) {
-        if (env[i] < env[i - 1]) {
-            int R = i;
-            while (R < (int)n - 1 && env[R + 1] == env[i]) {
-                R++;
-            }
-            if (R < (int)n - 1 && env[R + 1] > env[i]) {
-                int L = i;
-                return L;
-            }
-            i = R;
-        }
-    }
-    return (int)n - 1;
-}
-
-static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int *out_count);
-
-void apply_flux_noise_gate(double *env, uint32_t total_samples, double threshold) {
-    for (uint32_t i = 0; i < total_samples; i++) {
-        if (env[i] < threshold) {
-            env[i] = 0.0;
-        }
-    }
-}
-
-void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
-    if (total_samples < 3) return;
-
-    int *peaks = NULL;
-    int num_peaks = 0;
-    detect_all_peaks(env, total_samples, &peaks, &num_peaks);
-
-    if (num_peaks == 0 || !peaks) {
-        if (peaks) free(peaks);
-        return;
-    }
-
-    int *salience = (int*)malloc(num_peaks * sizeof(int));
-    if (!salience) {
-        free(peaks);
-        return;
-    }
-
-    for (int i = 0; i < num_peaks; i++) {
-        double h = env[peaks[i]];
-
-        int left_count = 0;
-        for (int j = i - 1; j >= 0; j--) {
-            left_count++;
-            if (env[peaks[j]] >= h) break;
-        }
-
-        int right_count = 0;
-        for (int j = i + 1; j < num_peaks; j++) {
-            right_count++;
-            if (env[peaks[j]] >= h) break;
-        }
-
-        int s_score = (left_count < right_count) ? left_count : right_count;
-        salience[i] = s_score;
-    }
-
-    /* Build thinned ordered list of unique salience integers */
-    int *unique_salience = (int*)malloc(num_peaks * sizeof(int));
-    int num_unique = 0;
-    if (unique_salience) {
-        int *sorted_salience = (int*)malloc(num_peaks * sizeof(int));
-        if (sorted_salience) {
-            memcpy(sorted_salience, salience, num_peaks * sizeof(int));
-            /* Simple bubble sort or qsort for unique salience values */
-            for (int a = 0; a < num_peaks - 1; a++) {
-                for (int b = a + 1; b < num_peaks; b++) {
-                    if (sorted_salience[a] > sorted_salience[b]) {
-                        int tmp = sorted_salience[a];
-                        sorted_salience[a] = sorted_salience[b];
-                        sorted_salience[b] = tmp;
-                    }
-                }
-            }
-            unique_salience[0] = sorted_salience[0];
-            num_unique = 1;
-            for (int k = 1; k < num_peaks; k++) {
-                if (sorted_salience[k] != sorted_salience[k - 1]) {
-                    unique_salience[num_unique++] = sorted_salience[k];
-                }
-            }
-            free(sorted_salience);
-        }
-    }
-
-    double *norm_salience = (double*)malloc(num_peaks * sizeof(double));
-    if (!norm_salience) {
-        if (unique_salience) free(unique_salience);
-        free(salience);
-        free(peaks);
-        return;
-    }
-
-    for (int i = 0; i < num_peaks; i++) {
-        if (num_unique > 0 && unique_salience) {
-            int rank = 1;
-            for (int u = 0; u < num_unique; u++) {
-                if (unique_salience[u] == salience[i]) {
-                    rank = u + 1;
-                    break;
-                }
-            }
-            norm_salience[i] = (double)rank / (double)num_unique;
-        } else {
-            norm_salience[i] = 1.0;
-        }
-    }
-    if (unique_salience) free(unique_salience);
-
-    double *orig_env = (double*)malloc(total_samples * sizeof(double));
-    if (orig_env) {
-        memcpy(orig_env, env, total_samples * sizeof(double));
-
-        for (int i = 0; i < num_peaks; i++) {
-            int px = peaks[i];
-            int t_L = find_trough_left(orig_env, total_samples, px);
-            int t_R = find_trough_right(orig_env, total_samples, px);
-
-            for (int x = t_L; x <= t_R; x++) {
-                env[x] = orig_env[x] * norm_salience[i];
-            }
-        }
-        free(orig_env);
-    }
-
-    free(norm_salience);
-    free(salience);
-    free(peaks);
-}
-
-void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
-    if (!stem_data || !flux_out || total_samples == 0 || num_channels == 0) return;
-
-    memset(flux_out, 0, (size_t)total_samples * num_channels * sizeof(double));
-
-    double window[FLUX_FFT_SIZE];
-    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
-        window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FLUX_FFT_SIZE));
-    }
-
-    uint32_t num_frames = (total_samples >= FLUX_FFT_SIZE) ? ((total_samples - FLUX_FFT_SIZE) / FLUX_HOP_SIZE + 1) : 0;
-    if (num_frames == 0) {
-        return;
-    }
-
-    double *frame_flux = (double*)malloc(num_frames * sizeof(double));
-    double *prev_mag = (double*)calloc(FLUX_FFT_SIZE / 2 + 1, sizeof(double));
-    double *curr_mag = (double*)malloc((FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
-    Complex *fft_buf = (Complex*)malloc(FLUX_FFT_SIZE * sizeof(Complex));
-
-    if (!frame_flux || !prev_mag || !curr_mag || !fft_buf) {
-        if (frame_flux) free(frame_flux);
-        if (prev_mag) free(prev_mag);
-        if (curr_mag) free(curr_mag);
-        if (fft_buf) free(fft_buf);
-        return;
-    }
-
-    for (uint32_t c = 0; c < num_channels; c++) {
-        memset(prev_mag, 0, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
-
-        for (uint32_t m = 0; m < num_frames; m++) {
-            uint32_t offset = m * FLUX_HOP_SIZE;
-
-            for (int i = 0; i < FLUX_FFT_SIZE; i++) {
-                fft_buf[i].r = stem_data[(offset + i) * num_channels + c] * window[i];
-                fft_buf[i].i = 0.0;
-            }
-
-            fft_2048(fft_buf);
-
-            double flux_sum = 0.0;
-            for (int k = 0; k <= FLUX_FFT_SIZE / 2; k++) {
-                double r = fft_buf[k].r;
-                double im = fft_buf[k].i;
-                double energy = r * r + im * im;
-                curr_mag[k] = energy;
-
-                double diff = energy - prev_mag[k];
-                if (diff > 0.0) {
-                    flux_sum += diff;
-                }
-            }
-
-            frame_flux[m] = flux_sum;
-            memcpy(prev_mag, curr_mag, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
-        }
-
-        for (uint32_t i = 0; i < total_samples; i++) {
-            double f_idx = ((double)i - (double)(FLUX_FFT_SIZE / 2)) / (double)FLUX_HOP_SIZE;
-
-            double val = 0.0;
-            if (f_idx <= 0.0) {
-                val = frame_flux[0];
-            } else if (f_idx >= (double)(num_frames - 1)) {
-                val = frame_flux[num_frames - 1];
-            } else {
-                int m0 = (int)floor(f_idx);
-                int m1 = m0 + 1;
-                double alpha = f_idx - m0;
-                val = (1.0 - alpha) * frame_flux[m0] + alpha * frame_flux[m1];
-            }
-
-            flux_out[i * num_channels + c] = val;
-        }
-    }
-
-    free(frame_flux);
-    free(prev_mag);
-    free(curr_mag);
-    free(fft_buf);
-
-    if (normalize) {
-        double peak_flux = 0.0;
-        size_t total_samples_all_channels = (size_t)total_samples * num_channels;
-        for (size_t k = 0; k < total_samples_all_channels; k++) {
-            if (flux_out[k] > peak_flux) {
-                peak_flux = flux_out[k];
-            }
-        }
-
-        if (peak_flux > 1e-12) {
-            double scale = 1.0 / peak_flux;
-            for (size_t k = 0; k < total_samples_all_channels; k++) {
-                flux_out[k] *= scale;
-            }
-        }
-    }
-}
-
-static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int *out_count) {
-    int capacity = 256;
-    int count = 0;
-    int *arr = (int*)malloc(capacity * sizeof(int));
-    if (!arr) {
-        *out_peaks = NULL;
-        *out_count = 0;
-        return;
-    }
-    int curr_x = (int)n - 1;
-    int p = find_prev_peak(env, n, curr_x);
-    while (p >= 0) {
-        if (count >= capacity) {
-            capacity *= 2;
-            int *new_arr = (int*)realloc(arr, capacity * sizeof(int));
-            if (!new_arr) {
-                free(arr);
-                *out_peaks = NULL;
-                *out_count = 0;
-                return;
-            }
-            arr = new_arr;
-        }
-        arr[count++] = p;
-        curr_x = p - 1;
-        p = find_prev_peak(env, n, curr_x);
-    }
-    for (int i = 0; i < count / 2; i++) {
-        int tmp = arr[i];
-        arr[i] = arr[count - 1 - i];
-        arr[count - 1 - i] = tmp;
-    }
-    *out_peaks = arr;
-    *out_count = count;
-}
-
-static void detect_all_troughs(const double *env, uint32_t n, int **out_troughs, int *out_count) {
-    int capacity = 256;
-    int count = 0;
-    int *arr = (int*)malloc(capacity * sizeof(int));
-    if (!arr) {
-        *out_troughs = NULL;
-        *out_count = 0;
-        return;
-    }
-    for (int i = 1; i < (int)n - 1; i++) {
-        if (env[i] < env[i - 1]) {
-            int R = i;
-            while (R < (int)n - 1 && env[R + 1] == env[i]) {
-                R++;
-            }
-            if (R < (int)n - 1 && env[R + 1] > env[i]) {
-                int L = i;
-                int trough_idx = L;
-                if (count >= capacity) {
-                    capacity *= 2;
-                    arr = (int*)realloc(arr, capacity * sizeof(int));
-                }
-                arr[count++] = trough_idx;
-            }
-            i = R;
-        }
-    }
-    *out_troughs = arr;
-    *out_count = count;
-}
-
-void generate_flux_html_report(
-    const char *flux_dir,
-    const char *basename,
-    uint32_t sample_rate,
-    uint32_t num_channels,
-    uint32_t total_samples,
-    double duration,
-    const double *orig_audio_buffer,
-    const FluxStem *stems,
-    int stem_count
-) {
-    char html_path[4096];
-    snprintf(html_path, sizeof(html_path), "%s/%s_index.html", flux_dir, basename);
-
-    FILE *f = fopen(html_path, "w");
-    if (!f) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("Error: Could not open Flux HTML report file '%s' for writing.\n", html_path);
-        pthread_mutex_unlock(&g_console_mutex);
-        return;
-    }
-
-    fprintf(f, "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
-    fprintf(f, "<meta charset=\"UTF-8\">\n");
-    fprintf(f, "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
-    fprintf(f, "<title>Spectral Flux Transience Report - %s</title>\n", basename);
-    fprintf(f, "<style>\n");
-    fprintf(f, "  :root { --bg: #121216; --card-bg: #1a1a22; --border: #2a2a36; --text: #e1e1e6; --muted: #a0a0b0; --accent: #2196f3; }\n");
-    fprintf(f, "  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }\n");
-    fprintf(f, "  body { background: var(--bg); color: var(--text); padding: 20px; line-height: 1.5; }\n");
-    fprintf(f, "  header { background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 20px; }\n");
-    fprintf(f, "  h1 { font-size: 1.6rem; color: #fff; margin-bottom: 6px; }\n");
-    fprintf(f, "  .meta-p { font-size: 0.9rem; color: var(--muted); display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 14px; }\n");
-    fprintf(f, "  .toolbar { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--border); }\n");
-    fprintf(f, "  .btn { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; text-decoration: none; display: inline-block; }\n");
-    fprintf(f, "  .btn:hover { opacity: 0.9; }\n");
-    fprintf(f, "  .toggle-label { font-size: 0.9rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }\n");
-    fprintf(f, "  .view-info { font-size: 0.85rem; color: #4caf50; font-family: monospace; font-weight: bold; }\n");
-    fprintf(f, "  .legend { display: flex; gap: 15px; font-size: 0.8rem; margin-left: auto; }\n");
-    fprintf(f, "  .legend-item { display: flex; align-items: center; gap: 6px; }\n");
-    fprintf(f, "  .legend-box { width: 14px; height: 14px; border-radius: 3px; }\n");
-    fprintf(f, "  .stem-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }\n");
-    fprintf(f, "  .stem-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }\n");
-    fprintf(f, "  .stem-title { font-size: 1.1rem; font-weight: bold; color: #fff; display: flex; align-items: center; gap: 10px; }\n");
-    fprintf(f, "  .pitch-tag { background: #333344; color: #82aaff; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; font-family: monospace; }\n");
-    fprintf(f, "  .stem-metrics { font-size: 0.85rem; color: var(--muted); display: flex; gap: 15px; font-family: monospace; }\n");
-    fprintf(f, "  audio { height: 32px; outline: none; border-radius: 4px; }\n");
-    fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 140px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 8px; user-select: none; }\n");
-    fprintf(f, "  canvas { width: 100%%; height: 100%%; display: block; cursor: crosshair; }\n");
-    fprintf(f, "  .tooltip { position: absolute; top: 8px; right: 12px; background: rgba(10, 10, 15, 0.85); border: 1px solid #333344; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; color: #fff; pointer-events: none; opacity: 0; transition: opacity 0.15s; }\n");
-    fprintf(f, "  .instructions { font-size: 0.8rem; color: var(--muted); margin-top: 6px; font-style: italic; }\n");
-    fprintf(f, "</style>\n</head>\n<body>\n");
-
-    fprintf(f, "<header>\n");
-    fprintf(f, "  <h1>Spectral Flux Transience Report</h1>\n");
-    fprintf(f, "  <div class=\"meta-p\">\n");
-    fprintf(f, "    <span><strong>Source File:</strong> %s</span>\n", basename);
-    fprintf(f, "    <span><strong>Duration:</strong> %.2fs</span>\n", duration);
-    fprintf(f, "    <span><strong>Sample Rate:</strong> %u Hz</span>\n", sample_rate);
-    fprintf(f, "    <span><strong>Channels:</strong> %u (%s)</span>\n", num_channels, num_channels == 1 ? "Mono" : "Stereo");
-    fprintf(f, "    <span><strong>Stems:</strong> %d</span>\n", stem_count);
-    fprintf(f, "  </div>\n");
-    fprintf(f, "  <div class=\"toolbar\">\n");
-    fprintf(f, "    <a class=\"btn\" href=\"index.html\">&larr; Batch Dashboard</a>\n");
-    fprintf(f, "    <button class=\"btn\" id=\"resetZoomBtn\" onclick=\"resetZoom()\">Reset Zoom</button>\n");
-    fprintf(f, "    <label class=\"toggle-label\"><input type=\"checkbox\" id=\"syncZoomCheck\" checked> Sync Zoom Across Rows</label>\n");
-    fprintf(f, "    <span class=\"view-info\" id=\"viewInfo\">Visible: 0.000s &ndash; %.3fs (Duration: %.3fs)</span>\n", duration, duration);
-    fprintf(f, "    <div class=\"legend\">\n");
-    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: rgba(180, 190, 210, 0.45);\"></div> Original Audio Waveform</div>\n");
-    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ff5722;\"></div> Raw Spectral Flux Envelope</div>\n");
-    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #4caf50;\"></div> Modified Flux Envelope</div>\n");
-    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ffeb3b;\"></div> Detected Peaks (Top Marks)</div>\n");
-    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #00bcd4;\"></div> Detected Troughs (Bottom Marks)</div>\n");
-    fprintf(f, "    </div>\n");
-    fprintf(f, "  </div>\n");
-    fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
-    fprintf(f, "</header>\n\n");
-
-    fprintf(f, "<div id=\"stemsContainer\">\n");
-    for (int i = 0; i < stem_count; i++) {
-        const FluxStem *st = &stems[i];
-        fprintf(f, "  <div class=\"stem-card\">\n");
-        fprintf(f, "    <div class=\"stem-header\">\n");
-        fprintf(f, "      <div class=\"stem-title\">\n");
-        fprintf(f, "        <span class=\"pitch-tag\">MIDI %03d</span> %s (%.2f Hz)\n", st->pitch, st->note_name, midi_to_frequency(st->pitch));
-        fprintf(f, "      </div>\n");
-        fprintf(f, "      <div class=\"stem-metrics\">\n");
-        fprintf(f, "        <span>Peaks: %d</span>\n", st->num_peaks);
-        fprintf(f, "        <span>Troughs: %d</span>\n", st->num_troughs);
-        fprintf(f, "      </div>\n");
-        fprintf(f, "      <audio controls src=\"../%s\" preload=\"metadata\"></audio>\n", st->mod_filename);
-        fprintf(f, "    </div>\n");
-        fprintf(f, "    <div class=\"canvas-container\">\n");
-        fprintf(f, "      <canvas id=\"canvas-%d\" data-index=\"%d\"></canvas>\n", i, i);
-        fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", i);
-        fprintf(f, "    </div>\n");
-        fprintf(f, "  </div>\n");
-    }
-
-    fprintf(f, "</div>\n\n");
-
-    char js_data_filename[1024];
-    snprintf(js_data_filename, sizeof(js_data_filename), "%s_flux_waveform_data.js", basename);
-    char js_data_path[4096];
-    snprintf(js_data_path, sizeof(js_data_path), "%s/%s", flux_dir, js_data_filename);
-
-    FILE *fjs = fopen(js_data_path, "w");
-    if (fjs) {
-        fprintf(fjs, "window.WAVEFORM_DATA = {\n");
-
-        int16_t *pcm_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-
-        if (orig_audio_buffer && pcm_i16) {
-            for (uint32_t s = 0; s < total_samples; s++) {
-                double sum_f = 0.0;
-                for (uint32_t c = 0; c < num_channels; c++) {
-                    sum_f += orig_audio_buffer[s * num_channels + c];
-                }
-                double val = sum_f / num_channels;
-                if (val > 1.0) val = 1.0;
-                if (val < -1.0) val = -1.0;
-                pcm_i16[s] = (int16_t)round(val * 32767.0);
-            }
-            char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
-            fprintf(fjs, "  origPcm: \"%s\",\n", b64 ? b64 : "");
-            if (b64) free(b64);
-        } else {
-            fprintf(fjs, "  origPcm: \"\",\n");
-        }
-        if (pcm_i16) free(pcm_i16);
-
-        fprintf(fjs, "  rawFluxPcm: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            if (st->raw_flux_i16) {
-                char *b64 = encode_base64_bytes((const uint8_t*)st->raw_flux_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
-                if (b64) free(b64);
-            } else {
-                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
-            }
-        }
-        fprintf(fjs, "  ],\n");
-
-        fprintf(fjs, "  modFluxPcm: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            if (st->mod_flux_i16) {
-                char *b64 = encode_base64_bytes((const uint8_t*)st->mod_flux_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
-                if (b64) free(b64);
-            } else {
-                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
-            }
-        }
-        fprintf(fjs, "  ],\n");
-
-        fprintf(fjs, "  peaks: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            fprintf(fjs, "    [");
-            for (int k = 0; k < st->num_peaks; k++) {
-                fprintf(fjs, "%d%s", st->peaks[k], (k + 1 < st->num_peaks) ? "," : "");
-            }
-            fprintf(fjs, "]%s\n", (i + 1 < stem_count) ? "," : "");
-        }
-        fprintf(fjs, "  ],\n");
-
-        fprintf(fjs, "  troughs: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            fprintf(fjs, "    [");
-            for (int k = 0; k < st->num_troughs; k++) {
-                fprintf(fjs, "%d%s", st->troughs[k], (k + 1 < st->num_troughs) ? "," : "");
-            }
-            fprintf(fjs, "]%s\n", (i + 1 < stem_count) ? "," : "");
-        }
-        fprintf(fjs, "  ]\n");
-
-        fprintf(fjs, "};\n");
-        fclose(fjs);
-    }
-
-    fprintf(f, "<script src=\"%s\"></script>\n", js_data_filename);
-    fprintf(f, "<script>\n");
-    fprintf(f, "const DATA = {\n");
-    fprintf(f, "  sampleRate: %u,\n", sample_rate);
-    fprintf(f, "  numChannels: %u,\n", num_channels);
-    fprintf(f, "  totalSamples: %u,\n", total_samples);
-    fprintf(f, "  duration: %.6f,\n", duration);
-    fprintf(f, "  stems: [\n");
-
-    for (int i = 0; i < stem_count; i++) {
-        const FluxStem *st = &stems[i];
-        fprintf(f, "    {\n");
-        fprintf(f, "      pitch: %d,\n", st->pitch);
-        fprintf(f, "      name: \"%s\",\n", st->note_name);
-        fprintf(f, "      file: \"../%s\"\n", st->mod_filename);
-        fprintf(f, "    }%s\n", (i + 1 < stem_count) ? "," : "");
-    }
-
-    fprintf(f, "  ]\n");
-    fprintf(f, "};\n\n");
-
-    fprintf(f, "function base64ToFloat32(b64) {\n");
-    fprintf(f, "  if (!b64) return new Float32Array(DATA.totalSamples);\n");
-    fprintf(f, "  const binaryString = atob(b64);\n");
-    fprintf(f, "  const len = binaryString.length;\n");
-    fprintf(f, "  const bytes = new Uint8Array(len);\n");
-    fprintf(f, "  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);\n");
-    fprintf(f, "  const i16 = new Int16Array(bytes.buffer, 0, Math.floor(len / 2));\n");
-    fprintf(f, "  const f32 = new Float32Array(i16.length);\n");
-    fprintf(f, "  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32767.0;\n");
-    fprintf(f, "  return f32;\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "function formatMSSPrecise(sec) {\n");
-    fprintf(f, "  if (isNaN(sec) || sec < 0) sec = 0;\n");
-    fprintf(f, "  const m = Math.floor(sec / 60);\n");
-    fprintf(f, "  const s = sec %% 60;\n");
-    fprintf(f, "  const sStr = s < 10 ? '0' + s.toFixed(2) : s.toFixed(2);\n");
-    fprintf(f, "  return `${m}:${sStr}`;\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "function formatMSS(sec) {\n");
-    fprintf(f, "  if (isNaN(sec) || sec < 0) sec = 0;\n");
-    fprintf(f, "  const m = Math.floor(sec / 60);\n");
-    fprintf(f, "  const s = sec %% 60;\n");
-    fprintf(f, "  const sInt = Math.floor(s);\n");
-    fprintf(f, "  const sStr = sInt < 10 ? '0' + sInt : '' + sInt;\n");
-    fprintf(f, "  return `${m}:${sStr}`;\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "function initAudioData() {\n");
-    fprintf(f, "  if (window.WAVEFORM_DATA) {\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.origPcm) {\n");
-    fprintf(f, "      DATA.origPcm = base64ToFloat32(window.WAVEFORM_DATA.origPcm);\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.rawFluxPcm) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        if (window.WAVEFORM_DATA.rawFluxPcm[i]) {\n");
-    fprintf(f, "          DATA.stems[i].rawFluxPcm = base64ToFloat32(window.WAVEFORM_DATA.rawFluxPcm[i]);\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.modFluxPcm) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        if (window.WAVEFORM_DATA.modFluxPcm[i]) {\n");
-    fprintf(f, "          DATA.stems[i].modFluxPcm = base64ToFloat32(window.WAVEFORM_DATA.modFluxPcm[i]);\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.peaks) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        DATA.stems[i].peaks = window.WAVEFORM_DATA.peaks[i] || [];\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.troughs) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        DATA.stems[i].troughs = window.WAVEFORM_DATA.troughs[i] || [];\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  renderAll();\n");
-    fprintf(f, "}\n\n");
-
-    fprintf(f, "let viewStart = 0.0;\n");
-    fprintf(f, "let viewEnd = DATA.duration;\n");
-    fprintf(f, "let zoomHistory = [];\n");
-    fprintf(f, "let activeDrag = null;\n");
-    fprintf(f, "let hoverState = null;\n");
-
-    fprintf(f, "function timeToX(t, width) {\n");
-    fprintf(f, "  return ((t - viewStart) / (viewEnd - viewStart)) * width;\n");
-    fprintf(f, "}\n");
-    fprintf(f, "function xToTime(x, width) {\n");
-    fprintf(f, "  return viewStart + (x / width) * (viewEnd - viewStart);\n");
-    fprintf(f, "}\n");
-
-    fprintf(f, "function updateViewInfo() {\n");
-    fprintf(f, "  const dur = viewEnd - viewStart;\n");
-    fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${formatMSSPrecise(viewStart)} &ndash; ${formatMSSPrecise(viewEnd)} (Duration: ${formatMSSPrecise(dur)})`;\n");
-    fprintf(f, "}\n");
-
-    fprintf(f, "function resetZoom() {\n");
-    fprintf(f, "  zoomHistory = [];\n");
-    fprintf(f, "  viewStart = 0.0;\n");
-    fprintf(f, "  viewEnd = DATA.duration;\n");
-    fprintf(f, "  updateViewInfo();\n");
-    fprintf(f, "  renderAll();\n");
-    fprintf(f, "}\n");
-
-    fprintf(f, "function zoomOut() {\n");
-    fprintf(f, "  if (zoomHistory.length > 0) {\n");
-    fprintf(f, "    const prev = zoomHistory.pop();\n");
-    fprintf(f, "    viewStart = prev.start;\n");
-    fprintf(f, "    viewEnd = prev.end;\n");
-    fprintf(f, "    updateViewInfo();\n");
-    fprintf(f, "    renderAll();\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "}\n");
-
-    fprintf(f, "function renderCanvas(index) {\n");
-    fprintf(f, "  const canvas = document.getElementById(`canvas-${index}`);\n");
-    fprintf(f, "  if (!canvas) return;\n");
-    fprintf(f, "  const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "  const dpr = window.devicePixelRatio || 1;\n");
-    fprintf(f, "  const width = rect.width;\n");
-    fprintf(f, "  const height = rect.height;\n");
-    fprintf(f, "  if (width === 0 || height === 0) return;\n");
-    fprintf(f, "  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {\n");
-    fprintf(f, "    canvas.width = Math.floor(width * dpr);\n");
-    fprintf(f, "    canvas.height = Math.floor(height * dpr);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "  const ctx = canvas.getContext('2d');\n");
-    fprintf(f, "  ctx.save();\n");
-    fprintf(f, "  ctx.scale(dpr, dpr);\n");
-    fprintf(f, "  ctx.clearRect(0, 0, width, height);\n");
-
-    fprintf(f, "  const graphBottom = height - 18;\n");
-    fprintf(f, "  const graphTop = 8;\n");
-    fprintf(f, "  const graphHeight = graphBottom - graphTop;\n");
-
-    fprintf(f, "  // Grid lines\n");
-    fprintf(f, "  ctx.strokeStyle = '#1e1e2c';\n");
-    fprintf(f, "  ctx.lineWidth = 1;\n");
-    fprintf(f, "  [0.0, 0.25, 0.5, 0.75, 1.0].forEach(val => {\n");
-    fprintf(f, "    const y = graphBottom - val * graphHeight;\n");
-    fprintf(f, "    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();\n");
-    fprintf(f, "  });\n");
-
-    fprintf(f, "  const sampleStart = Math.max(0, Math.floor((viewStart / DATA.duration) * DATA.totalSamples));\n");
-    fprintf(f, "  const sampleEnd = Math.min(DATA.totalSamples - 1, Math.ceil((viewEnd / DATA.duration) * DATA.totalSamples));\n");
-    fprintf(f, "  const visibleSamples = Math.max(1, sampleEnd - sampleStart + 1);\n");
-    fprintf(f, "  const stem = DATA.stems[index];\n");
-
-    fprintf(f, "  function drawOriginalWaveform(pcm) {\n");
-    fprintf(f, "    if (!pcm || pcm.length === 0) return;\n");
-    fprintf(f, "    ctx.fillStyle = 'rgba(180, 190, 210, 0.35)';\n");
-    fprintf(f, "    ctx.strokeStyle = 'rgba(180, 190, 210, 0.55)';\n");
-    fprintf(f, "    ctx.lineWidth = 1;\n");
-    fprintf(f, "    const midY = graphTop + graphHeight / 2;\n");
-    fprintf(f, "    const halfH = graphHeight / 2;\n");
-    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
-    fprintf(f, "      ctx.beginPath();\n");
-    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
-    fprintf(f, "        const t = s / DATA.sampleRate;\n");
-    fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        const val = pcm[s];\n");
-    fprintf(f, "        const y = midY - val * halfH;\n");
-    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    } else {\n");
-    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
-    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
-    fprintf(f, "        const t1 = xToTime(px, width);\n");
-    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
-    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
-    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
-    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
-    fprintf(f, "          let minV = pcm[s1];\n");
-    fprintf(f, "          let maxV = pcm[s1];\n");
-    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
-    fprintf(f, "            const v = pcm[s];\n");
-    fprintf(f, "            if (v < minV) minV = v;\n");
-    fprintf(f, "            if (v > maxV) maxV = v;\n");
-    fprintf(f, "          }\n");
-    fprintf(f, "          const y1 = midY - maxV * halfH;\n");
-    fprintf(f, "          const y2 = midY - minV * halfH;\n");
-    fprintf(f, "          ctx.fillRect(px, y1, 1, Math.max(1, y2 - y1));\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  function drawFluxLine(pcm, color) {\n");
-    fprintf(f, "    if (!pcm) return;\n");
-    fprintf(f, "    ctx.strokeStyle = color;\n");
-    fprintf(f, "    ctx.lineWidth = 1.8;\n");
-    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
-    fprintf(f, "      ctx.beginPath();\n");
-    fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
-    fprintf(f, "        const t = s / DATA.sampleRate;\n");
-    fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        const val = Math.max(0, Math.min(1, pcm[s]));\n");
-    fprintf(f, "        const y = graphBottom - val * graphHeight;\n");
-    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    } else {\n");
-    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
-    fprintf(f, "      const maxArr = new Float32Array(pxWidth);\n");
-    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
-    fprintf(f, "        const t1 = xToTime(px, width);\n");
-    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
-    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
-    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
-    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
-    fprintf(f, "          let maxV = pcm[s1];\n");
-    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
-    fprintf(f, "            const v = pcm[s];\n");
-    fprintf(f, "            if (v > maxV) maxV = v;\n");
-    fprintf(f, "          }\n");
-    fprintf(f, "          maxArr[px] = Math.max(0, Math.min(1, maxV));\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.beginPath();\n");
-    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
-    fprintf(f, "        const y = graphBottom - maxArr[px] * graphHeight;\n");
-    fprintf(f, "        if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  // 0. Draw Original Waveform Background\n");
-    fprintf(f, "  if (DATA.origPcm) {\n");
-    fprintf(f, "    drawOriginalWaveform(DATA.origPcm);\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  // 1. Draw Raw Spectral Flux Envelope\n");
-    fprintf(f, "  drawFluxLine(stem.rawFluxPcm, '#ff5722');\n");
-
-    fprintf(f, "  // 2. Draw Modified Flux Envelope\n");
-    fprintf(f, "  drawFluxLine(stem.modFluxPcm, '#4caf50');\n");
-
-    fprintf(f, "  // 3. Draw Peak Hash Marks (coming down from top)\n");
-    fprintf(f, "  if (stem.peaks) {\n");
-    fprintf(f, "    ctx.strokeStyle = '#ffeb3b';\n");
-    fprintf(f, "    ctx.lineWidth = 1.5;\n");
-    fprintf(f, "    for (let k = 0; k < stem.peaks.length; k++) {\n");
-    fprintf(f, "      const s = stem.peaks[k];\n");
-    fprintf(f, "      if (s >= sampleStart && s <= sampleEnd) {\n");
-    fprintf(f, "        const t = s / DATA.sampleRate;\n");
-    fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 10); ctx.stroke();\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  // 4. Draw Trough Hash Marks (coming up from bottom)\n");
-    fprintf(f, "  if (stem.troughs) {\n");
-    fprintf(f, "    ctx.strokeStyle = '#00bcd4';\n");
-    fprintf(f, "    ctx.lineWidth = 1.5;\n");
-    fprintf(f, "    for (let k = 0; k < stem.troughs.length; k++) {\n");
-    fprintf(f, "      const s = stem.troughs[k];\n");
-    fprintf(f, "      if (s >= sampleStart && s <= sampleEnd) {\n");
-    fprintf(f, "        const t = s / DATA.sampleRate;\n");
-    fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        ctx.beginPath(); ctx.moveTo(x, graphBottom); ctx.lineTo(x, graphBottom - 10); ctx.stroke();\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  // Time Axis Legend Along Bottom\n");
-    fprintf(f, "  const legendY = height - 16;\n");
-    fprintf(f, "  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';\n");
-    fprintf(f, "  ctx.lineWidth = 1;\n");
-    fprintf(f, "  ctx.beginPath(); ctx.moveTo(0, legendY); ctx.lineTo(width, legendY); ctx.stroke();\n");
-
-    fprintf(f, "  ctx.fillStyle = '#a0a0b0';\n");
-    fprintf(f, "  ctx.font = '10px monospace';\n");
-    fprintf(f, "  const numTicks = 8;\n");
-    fprintf(f, "  const durWindow = viewEnd - viewStart;\n");
-    fprintf(f, "  for (let i = 0; i <= numTicks; i++) {\n");
-    fprintf(f, "    const frac = i / numTicks;\n");
-    fprintf(f, "    const x = frac * width;\n");
-    fprintf(f, "    const timeVal = viewStart + frac * durWindow;\n");
-    fprintf(f, "    ctx.beginPath(); ctx.moveTo(x, legendY); ctx.lineTo(x, legendY + 4); ctx.stroke();\n");
-    fprintf(f, "    if (i === 0) ctx.textAlign = 'left';\n");
-    fprintf(f, "    else if (i === numTicks) ctx.textAlign = 'right';\n");
-    fprintf(f, "    else ctx.textAlign = 'center';\n");
-    fprintf(f, "    ctx.fillText(formatMSS(timeVal), x, height - 2);\n");
-    fprintf(f, "  }\n\n");
-
-    fprintf(f, "  // Drag selection highlight\n");
-    fprintf(f, "  if (activeDrag && activeDrag.index === index) {\n");
-    fprintf(f, "    const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
-    fprintf(f, "    const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
-    fprintf(f, "    ctx.fillStyle = 'rgba(255, 235, 59, 0.25)';\n");
-    fprintf(f, "    ctx.fillRect(x1, 0, x2 - x1, height);\n");
-    fprintf(f, "    ctx.strokeStyle = '#ffeb3b';\n");
-    fprintf(f, "    ctx.lineWidth = 1.5;\n");
-    fprintf(f, "    ctx.strokeRect(x1, 0, x2 - x1, height);\n");
-    fprintf(f, "  }\n");
-
-    fprintf(f, "  // Hover crosshair\n");
-    fprintf(f, "  if (hoverState && hoverState.index === index) {\n");
-    fprintf(f, "    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';\n");
-    fprintf(f, "    ctx.setLineDash([4, 4]);\n");
-    fprintf(f, "    ctx.beginPath(); ctx.moveTo(hoverState.mouseX, 0); ctx.lineTo(hoverState.mouseX, height); ctx.stroke();\n");
-    fprintf(f, "    ctx.setLineDash([]);\n");
-    fprintf(f, "  }\n");
-
-    fprintf(f, "  ctx.restore();\n");
-    fprintf(f, "}\n");
-
-    fprintf(f, "function renderAll() {\n");
-    fprintf(f, "  for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "    renderCanvas(i);\n");
-    fprintf(f, "  }\n");
-    fprintf(f, "}\n");
-
-    fprintf(f, "function attachListeners() {\n");
-    fprintf(f, "  DATA.stems.forEach((stem, idx) => {\n");
-    fprintf(f, "    const canvas = document.getElementById(`canvas-${idx}`);\n");
-    fprintf(f, "    const tooltip = document.getElementById(`tooltip-${idx}`);\n");
-    fprintf(f, "    if (!canvas) return;\n");
-
-    fprintf(f, "    canvas.addEventListener('mousedown', (e) => {\n");
-    fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "      const x = e.clientX - rect.left;\n");
-    fprintf(f, "      activeDrag = { index: idx, startX: x, currentX: x };\n");
-    fprintf(f, "      renderCanvas(idx);\n");
-    fprintf(f, "    });\n");
-
-    fprintf(f, "    canvas.addEventListener('mousemove', (e) => {\n");
-    fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));\n");
-    fprintf(f, "      hoverState = { index: idx, mouseX: x };\n");
-    fprintf(f, "      if (activeDrag) {\n");
-    fprintf(f, "        activeDrag.currentX = x;\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      renderCanvas(idx);\n");
-
-    fprintf(f, "      const t = xToTime(x, rect.width);\n");
-    fprintf(f, "      const s = Math.min(DATA.totalSamples - 1, Math.max(0, Math.round(t * DATA.sampleRate)));\n");
-    fprintf(f, "      const rawVal = (stem.rawFluxPcm && stem.rawFluxPcm.length > s) ? stem.rawFluxPcm[s] : 0;\n");
-    fprintf(f, "      const modVal = (stem.modFluxPcm && stem.modFluxPcm.length > s) ? stem.modFluxPcm[s] : 0;\n");
-    fprintf(f, "      tooltip.style.opacity = '1';\n");
-    fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Raw Flux: ${rawVal.toFixed(4)} | Modified Flux: ${modVal.toFixed(4)}`;\n");
-    fprintf(f, "    });\n");
-
-    fprintf(f, "    canvas.addEventListener('mouseleave', () => {\n");
-    fprintf(f, "      if (activeDrag && activeDrag.index === idx) {\n");
-    fprintf(f, "        activeDrag = null;\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      hoverState = null;\n");
-    fprintf(f, "      tooltip.style.opacity = '0';\n");
-    fprintf(f, "      renderCanvas(idx);\n");
-    fprintf(f, "    });\n");
-
-    fprintf(f, "    canvas.addEventListener('mouseup', (e) => {\n");
-    fprintf(f, "      if (activeDrag && activeDrag.index === idx) {\n");
-    fprintf(f, "        const rect = canvas.getBoundingClientRect();\n");
-    fprintf(f, "        const x1 = Math.min(activeDrag.startX, activeDrag.currentX);\n");
-    fprintf(f, "        const x2 = Math.max(activeDrag.startX, activeDrag.currentX);\n");
-    fprintf(f, "        activeDrag = null;\n");
-    fprintf(f, "        if (x2 - x1 > 4) {\n");
-    fprintf(f, "          const t1 = xToTime(x1, rect.width);\n");
-    fprintf(f, "          const t2 = xToTime(x2, rect.width);\n");
-    fprintf(f, "          zoomHistory.push({ start: viewStart, end: viewEnd });\n");
-    fprintf(f, "          viewStart = Math.max(0, t1);\n");
-    fprintf(f, "          viewEnd = Math.min(DATA.duration, t2);\n");
-    fprintf(f, "          updateViewInfo();\n");
-    fprintf(f, "          renderAll();\n");
-    fprintf(f, "        } else {\n");
-    fprintf(f, "          renderCanvas(idx);\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    });\n");
-
-    fprintf(f, "    canvas.addEventListener('contextmenu', (e) => {\n");
-    fprintf(f, "      e.preventDefault();\n");
-    fprintf(f, "      zoomOut();\n");
-    fprintf(f, "    });\n");
-    fprintf(f, "  });\n");
-    fprintf(f, "}\n");
-
-    fprintf(f, "window.addEventListener('resize', renderAll);\n");
-    fprintf(f, "window.addEventListener('DOMContentLoaded', () => {\n");
-    fprintf(f, "  attachListeners();\n");
-    fprintf(f, "  renderAll();\n");
-    fprintf(f, "  initAudioData();\n");
-    fprintf(f, "});\n");
-
-    fprintf(f, "</script>\n");
-    fprintf(f, "</body>\n</html>\n");
-
-    fclose(f);
-}
-
-void generate_master_flux_html_report(
-    const char *flux_dir,
-    const char *stem_dir,
-    const FileBatchResult *results,
-    int num_results,
-    double total_wall_clock_sec
-) {
-    char master_html_path[4096];
-    snprintf(master_html_path, sizeof(master_html_path), "%s/index.html", flux_dir);
-
-    FILE *f = fopen(master_html_path, "w");
-    if (!f) return;
-
-    if (num_results == 1 && (results[0].success || results[0].skipped)) {
-        /* Single file redirect to <basename>_index.html */
-        fprintf(f, "<!DOCTYPE html>\n<html>\n<head>\n");
-        fprintf(f, "<meta http-equiv=\"refresh\" content=\"0; url=%s_index.html\">\n", results[0].basename);
-        fprintf(f, "<title>Spectral Flux Report Redirect</title>\n</head>\n<body>\n");
-        fprintf(f, "<p>Redirecting to <a href=\"%s_index.html\">%s Spectral Flux Report</a>...</p>\n", results[0].basename, results[0].basename);
-        fprintf(f, "</body>\n</html>\n");
-        fclose(f);
-    } else {
-        /* Multi-file Master Batch Dashboard */
-        fprintf(f, "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
-        fprintf(f, "<meta charset=\"UTF-8\">\n");
-        fprintf(f, "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
-        fprintf(f, "<title>Spectral Flux Batch Analysis Dashboard</title>\n");
-        fprintf(f, "<style>\n");
-        fprintf(f, "  :root { --bg: #121216; --card-bg: #1a1a22; --border: #2a2a36; --text: #e1e1e6; --muted: #a0a0b0; --accent: #2196f3; }\n");
-        fprintf(f, "  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }\n");
-        fprintf(f, "  body { background: var(--bg); color: var(--text); padding: 24px; line-height: 1.5; }\n");
-        fprintf(f, "  header { background: var(--card-bg); padding: 24px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 24px; }\n");
-        fprintf(f, "  h1 { font-size: 1.8rem; color: #fff; margin-bottom: 8px; }\n");
-        fprintf(f, "  .batch-stats { display: flex; gap: 24px; flex-wrap: wrap; font-size: 0.95rem; color: var(--muted); margin-top: 10px; }\n");
-        fprintf(f, "  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }\n");
-        fprintf(f, "  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; transition: transform 0.2s, border-color 0.2s; }\n");
-        fprintf(f, "  .card:hover { border-color: var(--accent); transform: translateY(-2px); }\n");
-        fprintf(f, "  .card-title { font-size: 1.1rem; font-weight: bold; color: #fff; margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n");
-        fprintf(f, "  .card-meta { font-size: 0.85rem; color: var(--muted); font-family: monospace; display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }\n");
-        fprintf(f, "  .btn { display: inline-block; background: var(--accent); color: #fff; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 0.9rem; text-align: center; width: 100%%; transition: opacity 0.2s; }\n");
-        fprintf(f, "  .btn:hover { opacity: 0.9; }\n");
-        fprintf(f, "  .status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; font-family: monospace; }\n");
-        fprintf(f, "  .badge-success { background: #1b5e20; color: #81c784; }\n");
-        fprintf(f, "  .badge-fail { background: #b71c1c; color: #e57373; }\n");
-    fprintf(f, "  .badge-skip { background: #4a3b12; color: #ffd54f; }\n");
-        fprintf(f, "</style>\n</head>\n<body>\n");
-
-        fprintf(f, "<header>\n");
-        fprintf(f, "  <h1>Spectral Flux Batch Analysis Dashboard</h1>\n");
-        fprintf(f, "  <div class=\"batch-stats\">\n");
-        fprintf(f, "    <span><strong>Files Processed:</strong> %d</span>\n", num_results);
-        fprintf(f, "    <span><strong>Total Elapsed Wall-Clock Time:</strong> %.2fs</span>\n", total_wall_clock_sec);
-        fprintf(f, "  </div>\n");
-        fprintf(f, "</header>\n\n");
-
-        fprintf(f, "<div class=\"grid\">\n");
-        for (int i = 0; i < num_results; i++) {
-            const FileBatchResult *r = &results[i];
-            fprintf(f, "  <div class=\"card\">\n");
-            fprintf(f, "    <div class=\"card-title\" title=\"%s\">%s.wav</div>\n", r->basename, r->basename);
-            fprintf(f, "    <div class=\"card-meta\">\n");
-            fprintf(f, "      <span>Status: %s</span>\n", r->skipped
-                ? "<span class=\"status-badge badge-skip\">SKIPPED (EXISTING STEMS)</span>"
-                : (r->success
-                    ? "<span class=\"status-badge badge-success\">COMPLETE</span>"
-                    : "<span class=\"status-badge badge-fail\">FAILED</span>"));
-            if (r->skipped) {
-                fprintf(f, "      <span>Pitch stems already existed; analysis skipped.</span>\n");
-            }
-            fprintf(f, "      <span>Duration: %.2fs (%u Hz, %s)</span>\n", r->duration, r->sample_rate, r->num_channels == 1 ? "Mono" : "Stereo");
-            fprintf(f, "      <span>Flux Stems Exported: %d</span>\n", r->stem_count);
-            fprintf(f, "      <span>Processing Time: %.2fs (%.1fx Real-Time)</span>\n", r->elapsed_sec, r->speed_ratio);
-            fprintf(f, "    </div>\n");
-            if (r->success || r->skipped) {
-                fprintf(f, "    <a class=\"btn\" href=\"%s_index.html\">Open Interactive Report &rarr;</a>\n", r->basename);
-            }
-            fprintf(f, "  </div>\n");
-        }
-        fprintf(f, "</div>\n");
-        fprintf(f, "</body>\n</html>\n");
-        fclose(f);
-    }
-}
+/* Pre-calculated FFT lookup tables for the separator's own 8192-point STFT */
+static Complex g_twiddle_fwd[FFT_SIZE];
+static Complex g_twiddle_inv[FFT_SIZE];
+static int g_bit_rev[FFT_SIZE];
+static int g_fft_tables_initialized = 0;
 
 void init_fft_tables(void) {
     if (g_fft_tables_initialized) return;
@@ -1452,28 +275,6 @@ void init_fft_tables(void) {
     g_fft_tables_initialized = 1;
 }
 
-void wait_for_keypress(void) {
-    printf("\nPress ENTER to exit...\n");
-    fflush(stdout);
-#if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
-    system("pause");
-#else
-    if (isatty(fileno(stdin))) {
-        int c;
-        while ((c = getchar()) != '\n' && c != EOF);
-        if (c == '\n') {
-            getchar();
-        }
-    } else {
-        FILE *tty = fopen("/dev/tty", "r");
-        if (tty) {
-            fgetc(tty);
-            fclose(tty);
-        }
-    }
-#endif
-}
-
 void trim_string(char *str) {
     if (!str) return;
     char *start = str;
@@ -1488,20 +289,6 @@ void trim_string(char *str) {
         str[len - 1] = '\0';
         len--;
     }
-}
-
-void get_note_name(int midi_pitch, char *buffer, size_t buffer_size) {
-    if (midi_pitch < 0 || midi_pitch > 127) {
-        snprintf(buffer, buffer_size, "Unknown");
-        return;
-    }
-    int note_idx = midi_pitch % 12;
-    int octave = (midi_pitch / 12) - 1;
-    snprintf(buffer, buffer_size, "%s%d", NOTE_NAMES[note_idx], octave);
-}
-
-double midi_to_frequency(int midi_pitch) {
-    return 440.0 * pow(2.0, (midi_pitch - 69.0) / 12.0);
 }
 
 /* Optimized FFT implementation using pre-calculated lookup tables */
@@ -1543,135 +330,6 @@ void fft(Complex *x, int n, int invert) {
             x[i].i *= inv_n;
         }
     }
-}
-
-/* WAV File Reader */
-WAVFile* read_wav(const char *filepath) {
-    FILE *f = fopen(filepath, "rb");
-    if (!f) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("Error: Could not open file '%s'\n", filepath);
-        pthread_mutex_unlock(&g_console_mutex);
-        return NULL;
-    }
-
-    char chunk_id[5] = {0};
-    uint32_t chunk_size = 0;
-    char format[5] = {0};
-
-    if (fread(chunk_id, 1, 4, f) != 4 || fread(&chunk_size, 4, 1, f) != 1 || fread(format, 1, 4, f) != 4) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("Error: Invalid WAV header in '%s'\n", filepath);
-        pthread_mutex_unlock(&g_console_mutex);
-        fclose(f);
-        return NULL;
-    }
-
-    if (strncmp(chunk_id, "RIFF", 4) != 0 || strncmp(format, "WAVE", 4) != 0) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("Error: File '%s' is not a valid RIFF WAVE file\n", filepath);
-        pthread_mutex_unlock(&g_console_mutex);
-        fclose(f);
-        return NULL;
-    }
-
-    WAVFile *wav = (WAVFile*)calloc(1, sizeof(WAVFile));
-    uint32_t data_size = 0;
-    long data_pos = 0;
-
-    while (fread(chunk_id, 1, 4, f) == 4 && fread(&chunk_size, 4, 1, f) == 1) {
-        chunk_id[4] = '\0';
-        if (strncmp(chunk_id, "fmt ", 4) == 0) {
-            uint16_t audio_fmt = 0, channels = 0, bits = 0;
-            uint32_t srate = 0, bytes_per_sec = 0;
-            uint16_t block_align = 0;
-
-            if (fread(&audio_fmt, 2, 1, f) != 1 ||
-                fread(&channels, 2, 1, f) != 1 ||
-                fread(&srate, 4, 1, f) != 1 ||
-                fread(&bytes_per_sec, 4, 1, f) != 1 ||
-                fread(&block_align, 2, 1, f) != 1 ||
-                fread(&bits, 2, 1, f) != 1) {
-                pthread_mutex_lock(&g_console_mutex);
-                printf("Error: Failed to read format header in '%s'\n", filepath);
-                pthread_mutex_unlock(&g_console_mutex);
-                free(wav);
-                fclose(f);
-                return NULL;
-            }
-
-            wav->audio_format = audio_fmt;
-            wav->num_channels = channels;
-            wav->sample_rate = srate;
-            wav->bits_per_sample = bits;
-
-            if (chunk_size > 16) {
-                fseek(f, chunk_size - 16, SEEK_CUR);
-            }
-        } else if (strncmp(chunk_id, "data", 4) == 0) {
-            data_size = chunk_size;
-            data_pos = ftell(f);
-            fseek(f, chunk_size, SEEK_CUR);
-        } else {
-            fseek(f, chunk_size, SEEK_CUR);
-        }
-    }
-
-    if (data_size == 0 || wav->num_channels == 0 || wav->sample_rate == 0) {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("Error: Missing format or data chunk in '%s'\n", filepath);
-        pthread_mutex_unlock(&g_console_mutex);
-        free(wav);
-        fclose(f);
-        return NULL;
-    }
-
-    uint32_t bytes_per_sample = wav->bits_per_sample / 8;
-    uint32_t total_frames = data_size / (wav->num_channels * bytes_per_sample);
-    wav->total_samples = total_frames;
-    wav->data = (double*)malloc((size_t)total_frames * wav->num_channels * sizeof(double));
-
-    fseek(f, data_pos, SEEK_SET);
-
-    size_t total_data_samples = (size_t)total_frames * wav->num_channels;
-    if (wav->audio_format == 1 && wav->bits_per_sample == 16) {
-        int16_t *buf = (int16_t*)malloc(total_data_samples * sizeof(int16_t));
-        size_t read_cnt = fread(buf, sizeof(int16_t), total_data_samples, f);
-        (void)read_cnt;
-        for (size_t i = 0; i < total_data_samples; i++) {
-            wav->data[i] = buf[i] / 32768.0;
-        }
-        free(buf);
-    } else if (wav->audio_format == 1 && wav->bits_per_sample == 24) {
-        uint8_t *buf = (uint8_t*)malloc(total_data_samples * 3);
-        size_t read_cnt = fread(buf, 3, total_data_samples, f);
-        (void)read_cnt;
-        for (size_t i = 0; i < total_data_samples; i++) {
-            int32_t val = (buf[i * 3] | (buf[i * 3 + 1] << 8) | (buf[i * 3 + 2] << 16));
-            if (val & 0x800000) val |= 0xFF000000;
-            wav->data[i] = val / 8388608.0;
-        }
-        free(buf);
-    } else if (wav->audio_format == 3 && wav->bits_per_sample == 32) {
-        float *buf = (float*)malloc(total_data_samples * sizeof(float));
-        size_t read_cnt = fread(buf, sizeof(float), total_data_samples, f);
-        (void)read_cnt;
-        for (size_t i = 0; i < total_data_samples; i++) {
-            wav->data[i] = buf[i];
-        }
-        free(buf);
-    } else {
-        pthread_mutex_lock(&g_console_mutex);
-        printf("Error: Unsupported WAV format (format: %d, bits: %d) in '%s'\n", wav->audio_format, wav->bits_per_sample, filepath);
-        pthread_mutex_unlock(&g_console_mutex);
-        free(wav->data);
-        free(wav);
-        fclose(f);
-        return NULL;
-    }
-
-    fclose(f);
-    return wav;
 }
 
 /* WAV File Writer (writes 16-bit PCM) */
@@ -1767,7 +425,8 @@ static void copy_helper_files_to_pitch_stems(const char *dir, const char *stem_d
     const char *files_to_copy[] = {
         "analyze_group.bat",
         "analyze.exe",
-        "song_builder.exe"
+        "song_builder.exe",
+        "flux_report.exe"
     };
     int num_files = sizeof(files_to_copy) / sizeof(files_to_copy[0]);
 
@@ -1831,11 +490,11 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         snprintf(result->basename, sizeof(result->basename), "%s", basename);
     }
 
-    /* Existing pitch stems for this file mean the work is already done: skip it. */
-    if (pitch_stems_exist_for(stem_dir, basename)) {
+    /* Existing pitch stems and their report data mean the work is already done. */
+    if (pitch_stems_exist_for(stem_dir, basename) && flux_report_data_exists(stem_dir, basename)) {
         if (result) result->skipped = 1;
         pthread_mutex_lock(&g_console_mutex);
-        printf("  Skipping %s: pitch stems already exist for it.\n", input_path);
+        printf("  Skipping %s: pitch stems and report data already exist for it.\n", input_path);
         fflush(stdout);
         pthread_mutex_unlock(&g_console_mutex);
         print_multithreaded_progress(thread_slot, num_slots, basename, "Skipped", 100, 100, 0.0);
@@ -1885,7 +544,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         }
     }
 
-    double *orig_audio_buffer = wav->data;
+    free(wav->data);
     wav->data = NULL;
 
     double window[FFT_SIZE];
@@ -2002,9 +661,33 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
 
-    FluxStem *flux_stems = NULL;
+    /*
+     * Report data for flux_report: the raw flux envelope of every stem plus the
+     * peak and trough markers detected on it. The report itself (its JS data
+     * file and HTML) is built on demand from this, so the multi-gigabyte JS
+     * data file is never written during separation. Written to a .part file and
+     * renamed into place only once the whole file is done.
+     */
+    char envelope_path[8192];
+    char envelope_part_path[8192];
+    snprintf(envelope_path, sizeof(envelope_path), "%s/%s_flux_envelopes.bin", flux_dir, basename);
+    snprintf(envelope_part_path, sizeof(envelope_part_path), "%s.part", envelope_path);
+
+    FILE *envelope_file = fopen(envelope_part_path, "wb");
+    if (envelope_file) {
+        uint16_t header_channels = num_channels;
+        uint16_t header_reserved = 0;
+        uint32_t header_stem_count = 0;
+
+        fwrite("FLUXENV1", 1, 8, envelope_file);
+        fwrite(&sample_rate, sizeof(uint32_t), 1, envelope_file);
+        fwrite(&total_samples, sizeof(uint32_t), 1, envelope_file);
+        fwrite(&header_channels, sizeof(uint16_t), 1, envelope_file);
+        fwrite(&header_reserved, sizeof(uint16_t), 1, envelope_file);
+        fwrite(&header_stem_count, sizeof(uint32_t), 1, envelope_file);
+    }
+
     int audible_count = 0;
-    int audible_capacity = 0;
 
     double *recombined_mod_flux = (double*)calloc(total_channel_samples, sizeof(double));
 
@@ -2104,45 +787,65 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
         if (!raw_flux_buf) continue;
 
-        // Calculate flux metrics
-        double max_fl_peak = 0.0;
-        double fl_sum_sq = 0.0;
-        for (size_t k = 0; k < total_channel_samples; k++) {
-            double val = raw_flux_buf[k];
-            if (val > max_fl_peak) max_fl_peak = val;
-            fl_sum_sq += val * val;
+        audible_count++;
+
+        char note_name[32];
+        get_note_name(p, note_name, sizeof(note_name));
+
+        char mod_filename[1024];
+        snprintf(mod_filename, sizeof(mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
+                 basename, p, note_name);
+
+        // Detect peak and trough markers on channel 0 of the raw flux envelope
+        int *peaks = NULL;
+        int *troughs = NULL;
+        int num_peaks = 0;
+        int num_troughs = 0;
+
+        double *ch0_flux = (double*)malloc((size_t)total_samples * sizeof(double));
+        if (ch0_flux) {
+            for (uint32_t s = 0; s < total_samples; s++) {
+                ch0_flux[s] = raw_flux_buf[(size_t)s * num_channels];
+            }
+            detect_all_peaks(ch0_flux, total_samples, &peaks, &num_peaks);
+            detect_all_troughs(ch0_flux, total_samples, &troughs, &num_troughs);
+            free(ch0_flux);
         }
-        double fl_rms = sqrt(fl_sum_sq / total_channel_samples);
 
-        if (audible_count >= audible_capacity) {
-            audible_capacity = (audible_capacity == 0) ? 16 : audible_capacity * 2;
-            flux_stems = (FluxStem*)realloc(flux_stems, audible_capacity * sizeof(FluxStem));
+        if (envelope_file) {
+            int32_t pitch_written = (int32_t)p;
+            int32_t peaks_written = (int32_t)num_peaks;
+            int32_t troughs_written = (int32_t)num_troughs;
+
+            fwrite(&pitch_written, sizeof(int32_t), 1, envelope_file);
+            fwrite(&peaks_written, sizeof(int32_t), 1, envelope_file);
+            if (num_peaks > 0) fwrite(peaks, sizeof(int32_t), (size_t)num_peaks, envelope_file);
+            fwrite(&troughs_written, sizeof(int32_t), 1, envelope_file);
+            if (num_troughs > 0) fwrite(troughs, sizeof(int32_t), (size_t)num_troughs, envelope_file);
+
+            int16_t *mono_flux = (int16_t*)malloc((size_t)total_samples * sizeof(int16_t));
+            if (mono_flux) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    double sum_f = 0.0;
+                    for (uint32_t c = 0; c < num_channels; c++) {
+                        sum_f += raw_flux_buf[(size_t)s * num_channels + c];
+                    }
+                    double val = sum_f / (double)num_channels;
+                    if (val > 1.0) val = 1.0;
+                    if (val < 0.0) val = 0.0;
+                    mono_flux[s] = (int16_t)round(val * 32767.0);
+                }
+                fwrite(mono_flux, sizeof(int16_t), (size_t)total_samples, envelope_file);
+                free(mono_flux);
+            }
         }
 
-        FluxStem *stem = &flux_stems[audible_count++];
-        memset(stem, 0, sizeof(FluxStem));
-        stem->pitch = p;
-        get_note_name(p, stem->note_name, sizeof(stem->note_name));
-        stem->max_flux_peak = max_fl_peak;
-        stem->rms_flux = fl_rms;
-
-        snprintf(stem->mod_filename, sizeof(stem->mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
-                 basename, p, stem->note_name);
+        if (peaks) free(peaks);
+        if (troughs) free(troughs);
 
         double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
         if (mod_flux_buf) {
             memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
-
-            // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
-            double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
-            if (ch0_flux) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    ch0_flux[s] = raw_flux_buf[s * num_channels];
-                }
-                detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
-                detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
-                free(ch0_flux);
-            }
 
             // Process modified flux envelope for each channel
             for (uint32_t c = 0; c < num_channels; c++) {
@@ -2170,39 +873,11 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         if (mod_flux_buf) {
             char mod_flux_filepath[4096];
             snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
-                     stem_dir, stem->mod_filename);
+                     stem_dir, mod_filename);
             write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
         }
 
-        // Store compact 16-bit PCM mono arrays for JS report generation
-        stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-        if (stem->raw_flux_i16) {
-            for (uint32_t s = 0; s < total_samples; s++) {
-                double sum_f = 0.0;
-                for (uint32_t c = 0; c < num_channels; c++) {
-                    sum_f += raw_flux_buf[s * num_channels + c];
-                }
-                double val = sum_f / num_channels;
-                if (val > 1.0) val = 1.0;
-                if (val < 0.0) val = 0.0;
-                stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
-            }
-        }
-
         if (mod_flux_buf) {
-            stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-            if (stem->mod_flux_i16) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += mod_flux_buf[s * num_channels + c];
-                    }
-                    double val = sum_f / num_channels;
-                    if (val > 1.0) val = 1.0;
-                    if (val < 0.0) val = 0.0;
-                    stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
-                }
-            }
             free(mod_flux_buf);
             mod_flux_buf = NULL;
         }
@@ -2240,27 +915,25 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     int exported_count = audible_count;
 
-    // Construct Flux HTML report in [flux] directory
-    if (flux_stems) {
-        generate_flux_html_report(
-            flux_dir,
-            basename,
-            sample_rate,
-            num_channels,
-            total_samples,
-            audio_duration,
-            orig_audio_buffer,
-            flux_stems,
-            audible_count
-        );
+    if (envelope_file) {
+        uint32_t stems_written = (uint32_t)audible_count;
 
-        for (int idx = 0; idx < audible_count; idx++) {
-            if (flux_stems[idx].raw_flux_i16) free(flux_stems[idx].raw_flux_i16);
-            if (flux_stems[idx].mod_flux_i16) free(flux_stems[idx].mod_flux_i16);
-            if (flux_stems[idx].peaks) free(flux_stems[idx].peaks);
-            if (flux_stems[idx].troughs) free(flux_stems[idx].troughs);
+        if (audible_count > 0) {
+            fseek(envelope_file, 20L, SEEK_SET);
+            fwrite(&stems_written, sizeof(uint32_t), 1, envelope_file);
         }
-        free(flux_stems);
+        fclose(envelope_file);
+
+        if (audible_count > 0) {
+            remove(envelope_path);
+            if (rename(envelope_part_path, envelope_path) != 0) {
+                pthread_mutex_lock(&g_console_mutex);
+                printf("  Warning: could not finalize the report data for %s.\n", basename);
+                pthread_mutex_unlock(&g_console_mutex);
+            }
+        } else {
+            remove(envelope_part_path);
+        }
     }
 
     double total_elapsed = (double)(clock() - start_clock) / CLOCKS_PER_SEC;
@@ -2281,7 +954,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     free(frame_pitch_active);
     free(cola_norm);
     free(pitch_bins);
-    if (orig_audio_buffer) free(orig_audio_buffer);
     free(wav);
 
     return 1;
@@ -2463,9 +1135,7 @@ int main(int argc, char *argv[]) {
 
     double total_wall_clock_sec = (double)(clock() - batch_start_clock) / CLOCKS_PER_SEC;
 
-    /* Generate Master Batch HTML Report in [flux]/index.html */
-    generate_master_flux_html_report(flux_dir, stem_dir, results, num_files, total_wall_clock_sec);
-
+    /* Reports are built on demand: flux_report.exe reads the WAVs written above. */
     int total_success = 0;
     int total_skipped = 0;
     for (int i = 0; i < num_files; i++) {
@@ -2482,7 +1152,16 @@ int main(int argc, char *argv[]) {
     }
     printf("  Total Wall-Clock Time:  %.2f seconds\n", total_wall_clock_sec);
     printf("  Output Stem Folder:     %s/\n", stem_dir);
-    printf("  Batch Report URL:       %s/index.html\n", flux_dir);
+
+    char report_tool_path[4096];
+    snprintf(report_tool_path, sizeof(report_tool_path), "%s/flux_report.exe", stem_dir);
+    FILE *report_tool = fopen(report_tool_path, "rb");
+    if (report_tool) {
+        fclose(report_tool);
+        printf("  Reports On Demand:      double-click %s\n", report_tool_path);
+    } else {
+        printf("  Reports On Demand:      copy flux_report.exe into %s, then double-click it\n", stem_dir);
+    }
     printf("====================================================\n");
 
     for (int i = 0; i < num_files; i++) {

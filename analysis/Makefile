@@ -14,9 +14,13 @@ SONG_SOURCES = song_builder.c
 
 FLUX_TARGET = flux_separator
 FLUX_WIN_TARGET = flux_separator.exe
-FLUX_SOURCES = flux_separator.c
+FLUX_SOURCES = flux_separator.c flux_shared.c flux_envelope.c
 
-all: $(TARGET) $(WIN_TARGET) $(SONG_TARGET) $(SONG_WIN_TARGET) $(FLUX_TARGET) $(FLUX_WIN_TARGET)
+REPORT_TARGET = flux_report
+REPORT_WIN_TARGET = flux_report.exe
+REPORT_SOURCES = flux_report.c flux_report_html.c flux_shared.c
+
+all: $(TARGET) $(WIN_TARGET) $(SONG_TARGET) $(SONG_WIN_TARGET) $(FLUX_TARGET) $(FLUX_WIN_TARGET) $(REPORT_TARGET) $(REPORT_WIN_TARGET)
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) $(OBJECTS) -o $@ $(LDFLAGS) || $(CC) $(CFLAGS) $(OBJECTS) -o $@ -lm -lpthread
@@ -40,10 +44,16 @@ $(FLUX_TARGET): $(FLUX_SOURCES)
 $(FLUX_WIN_TARGET): $(FLUX_SOURCES)
 	$(WIN_CC) $(CFLAGS) -pthread $(FLUX_SOURCES) -o $@ -lm
 
+$(REPORT_TARGET): $(REPORT_SOURCES)
+	$(CC) $(CFLAGS) -pthread $(REPORT_SOURCES) -o $@ -lm -lpthread
+
+$(REPORT_WIN_TARGET): $(REPORT_SOURCES)
+	$(WIN_CC) $(CFLAGS) -pthread $(REPORT_SOURCES) -o $@ -lm
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJECTS) $(TARGET) $(WIN_TARGET) $(SONG_TARGET) $(SONG_WIN_TARGET) $(FLUX_TARGET) $(FLUX_WIN_TARGET)
+	rm -f $(OBJECTS) $(TARGET) $(WIN_TARGET) $(SONG_TARGET) $(SONG_WIN_TARGET) $(FLUX_TARGET) $(FLUX_WIN_TARGET) $(REPORT_TARGET) $(REPORT_WIN_TARGET)
 
 .PHONY: all clean

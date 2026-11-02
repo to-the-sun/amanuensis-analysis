@@ -1,6 +1,6 @@
 # Standalone Offline Cumulative Transience Analyzer & Exporter
 
-This directory contains the pure C implementation of the offline transience analyzer and HTML report exporter (`analyze`), pitch stem spectral flux separator (`flux_separator`), pattern song correlation builder (`song_builder`), and group analysis launcher (`analyze_group.bat`).
+This directory contains the pure C implementation of the offline transience analyzer and HTML report exporter (`analyze`), pitch stem spectral flux separator (`flux_separator`), on-demand spectral flux report builder (`flux_report`), pattern song correlation builder (`song_builder`), and group analysis launcher (`analyze_group.bat`).
 
 ## Architecture
 
@@ -35,7 +35,7 @@ When searching for original audio files to extract audio from for creating `[ste
    - Concurrently exports `.ctbin`, `snapshots.bin`, `snapshots.js`, `manifest.json`, `report_data.json/js`, and `<stem>.html` for all stems (omitting common stem name prefixes from created stem output directories to keep path lengths short).
    - Collects all patterns derived by individual audio files (stems) and groups stems sharing the same original audio file. Overlapping pattern intervals are combined only among stems that share an original audio file.
    - Slicing of combined isolated loop WAVs (`[palettes]/[loops]/pattern_N.wav`) and pass-aligned stem WAVs (`[palettes]/[stems]/pattern_N.wav`) is performed directly into the overall `[loops]` and `[stems]` folders inside `[palettes]`, with audio samples extracted from each group's original audio file (or summed fallback for that group) without audio doubling. Individual stem output folders do not create separate `[loops]` or `[stems]` subdirectories, and pattern WAV slicing at the group level report is omitted.
-   - Modified flux WAV files (`<basename>_pitch_<03d>_<note_name>_modified_flux.wav`) are exported next to the pitch stems in `pitch_stems/`, normalized against the individual stem's peak flux and scaled by thinned percentile rank peak salience. Recombined modified flux WAV files (`<basename>_recombined_modified_flux.wav`) are exported to the `[flux]` subdirectory, normalized to their recombined peak amplitude, alongside the report data (`<basename>_flux_waveform_data.js`, holding the original audio and the raw and modified flux envelopes as base64 mono PCM) and an interactive report (`[flux]/index.html`) displaying peak (top) and trough (bottom) hash marks. Raw per-stem flux envelopes are not written as WAV files; they exist only in that report data.
+   - Modified flux WAV files (`<basename>_pitch_<03d>_<note_name>_modified_flux.wav`) are exported next to the pitch stems in `pitch_stems/`, normalized against the individual stem's peak flux and scaled by thinned percentile rank peak salience. Recombined modified flux WAV files (`<basename>_recombined_modified_flux.wav`) are exported to the `[flux]` subdirectory, normalized to their recombined peak amplitude. Raw per-stem flux envelopes are not written as WAV files; instead each source file's raw envelopes and the peak/trough sample indices detected on them are stored in `[flux]/<basename>_flux_envelopes.bin` (`FLUXENV1` header: magic, sample rate, total samples, channel count, stem count; then per stem its pitch, peak indices, trough indices and 16-bit mono raw envelope). The interactive report and its `<basename>_flux_waveform_data.js` data are not written during separation: `flux_report.exe` builds them on demand from that file, the `_modified_flux.wav` companions and the original audio (see below).
 5. **Per-Group HTML Reports Keyed to Original Audio**:
    - Stems are grouped by the original audio file located for each of them with `find_original_audio_for_stem` (the same parent-directory lookup used for `[stems]`/`[loops]` slicing). If that lookup fails, the `--original <path>` argument is used; if that supplies no path either, an error is printed for the group and no group report is written for it.
    - One interactive HTML report is generated per original audio file, uniquely named `group_<original audio basename>_pattern_analysis.html` (suffixed with a number if a name would collide) inside its own `[palettes]/group_<original audio basename>_pattern_analysis/` folder so per-group companion assets never overwrite each other.
@@ -51,28 +51,36 @@ When searching for original audio files to extract audio from for creating `[ste
 ## Executable Helper File Copying Workflow
 
 1. **`flux_separator.exe`**:
-   - When executed, `flux_separator.exe` searches its folder for `analyze_group.bat`, `analyze.exe`, and `song_builder.exe`, and copies any of these helper files found into the newly created `pitch_stems` directory. The originals are left in place.
+   - When executed, `flux_separator.exe` searches its folder for `analyze_group.bat`, `analyze.exe`, `song_builder.exe`, and `flux_report.exe`, and copies any of these helper files found into the newly created `pitch_stems` directory. The originals are left in place.
 
 2. **`analyze.exe` (group mode)**:
    - `analyze.exe --group` creates `[palettes]` and `[palettes]/[stems]`, and copies `song_builder.exe` from next to `analyze.exe` into `[palettes]/[stems]` as soon as that folder exists. The original is left in place, and if no `song_builder.exe` is found the run notes it and continues. `analyze_group.bat` only launches the analyzer and no longer copies anything.
 
+## On-Demand Flux Reports (`flux_report` / `flux_report.exe`)
+
+Separating audio no longer writes the multi-gigabyte `[flux]/<basename>_flux_waveform_data.js` data file or the report that loads it. `flux_separator` stores each source file's raw flux envelopes and peak/trough markers in `[flux]/<basename>_flux_envelopes.bin` instead, and copies `flux_report.exe` into `pitch_stems/`.
+
+Double-click `flux_report.exe` inside `pitch_stems/` (or run `./flux_report` there) when the reports are wanted. For every source file it finds stored report data for, it reads that data, the stem's `_modified_flux.wav` companion and the original audio (looked for in `pitch_stems/` and one folder up), then writes `[flux]/<basename>_flux_waveform_data.js`, `[flux]/<basename>_index.html`, and finally the `[flux]/index.html` batch dashboard. Running it again rebuilds the reports from the same on-disk sources; the stored report data itself is not rewritten.
+
 ## Existing Pitch Stem Skip Check
 
-Before a WAV file is decoded, `flux_separator` checks the `pitch_stems` folder for pitch stems already exported for that file (any WAV named `<basename>_pitch_<nnn>_<note>...`, which includes each stem's `_modified_flux.wav` companion). When at least one is found, the analysis for that file is skipped entirely and the run moves on to the next file; the console and the batch dashboard report the file as skipped rather than complete or failed. Files without existing stems in the same batch are still processed normally.
+Before a WAV file is decoded, `flux_separator` checks the `pitch_stems` folder for pitch stems already exported for that file (any WAV named `<basename>_pitch_<nnn>_<note>...`, which includes each stem's `_modified_flux.wav` companion) and for its `[flux]/<basename>_flux_envelopes.bin` report data. When both are found, the analysis for that file is skipped entirely and the run moves on to the next file; the console reports the file as skipped rather than complete or failed. A folder produced before the reports became on-demand has stems but no stored report data, so those files are separated again and the data is written. Files without existing stems in the same batch are still processed normally.
 
 ## Compilation
 
 To compile the analysis executables:
 
-- **Linux**: `make` (produces `analyze`, `song_builder`, and `flux_separator`)
+- **Linux**: `make` (produces `analyze`, `song_builder`, `flux_separator`, and `flux_report`)
 - **Windows (64-bit Cross-Compilation)**:
   - `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra analyze.c exporter.c cumulative_transience.c crossfade.c -o analyze.exe -lm -lpthread -lOpenCL`
   - `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra song_builder.c -o song_builder.exe -lm`
-  - `x86_64-w64-mingw32-gcc -O3 -Wall -std=c99 -I. -pthread flux_separator.c -o flux_separator.exe -lm`
+  - `x86_64-w64-mingw32-gcc -O3 -Wall -std=c99 -I. -pthread flux_separator.c flux_shared.c flux_envelope.c -o flux_separator.exe -lm`
+  - `x86_64-w64-mingw32-gcc -O3 -Wall -std=c99 -I. flux_report.c flux_report_html.c flux_shared.c -o flux_report.exe -lm`
 
 ## Executables Summary
 
-- **`flux_separator` / `flux_separator.exe`**: Multi-threaded C pitch separator generating spectral flux stems and interactive HTML reports. Automatically copies `analyze_group.bat`, `analyze.exe`, and `song_builder.exe` into `pitch_stems/`.
+- **`flux_separator` / `flux_separator.exe`**: Multi-threaded C pitch separator generating spectral flux WAVs and the stored raw-envelope report data that `flux_report` consumes. Automatically copies `analyze_group.bat`, `analyze.exe`, `song_builder.exe`, and `flux_report.exe` into `pitch_stems/`.
+- **`flux_report` / `flux_report.exe`**: Builds the on-demand `[flux]` reports (JS waveform data, per-file HTML reports, batch dashboard) from the stored envelopes, modified flux WAVs, and original audio. Double-clicked inside `pitch_stems/`.
 - **`analyze` / `analyze.exe`**: C cumulative transience analyzer generating palette pattern maps, loop/stem WAV slices, JSON manifests, and interactive HTML reports.
 - **`analyze_group.bat`**: Batch launcher for group stem analysis. Launches `analyze.exe --group`, which copies `song_builder.exe` into `[palettes]/[stems]/` itself, leaving the original in place.
 - **`song_builder` / `song_builder.exe`**: Evaluates correlation across candidate patterns using recombined flux audio envelopes. All prospective patterns in a potential song are added together sample index by sample index to form a summed envelope. The standard deviation across samples where more than one pattern is present (a pattern alone with itself does not count towards standard deviation) serves as the overall correlation metric. Patterns are sorted descending by active length and evaluated sequentially in a unified loop: starting with the longest pattern (zero correlation being better than null/uninitialized correlation), each subsequent candidate pattern in descending length order is tested and accepted if it increases overall standard deviation correlation, or rejected if it decreases or maintains correlation. Selected pattern WAV files are copied into `[stems]/[song]`, mixed into `[song]/finished_song.wav` normalized to peak 1.0 (omitting leading zero samples prior to the first non-zero sample so that the first non-zero sample is at index zero), and exported with an interactive HTML report (`song_correlation_report.html`, displaying patterns in the order they were judged, descending from longest to shortest) and companion JS data file (`song_correlation_waveform_data.js`).

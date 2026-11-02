@@ -85,14 +85,17 @@ repo, not just the one that created this file.
 
 - `analysis/` holds the C tools. `analyze.exe` builds from `analyze.c`,
   `exporter.c`, `cumulative_transience.c`, and `crossfade.c`;
-  `flux_separator.exe` builds from `flux_separator.c`.
+  `flux_separator.exe` builds from `flux_separator.c`, `flux_shared.c`, and
+  `flux_envelope.c`; `flux_report.exe` builds from `flux_report.c`,
+  `flux_report_html.c`, and `flux_shared.c`.
 - Windows build: `make analyze.exe` in `analysis/` with mingw-w64
   (`x86_64-w64-mingw32-gcc`) on PATH.
-- `analysis/analyze.exe`, `analysis/song_builder.exe`, and
-  `analysis/flux_separator.exe` are tracked in git on purpose. Whenever the
-  underlying C sources change, rebuild each affected `.exe` for Windows
-  (`make analyze.exe`, `make flux_separator.exe` in `analysis/`) and commit the
-  new binary together with the source change.
+- `analysis/analyze.exe`, `analysis/song_builder.exe`,
+  `analysis/flux_separator.exe`, and `analysis/flux_report.exe` are tracked in
+  git on purpose. Whenever the underlying C sources change, rebuild each
+  affected `.exe` for Windows (`make analyze.exe`, `make flux_separator.exe`,
+  `make flux_report.exe` in `analysis/`) and commit the new binary together with
+  the source change.
 - A cloud sandbox has no Windows runtime, so a rebuilt `.exe` can be compiled but
   not executed there. Say so plainly instead of implying it was tested; a Linux
   build of the same sources can be used to exercise the logic.
