@@ -4,14 +4,15 @@
  * Perfect Reconstruction Pitch Stem Separator - Spectral Flux Focus
  * Multi-File, Directory Scanning & Multi-Threaded Concurrent Execution
  *
- * Focuses strictly on deriving per-pitch-stem transience flux envelopes and
- * recombining them into the modified flux WAV the later tools consume.
+ * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
+ * exporting each stem's modified flux WAV next to the pitch stems, and
+ * recombining them into the [flux] modified flux WAV the later tools consume.
  *
- * A normal run writes only [flux]/<basename>_recombined_modified_flux.wav. The
- * per-stem _modified_flux.wav companions, their peak/trough markers and the
+ * A normal run writes pitch_stems/<basename>_pitch_<nnn>_<note>_modified_flux.wav
+ * for every audible stem and [flux]/<basename>_recombined_modified_flux.wav. The
  * [flux] HTML reports are debug artifacts, produced only when --debug is passed
- * (see flux_separator_debug.bat), so a normal run pays for no marker detection,
- * no 16-bit report arrays and no report writing.
+ * (see flux_separator_debug.bat), so a normal run pays for no peak/trough
+ * detection, no 16-bit report arrays and no report writing.
  *
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
@@ -304,13 +305,10 @@ static int pitch_stems_exist_for(const char *stem_dir, const char *basename) {
     return dir_contains_pitch_stems_for(stem_dir, basename);
 }
 
-/*
- * A normal (non-debug) run leaves only the recombined modified flux WAV in
- * [flux], so that file is what marks its work as already done.
- */
-static int flux_recombined_exists(const char *stem_dir, const char *basename) {
+/* Does <stem_dir>/<relative> exist? Used to tell whether a run is already done. */
+static int flux_output_exists(const char *stem_dir, const char *relative) {
     char path[8192];
-    snprintf(path, sizeof(path), "%s/[flux]/%s_recombined_modified_flux.wav", stem_dir, basename);
+    snprintf(path, sizeof(path), "%s/%s", stem_dir, relative);
 
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -1849,13 +1847,17 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     }
 
     /*
-     * A debug run leaves pitch stems and [flux] reports behind while a normal
-     * run leaves only the recombined flux WAV, so each mode checks for its own
-     * output rather than for files the other mode never writes.
+     * Exported pitch stems mean the work is done. A debug run also has to leave
+     * that file's [flux] report data behind, so a folder separated without debug
+     * is separated again when the reports are requested.
      */
-    int already_processed = debug_mode
-        ? (pitch_stems_exist_for(stem_dir, basename) && flux_recombined_exists(stem_dir, basename))
-        : flux_recombined_exists(stem_dir, basename);
+    char report_data_rel[4300];
+    snprintf(report_data_rel, sizeof(report_data_rel), "[flux]/%s_flux_waveform_data.js", basename);
+
+    int already_processed = pitch_stems_exist_for(stem_dir, basename);
+    if (already_processed && debug_mode) {
+        already_processed = flux_output_exists(stem_dir, report_data_rel);
+    }
 
     if (already_processed) {
         if (result) result->skipped = 1;
@@ -1863,7 +1865,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         if (debug_mode) {
             printf("  Skipping %s: pitch stems and reports already exist for it.\n", input_path);
         } else {
-            printf("  Skipping %s: its recombined flux WAV already exists.\n", input_path);
+            printf("  Skipping %s: pitch stems already exist for it.\n", input_path);
         }
         fflush(stdout);
         pthread_mutex_unlock(&g_console_mutex);
@@ -2197,8 +2199,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
 
-        // Export the companion modified flux WAV file immediately (debug only)
-        if (debug_mode && mod_flux_buf) {
+        // Export the companion modified flux WAV file immediately: this is the
+        // stem audio the analyzer consumes.
+        if (mod_flux_buf) {
             char mod_flux_filepath[4096];
             snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
                      stem_dir, stem->mod_filename);
@@ -2464,8 +2467,8 @@ int main(int argc, char *argv[]) {
     printf("  Worker Threads:    %d\n", num_threads);
     printf("  Output Directory:  %s/\n", stem_dir);
     printf("  Debug Output:      %s\n\n", debug_mode
-           ? "enabled (stems, markers and [flux] reports)"
-           : "disabled (recombined flux WAV only)");
+           ? "enabled (markers and [flux] reports)"
+           : "disabled (no [flux] reports)");
 
     int is_tty = 1;
 #if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
@@ -2544,7 +2547,7 @@ int main(int argc, char *argv[]) {
     if (debug_mode) {
         printf("  Batch Report URL:       %s/index.html\n", flux_dir);
     } else {
-        printf("  Debug Output:           disabled (double-click flux_separator_debug.bat for stems and reports)\n");
+        printf("  Debug Output:           disabled (double-click flux_separator_debug.bat for the flux reports)\n");
     }
     printf("====================================================\n");
 
