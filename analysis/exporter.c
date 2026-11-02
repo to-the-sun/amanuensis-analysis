@@ -2124,9 +2124,11 @@ static int export_single_stem_assets_from_res(
     free(patterns);
 
     // Export HTML Report File with full JS renderer functions
-    // Play the on-disk original audio file directly when one is supplied (group reports)
-    // instead of copying that audio next to the HTML report.
+    // Play the on-disk audio file the report was analyzed against. Report folders
+    // never keep their own copy of that audio, so a report whose audio could not be
+    // resolved gets an empty player instead of guessing at a local file name.
     char audio_src_url[4096];
+    audio_src_url[0] = '\0';
     if (html_audio_src_path && html_audio_src_path[0] != '\0') {
         char relative_audio_path[4096];
         make_relative_audio_path(output_dir, html_audio_src_path, relative_audio_path, sizeof(relative_audio_path));
@@ -2135,9 +2137,7 @@ static int export_single_stem_assets_from_res(
         }
         url_encode_filename(relative_audio_path, audio_src_url, sizeof(audio_src_url));
     } else {
-        char local_audio_name[2048];
-        snprintf(local_audio_name, sizeof(local_audio_name), "%s.wav", stem_name);
-        url_encode_filename(local_audio_name, audio_src_url, sizeof(audio_src_url));
+        ERRPRINTF("Warning: no audio file was resolved for report '%s', so its player has no source.\n", stem_name);
     }
 
     char html_filepath[4096];
@@ -2206,7 +2206,11 @@ static int export_single_stem_assets_from_res(
 
         fprintf(f_html, "    <div class=\"section-title\">1. Interactive Audio Waveform & Pattern Map</div>\n");
         fprintf(f_html, "    <div class=\"audio-controls\">\n");
-        fprintf(f_html, "        <audio id=\"audioPlayer\" controls src=\"%s\"></audio>\n", audio_src_url);
+        if (audio_src_url[0] != '\0') {
+            fprintf(f_html, "        <audio id=\"audioPlayer\" controls src=\"%s\"></audio>\n", audio_src_url);
+        } else {
+            fprintf(f_html, "        <audio id=\"audioPlayer\" controls></audio>\n");
+        }
         fprintf(f_html, "    </div>\n");
 
         fprintf(f_html, "    <div class=\"canvas-container\">\n");
@@ -3519,31 +3523,6 @@ static void process_single_stem_export(
     snprintf(stem_output_dir, sizeof(stem_output_dir), "%s" PATH_SEP_STR "[palettes]" PATH_SEP_STR "%s", parent_dir, stem->stem_name);
     if (mkdir_p(stem_output_dir) != 0) {
         ERRPRINTF("Error: could not create the report folder for stem '%s': %s\n", stem->stem_name, stem_output_dir);
-    }
-
-    // Copy audio WAV file into stem palette output directory as <stem_name>.wav
-    char dst_stem_audio_path[4096];
-    snprintf(dst_stem_audio_path, sizeof(dst_stem_audio_path), "%s" PATH_SEP_STR "%s.wav", stem_output_dir, stem->stem_name);
-
-    FILE* src_f = fopen(stem->audio_filepath, "rb");
-    if (src_f) {
-        FILE* dst_f = fopen_diag(dst_stem_audio_path, "wb", "copy stem audio into the report folder");
-        if (dst_f) {
-            char buf[65536];
-            size_t bytes_read;
-            while ((bytes_read = fread(buf, 1, sizeof(buf), src_f)) > 0) {
-                size_t wrote = fwrite(buf, 1, bytes_read, dst_f);
-                if (wrote != bytes_read) {
-                    report_fs_failure("write stem audio copy", dst_stem_audio_path, errno ? errno : EIO);
-                    break;
-                }
-            }
-            fclose_diag(dst_f, dst_stem_audio_path, "copy stem audio into the report folder");
-        }
-        fclose(src_f);
-    } else {
-        ERRPRINTF("Error: could not read the stem audio for '%s': %s\n",
-                  stem->stem_name, stem->audio_filepath ? stem->audio_filepath : "(null)");
     }
 
     // Overall [loops] and [stems] target folders inside parent [palettes]
