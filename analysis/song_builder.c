@@ -182,6 +182,158 @@ static double compute_correlation_ext(
     return sqrt(var);
 }
 
+typedef struct {
+    double* val;
+    int* active;
+    uint64_t frames;
+    double sum;
+    double sum_sq;
+    uint64_t qualifying;
+} CorrAccumulator;
+
+static double corr_stats_to_stddev(double sum, double sum_sq, uint64_t count) {
+    if (count == 0) {
+        return 0.0;
+    }
+    double mean = sum / (double)count;
+    double var = (sum_sq / (double)count) - (mean * mean);
+    if (var < 0.0) var = 0.0;
+    return sqrt(var);
+}
+
+// Incrementally add one pattern to the summed envelope, keeping the running
+// standard-deviation statistics identical to compute_correlation_ext().
+static void accumulator_add(CorrAccumulator* acc, const PatternInfo* pat) {
+    if (!pat->recombined_samples) return;
+
+    uint64_t frames = pat->total_frames < acc->frames ? pat->total_frames : acc->frames;
+    for (uint64_t t = 0; t < frames; t++) {
+        double contribution = fabs((double)pat->recombined_samples[t]);
+        if (contribution <= 1e-6) continue;
+
+        double old_val = acc->val[t];
+        int old_active = acc->active[t];
+        double new_val = old_val + contribution;
+
+        acc->val[t] = new_val;
+        acc->active[t] = old_active + 1;
+
+        if (old_active == 0) {
+            // A single pattern at this sample does not qualify for the metric.
+        } else if (old_active == 1) {
+            acc->sum += new_val;
+            acc->sum_sq += new_val * new_val;
+            acc->qualifying++;
+        } else {
+            acc->sum += new_val - old_val;
+            acc->sum_sq += new_val * new_val - old_val * old_val;
+        }
+    }
+}
+
+static void accumulator_remove(CorrAccumulator* acc, const PatternInfo* pat) {
+    if (!pat->recombined_samples) return;
+
+    uint64_t frames = pat->total_frames < acc->frames ? pat->total_frames : acc->frames;
+    for (uint64_t t = 0; t < frames; t++) {
+        double contribution = fabs((double)pat->recombined_samples[t]);
+        if (contribution <= 1e-6) continue;
+
+        double old_val = acc->val[t];
+        int old_active = acc->active[t];
+        double new_val = old_val - contribution;
+
+        acc->val[t] = new_val;
+        acc->active[t] = old_active - 1;
+
+        if (old_active <= 1) {
+            // Drops back to (or stays at) a single pattern: no longer qualifies.
+        } else if (old_active == 2) {
+            acc->sum -= old_val;
+            acc->sum_sq -= old_val * old_val;
+            acc->qualifying--;
+        } else {
+            acc->sum += new_val - old_val;
+            acc->sum_sq += new_val * new_val - old_val * old_val;
+        }
+    }
+}
+
+typedef struct {
+    int* best_indices;
+    int best_count;
+    double best_corr;
+    int* scratch;
+} CombinationSearch;
+
+// Depth-first enumeration of every subset of the candidate patterns. Because the
+// accumulator is mutated in place and undone on the way back up, each of the
+// 2^n - 1 combinations costs only the samples where the added pattern is active.
+static void search_combinations_recursive(
+    CorrAccumulator* acc,
+    const PatternInfo* patterns,
+    int num_eligible,
+    int start_index,
+    int current_count,
+    uint64_t* steps,
+    uint64_t total_combinations,
+    CombinationSearch* search
+) {
+    for (int i = start_index; i < num_eligible; i++) {
+        search->scratch[current_count] = i;
+        accumulator_add(acc, &patterns[i]);
+        (*steps)++;
+
+        int count = current_count + 1;
+        double corr = corr_stats_to_stddev(acc->sum, acc->sum_sq, acc->qualifying);
+
+        bool better = false;
+        if (corr > search->best_corr) {
+            better = true;
+        } else if (corr == search->best_corr) {
+            // Equal correlation: prefer the smaller combination, then the one
+            // whose candidates appear earliest (i.e. the longest patterns first).
+            if (search->best_count == 0 || count < search->best_count) {
+                better = true;
+            } else if (count == search->best_count) {
+                for (int k = 0; k < count; k++) {
+                    if (search->scratch[k] != search->best_indices[k]) {
+                        better = search->scratch[k] < search->best_indices[k];
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (better) {
+            for (int k = 0; k < count; k++) {
+                search->best_indices[k] = search->scratch[k];
+            }
+            search->best_count = count;
+            search->best_corr = corr;
+
+            if (total_combinations > 0) {
+                printf("[Best] %2d pattern(s), correlation %.6f (combination %llu of %llu)\n",
+                       count, corr, (unsigned long long)*steps, (unsigned long long)total_combinations);
+            } else {
+                printf("[Best] %2d pattern(s), correlation %.6f (combination %llu)\n",
+                       count, corr, (unsigned long long)*steps);
+            }
+        }
+
+        if (total_combinations > 0 && (*steps % 200000ULL) == 0 && *steps != total_combinations) {
+            printf("[Progress] %llu / %llu combinations evaluated (%.2f%%)\n",
+                   (unsigned long long)*steps,
+                   (unsigned long long)total_combinations,
+                   100.0 * (double)*steps / (double)total_combinations);
+        }
+
+        search_combinations_recursive(acc, patterns, num_eligible, i + 1, count, steps, total_combinations, search);
+
+        accumulator_remove(acc, &patterns[i]);
+    }
+}
+
 static int compare_patterns_by_length_desc(const void* a, const void* b) {
     const PatternInfo* pa = (const PatternInfo*)a;
     const PatternInfo* pb = (const PatternInfo*)b;
@@ -961,7 +1113,7 @@ int main(int argc, char** argv) {
                i + 1, patterns[i].stem_filename, (unsigned long long)patterns[i].active_length);
     }
 
-    printf("\nEvaluating pattern selection based on song correlation metric...\n\n");
+    printf("\nEvaluating every possible pattern combination based on song correlation metric...\n\n");
 
     int* selected_indices = (int*)malloc((size_t)num_patterns * sizeof(int));
     int num_selected = 0;
@@ -979,50 +1131,111 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Sequential pattern testing in descending length order through a single unified loop.
-    // When no patterns are selected, correlation is null (NaN). Zero correlation (e.g. from the first
-    // pattern having no multi-pattern overlap yet) is considered better than null (NaN) correlation.
-    current_song_correlation = NAN;
-
+    // Patterns are sorted descending by active length, so the patterns carrying any
+    // audio at all sit at the front of the list.
+    int num_eligible = 0;
     for (int i = 0; i < num_patterns; i++) {
-        if (patterns[i].active_length == 0) {
-            continue;
+        if (patterns[i].active_length > 0) {
+            num_eligible++;
         }
+    }
 
-        for (int k = 0; k < num_selected; k++) {
-            test_set[k] = selected_indices[k];
-        }
-        test_set[num_selected] = i;
+    if (num_eligible == 0) {
+        printf("No candidate patterns with audio content to combine.\n");
+        current_song_correlation = NAN;
+    } else {
+        uint64_t total_combinations = (num_eligible < 63) ? ((1ULL << num_eligible) - 1ULL) : UINT64_MAX;
 
-        double proposed_corr = compute_correlation_ext(patterns, test_set, num_selected + 1);
-        patterns[i].judgment_overall_corr_pct = proposed_corr;
-
-        bool is_increase = false;
-        if (isnan(current_song_correlation)) {
-            // First pattern: zero correlation is better than null/NaN correlation
-            is_increase = true;
-        } else if (proposed_corr > current_song_correlation) {
-            is_increase = true;
-        }
-
-        if (is_increase) {
-            patterns[i].selected = true;
-            patterns[i].selection_order = num_selected;
-            selected_indices[num_selected++] = i;
-
-            if (isnan(current_song_correlation)) {
-                printf("[ACCEPT] %s (Rank %d) added. Song Correlation initialized: null -> %.6f\n",
-                       patterns[i].stem_filename, i + 1, proposed_corr);
-            } else {
-                printf("[ACCEPT] %s (Rank %d) added. Song Correlation increased: %.6f -> %.6f\n",
-                       patterns[i].stem_filename, i + 1, current_song_correlation, proposed_corr);
-            }
-            current_song_correlation = proposed_corr;
+        if (total_combinations == UINT64_MAX) {
+            printf("Exhaustively evaluating every combination of %d patterns (more than 2^62 combinations).\n\n",
+                   num_eligible);
+            total_combinations = 0;
         } else {
-            patterns[i].selection_order = num_selected;
-            printf("[REJECT] %s (Rank %d) proposed correlation %.6f <= current %.6f\n",
-                   patterns[i].stem_filename, i + 1, proposed_corr, current_song_correlation);
+            printf("Exhaustively evaluating every combination of %d patterns (%llu combinations).\n\n",
+                   num_eligible, (unsigned long long)total_combinations);
+            if (num_eligible > 20) {
+                printf("[Warning] An exhaustive search of %d patterns evaluates 2^%d - 1 combinations and may take a long time.\n\n",
+                       num_eligible, num_eligible);
+            }
         }
+
+        uint64_t accum_frames = 0;
+        for (int i = 0; i < num_eligible; i++) {
+            if (patterns[i].recombined_samples && patterns[i].total_frames > accum_frames) {
+                accum_frames = patterns[i].total_frames;
+            }
+        }
+
+        int* best_indices = (int*)malloc((size_t)num_eligible * sizeof(int));
+        int* scratch_indices = (int*)malloc((size_t)num_eligible * sizeof(int));
+
+        CorrAccumulator acc;
+        acc.frames = accum_frames;
+        acc.val = (double*)calloc((size_t)(accum_frames > 0 ? accum_frames : 1), sizeof(double));
+        acc.active = (int*)calloc((size_t)(accum_frames > 0 ? accum_frames : 1), sizeof(int));
+        acc.sum = 0.0;
+        acc.sum_sq = 0.0;
+        acc.qualifying = 0;
+
+        CombinationSearch search;
+        search.best_indices = best_indices;
+        search.scratch = scratch_indices;
+        search.best_count = 0;
+        search.best_corr = -1.0;
+
+        uint64_t steps = 0;
+        if (accum_frames > 0 && best_indices && scratch_indices && acc.val && acc.active) {
+            search_combinations_recursive(&acc, patterns, num_eligible, 0, 0, &steps, total_combinations, &search);
+        }
+
+        printf("\nExhaustive search complete: %llu combination(s) evaluated.\n", (unsigned long long)steps);
+
+        num_selected = search.best_count;
+        for (int s = 0; s < num_selected; s++) {
+            int idx = search.best_indices[s];
+            selected_indices[s] = idx;
+            patterns[idx].selected = true;
+            patterns[idx].selection_order = s;
+        }
+
+        // Recompute through the canonical function so the reported correlation matches
+        // exactly what compute_correlation_ext() yields for the winning combination.
+        current_song_correlation = (num_selected > 0)
+            ? compute_correlation_ext(patterns, selected_indices, num_selected)
+            : NAN;
+
+        for (int s = 0; s < num_selected; s++) {
+            patterns[selected_indices[s]].judgment_overall_corr_pct = current_song_correlation;
+        }
+
+        // Rejected patterns report the correlation the song would have if they were added
+        // to the best combination, which by construction is never higher than the best.
+        for (int i = 0; i < num_eligible; i++) {
+            if (patterns[i].selected) continue;
+            for (int k = 0; k < num_selected; k++) {
+                test_set[k] = selected_indices[k];
+            }
+            test_set[num_selected] = i;
+            patterns[i].judgment_overall_corr_pct = compute_correlation_ext(patterns, test_set, num_selected + 1);
+        }
+
+        printf("\nMost highly correlated combination selected:\n");
+        if (num_selected > 0) {
+            for (int s = 0; s < num_selected; s++) {
+                int idx = selected_indices[s];
+                printf("  %d. %s (Active Length: %llu smp) Song Correlation: %.6f\n",
+                       s + 1, patterns[idx].stem_filename,
+                       (unsigned long long)patterns[idx].active_length,
+                       current_song_correlation);
+            }
+        } else {
+            printf("  (none)\n");
+        }
+
+        free(best_indices);
+        free(scratch_indices);
+        free(acc.val);
+        free(acc.active);
     }
 
     char song_dir[4096];
