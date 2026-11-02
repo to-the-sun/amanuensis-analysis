@@ -93,6 +93,7 @@ typedef struct {
     double elapsed_sec;
     double speed_ratio;
     int success;
+    int skipped;
 } FileBatchResult;
 
 const char *NOTE_NAMES[12] = {
@@ -255,6 +256,53 @@ static int contains_icase(const char *haystack, const char *needle) {
         }
         if (match) return 1;
     }
+    return 0;
+}
+
+static int starts_with_icase(const char *str, const char *prefix) {
+    if (!str || !prefix) return 0;
+    size_t plen = strlen(prefix);
+    if (strlen(str) < plen) return 0;
+    for (size_t i = 0; i < plen; i++) {
+        if (tolower((unsigned char)str[i]) != tolower((unsigned char)prefix[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * Returns 1 when the directory holds any pitch stem WAV exported for the given
+ * source basename. Raw and modified flux stems are named
+ * "<basename>_pitch_<nnn>_<note>_flux.wav" and
+ * "<basename>_pitch_<nnn>_<note>_modified_flux.wav", so the "<basename>_pitch_"
+ * prefix identifies stems belonging to exactly this source file.
+ */
+static int dir_contains_pitch_stems_for(const char *dir_path, const char *basename) {
+    DIR *d = opendir(dir_path);
+    if (!d) return 0;
+
+    char prefix[1024];
+    snprintf(prefix, sizeof(prefix), "%s_pitch_", basename);
+
+    int found = 0;
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (starts_with_icase(entry->d_name, prefix) && ends_with_icase(entry->d_name, ".wav")) {
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+static int pitch_stems_exist_for(const char *stem_dir, const char *basename) {
+    char flux_dir[8192];
+    snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
+
+    if (dir_contains_pitch_stems_for(stem_dir, basename)) return 1;
+    if (dir_contains_pitch_stems_for(flux_dir, basename)) return 1;
     return 0;
 }
 
@@ -1313,7 +1361,7 @@ void generate_master_flux_html_report(
     FILE *f = fopen(master_html_path, "w");
     if (!f) return;
 
-    if (num_results == 1 && results[0].success) {
+    if (num_results == 1 && (results[0].success || results[0].skipped)) {
         /* Single file redirect to <basename>_index.html */
         fprintf(f, "<!DOCTYPE html>\n<html>\n<head>\n");
         fprintf(f, "<meta http-equiv=\"refresh\" content=\"0; url=%s_index.html\">\n", results[0].basename);
@@ -1344,6 +1392,7 @@ void generate_master_flux_html_report(
         fprintf(f, "  .status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; font-family: monospace; }\n");
         fprintf(f, "  .badge-success { background: #1b5e20; color: #81c784; }\n");
         fprintf(f, "  .badge-fail { background: #b71c1c; color: #e57373; }\n");
+    fprintf(f, "  .badge-skip { background: #4a3b12; color: #ffd54f; }\n");
         fprintf(f, "</style>\n</head>\n<body>\n");
 
         fprintf(f, "<header>\n");
@@ -1360,12 +1409,19 @@ void generate_master_flux_html_report(
             fprintf(f, "  <div class=\"card\">\n");
             fprintf(f, "    <div class=\"card-title\" title=\"%s\">%s.wav</div>\n", r->basename, r->basename);
             fprintf(f, "    <div class=\"card-meta\">\n");
-            fprintf(f, "      <span>Status: %s</span>\n", r->success ? "<span class=\"status-badge badge-success\">COMPLETE</span>" : "<span class=\"status-badge badge-fail\">FAILED</span>");
+            fprintf(f, "      <span>Status: %s</span>\n", r->skipped
+                ? "<span class=\"status-badge badge-skip\">SKIPPED (EXISTING STEMS)</span>"
+                : (r->success
+                    ? "<span class=\"status-badge badge-success\">COMPLETE</span>"
+                    : "<span class=\"status-badge badge-fail\">FAILED</span>"));
+            if (r->skipped) {
+                fprintf(f, "      <span>Pitch stems already existed; analysis skipped.</span>\n");
+            }
             fprintf(f, "      <span>Duration: %.2fs (%u Hz, %s)</span>\n", r->duration, r->sample_rate, r->num_channels == 1 ? "Mono" : "Stereo");
             fprintf(f, "      <span>Flux Stems Exported: %d</span>\n", r->stem_count);
             fprintf(f, "      <span>Processing Time: %.2fs (%.1fx Real-Time)</span>\n", r->elapsed_sec, r->speed_ratio);
             fprintf(f, "    </div>\n");
-            if (r->success) {
+            if (r->success || r->skipped) {
                 fprintf(f, "    <a class=\"btn\" href=\"%s_index.html\">Open Interactive Report &rarr;</a>\n", r->basename);
             }
             fprintf(f, "  </div>\n");
@@ -1778,6 +1834,17 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         memset(result, 0, sizeof(FileBatchResult));
         snprintf(result->input_path, sizeof(result->input_path), "%s", input_path);
         snprintf(result->basename, sizeof(result->basename), "%s", basename);
+    }
+
+    /* Existing pitch stems for this file mean the work is already done: skip it. */
+    if (pitch_stems_exist_for(stem_dir, basename)) {
+        if (result) result->skipped = 1;
+        pthread_mutex_lock(&g_console_mutex);
+        printf("  Skipping %s: pitch stems already exist for it.\n", input_path);
+        fflush(stdout);
+        pthread_mutex_unlock(&g_console_mutex);
+        print_multithreaded_progress(thread_slot, num_slots, basename, "Skipped", 100, 100, 0.0);
+        return 1;
     }
 
     print_multithreaded_progress(thread_slot, num_slots, basename, "Reading", 0, 100, 0.0);
@@ -2410,14 +2477,19 @@ int main(int argc, char *argv[]) {
     generate_master_flux_html_report(flux_dir, stem_dir, results, num_files, total_wall_clock_sec);
 
     int total_success = 0;
+    int total_skipped = 0;
     for (int i = 0; i < num_files; i++) {
         if (results[i].success) total_success++;
+        if (results[i].skipped) total_skipped++;
     }
 
     printf("====================================================\n");
     printf("             BATCH PROCESSING COMPLETE              \n");
     printf("====================================================\n");
     printf("  Successfully Processed: %d / %d WAV files\n", total_success, num_files);
+    if (total_skipped > 0) {
+        printf("  Skipped (Stems Exist):  %d / %d WAV files\n", total_skipped, num_files);
+    }
     printf("  Total Wall-Clock Time:  %.2f seconds\n", total_wall_clock_sec);
     printf("  Output Stem Folder:     %s/\n", stem_dir);
     printf("  Batch Report URL:       %s/index.html\n", flux_dir);
@@ -2430,5 +2502,5 @@ int main(int argc, char *argv[]) {
     free(results);
 
     wait_for_keypress();
-    return (total_success == num_files) ? 0 : 1;
+    return (total_success + total_skipped == num_files) ? 0 : 1;
 }

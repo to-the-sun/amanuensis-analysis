@@ -31,9 +31,15 @@ repo, not just the one that created this file.
   after it exits`.
 - Body: a short paragraph on why the change was made (the problem it fixes), not
   a list of what was edited. Wrap around 72 columns.
-- Commits are a collaboration between the user and Codebuff, and every commit
-  credits both. The git author is the user's own GitHub identity, and Codebuff
-  appears as a co-author through this trailer:
+- Commits are a collaboration between the user and Codebuff, and every single
+  commit credits both — no exceptions, including small follow-ups,
+  documentation-only commits, `.exe` rebuild commits and amended commits.
+  Credit means two things together, and a commit missing either one is wrong:
+  1. the git **author** is the user's own GitHub identity, and
+  2. the message body ends with the **`Co-Authored-By: Codebuff`** trailer below,
+     which is the only place GitHub shows Codebuff's part (the commit list shows
+     the author alone, so a missing trailer is invisible there and the commit
+     reads as the user's own unaided work).
 
   ```
   🤖 Generated with Codebuff
@@ -60,6 +66,20 @@ repo, not just the one that created this file.
 - Do not commit as Codebuff alone, and do not use the user's identity without the
   co-author trailer; either one misattributes the commit. Change the credit only
   when the user explicitly asks.
+- Check the commit you just made before you push anything:
+
+  ```
+  git log -1 --format='%an <%ae>%n%B'
+  ```
+
+  The first line must be the user's identity and the body must end with the two
+  trailer lines. If the author is the user but the trailer is missing, or the
+  author is Codebuff, the commit is misattributed: amend it (`git commit
+  --amend`) until both are right, then push. Never treat the trailer as optional
+  or assume it was added — verify it.
+- If a misattributed commit has already been pushed, do not rewrite it with a
+  force-push on your own. Tell the user which commit is affected and ask whether
+  to amend and force-push that branch.
 
 ## Building the analyzer
 
