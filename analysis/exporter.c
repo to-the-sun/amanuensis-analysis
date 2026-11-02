@@ -3951,7 +3951,6 @@ int export_group_assets_and_html(
         if (stems[i].audio_filepath &&
             find_original_audio_for_stem(exe_dir, stems[i].audio_filepath, resolved_path, sizeof(resolved_path))) {
             stem_orig_paths[i] = strdup(resolved_path);
-            printf("[Group Mode] Resolved original audio for stem '%s': %s\n", stems[i].stem_name, resolved_path);
         } else if (original_audio_filepath && original_audio_filepath[0] != '\0') {
             stem_orig_paths[i] = strdup(original_audio_filepath);
             printf("[Group Mode] Using --original audio for stem '%s': %s\n", stems[i].stem_name, original_audio_filepath);
