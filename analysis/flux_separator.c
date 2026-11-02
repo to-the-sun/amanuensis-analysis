@@ -5,12 +5,16 @@
  * Multi-File, Directory Scanning & Multi-Threaded Concurrent Execution
  *
  * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
- * generating modified flux envelopes via peak salience, and exporting companion
- * _modified_flux.wav files next to the pitch stems.
+ * generating modified flux envelopes via peak salience, and exporting the
+ * recombined modified flux WAV that the later tools consume.
  *
- * The [flux] report data and dashboards are no longer built during separation:
- * flux_report.exe is copied into pitch_stems/ and rebuilds them on demand from
- * the WAVs left on disk, so no multi-gigabyte data file is written here.
+ * Only [flux]/<basename>_recombined_modified_flux.wav is written by a normal
+ * run. The per-stem _modified_flux.wav companions and the [flux] report data
+ * are debug artifacts: they are produced only when --debug is passed (see
+ * flux_separator_debug.bat), so a normal run spends no time detecting peak and
+ * trough markers or writing files nothing downstream reads. The reports stay on
+ * demand in either case: flux_report.exe builds them from the stored report
+ * data when it exists.
  *
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
@@ -119,6 +123,20 @@ static int pitch_stems_exist_for(const char *stem_dir, const char *basename) {
 static int flux_report_data_exists(const char *stem_dir, const char *basename) {
     char path[8192];
     snprintf(path, sizeof(path), "%s/[flux]/%s_flux_envelopes.bin", stem_dir, basename);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/*
+ * A normal (non-debug) run leaves only the recombined modified flux WAV in
+ * [flux], so that file is what marks the work as already done.
+ */
+static int flux_recombined_exists(const char *stem_dir, const char *basename) {
+    char path[8192];
+    snprintf(path, sizeof(path), "%s/[flux]/%s_recombined_modified_flux.wav", stem_dir, basename);
 
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -476,7 +494,7 @@ static void copy_helper_files_to_pitch_stems(const char *dir, const char *stem_d
     }
 }
 
-int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int thread_slot, int num_slots) {
+int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int thread_slot, int num_slots, int debug_mode) {
     clock_t start_clock = clock();
 
     init_fft_tables();
@@ -490,11 +508,23 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         snprintf(result->basename, sizeof(result->basename), "%s", basename);
     }
 
-    /* Existing pitch stems and their report data mean the work is already done. */
-    if (pitch_stems_exist_for(stem_dir, basename) && flux_report_data_exists(stem_dir, basename)) {
+    /*
+     * A debug run leaves pitch stems and report data behind, while a normal run
+     * leaves only the recombined flux WAV, so each mode checks for its own
+     * output rather than for files the other mode never writes.
+     */
+    int already_processed = debug_mode
+        ? (pitch_stems_exist_for(stem_dir, basename) && flux_report_data_exists(stem_dir, basename))
+        : flux_recombined_exists(stem_dir, basename);
+
+    if (already_processed) {
         if (result) result->skipped = 1;
         pthread_mutex_lock(&g_console_mutex);
-        printf("  Skipping %s: pitch stems and report data already exist for it.\n", input_path);
+        if (debug_mode) {
+            printf("  Skipping %s: pitch stems and report data already exist for it.\n", input_path);
+        } else {
+            printf("  Skipping %s: its recombined flux WAV already exists.\n", input_path);
+        }
         fflush(stdout);
         pthread_mutex_unlock(&g_console_mutex);
         print_multithreaded_progress(thread_slot, num_slots, basename, "Skipped", 100, 100, 0.0);
@@ -673,7 +703,10 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     snprintf(envelope_path, sizeof(envelope_path), "%s/%s_flux_envelopes.bin", flux_dir, basename);
     snprintf(envelope_part_path, sizeof(envelope_part_path), "%s.part", envelope_path);
 
-    FILE *envelope_file = fopen(envelope_part_path, "wb");
+    FILE *envelope_file = NULL;
+    if (debug_mode) {
+        envelope_file = fopen(envelope_part_path, "wb");
+    }
     if (envelope_file) {
         uint16_t header_channels = num_channels;
         uint16_t header_reserved = 0;
@@ -792,56 +825,59 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         char note_name[32];
         get_note_name(p, note_name, sizeof(note_name));
 
-        char mod_filename[1024];
-        snprintf(mod_filename, sizeof(mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
-                 basename, p, note_name);
+        /*
+         * Report data is a debug artifact. Marker detection walks the whole
+         * envelope of every stem and nothing downstream reads the result, so it
+         * is skipped outright unless --debug asked for it.
+         */
+        if (debug_mode) {
+            // Detect peak and trough markers on channel 0 of the raw flux envelope
+            int *peaks = NULL;
+            int *troughs = NULL;
+            int num_peaks = 0;
+            int num_troughs = 0;
 
-        // Detect peak and trough markers on channel 0 of the raw flux envelope
-        int *peaks = NULL;
-        int *troughs = NULL;
-        int num_peaks = 0;
-        int num_troughs = 0;
-
-        double *ch0_flux = (double*)malloc((size_t)total_samples * sizeof(double));
-        if (ch0_flux) {
-            for (uint32_t s = 0; s < total_samples; s++) {
-                ch0_flux[s] = raw_flux_buf[(size_t)s * num_channels];
-            }
-            detect_all_peaks(ch0_flux, total_samples, &peaks, &num_peaks);
-            detect_all_troughs(ch0_flux, total_samples, &troughs, &num_troughs);
-            free(ch0_flux);
-        }
-
-        if (envelope_file) {
-            int32_t pitch_written = (int32_t)p;
-            int32_t peaks_written = (int32_t)num_peaks;
-            int32_t troughs_written = (int32_t)num_troughs;
-
-            fwrite(&pitch_written, sizeof(int32_t), 1, envelope_file);
-            fwrite(&peaks_written, sizeof(int32_t), 1, envelope_file);
-            if (num_peaks > 0) fwrite(peaks, sizeof(int32_t), (size_t)num_peaks, envelope_file);
-            fwrite(&troughs_written, sizeof(int32_t), 1, envelope_file);
-            if (num_troughs > 0) fwrite(troughs, sizeof(int32_t), (size_t)num_troughs, envelope_file);
-
-            int16_t *mono_flux = (int16_t*)malloc((size_t)total_samples * sizeof(int16_t));
-            if (mono_flux) {
+            double *ch0_flux = (double*)malloc((size_t)total_samples * sizeof(double));
+            if (ch0_flux) {
                 for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += raw_flux_buf[(size_t)s * num_channels + c];
-                    }
-                    double val = sum_f / (double)num_channels;
-                    if (val > 1.0) val = 1.0;
-                    if (val < 0.0) val = 0.0;
-                    mono_flux[s] = (int16_t)round(val * 32767.0);
+                    ch0_flux[s] = raw_flux_buf[(size_t)s * num_channels];
                 }
-                fwrite(mono_flux, sizeof(int16_t), (size_t)total_samples, envelope_file);
-                free(mono_flux);
+                detect_all_peaks(ch0_flux, total_samples, &peaks, &num_peaks);
+                detect_all_troughs(ch0_flux, total_samples, &troughs, &num_troughs);
+                free(ch0_flux);
             }
-        }
 
-        if (peaks) free(peaks);
-        if (troughs) free(troughs);
+            if (envelope_file) {
+                int32_t pitch_written = (int32_t)p;
+                int32_t peaks_written = (int32_t)num_peaks;
+                int32_t troughs_written = (int32_t)num_troughs;
+
+                fwrite(&pitch_written, sizeof(int32_t), 1, envelope_file);
+                fwrite(&peaks_written, sizeof(int32_t), 1, envelope_file);
+                if (num_peaks > 0) fwrite(peaks, sizeof(int32_t), (size_t)num_peaks, envelope_file);
+                fwrite(&troughs_written, sizeof(int32_t), 1, envelope_file);
+                if (num_troughs > 0) fwrite(troughs, sizeof(int32_t), (size_t)num_troughs, envelope_file);
+
+                int16_t *mono_flux = (int16_t*)malloc((size_t)total_samples * sizeof(int16_t));
+                if (mono_flux) {
+                    for (uint32_t s = 0; s < total_samples; s++) {
+                        double sum_f = 0.0;
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            sum_f += raw_flux_buf[(size_t)s * num_channels + c];
+                        }
+                        double val = sum_f / (double)num_channels;
+                        if (val > 1.0) val = 1.0;
+                        if (val < 0.0) val = 0.0;
+                        mono_flux[s] = (int16_t)round(val * 32767.0);
+                    }
+                    fwrite(mono_flux, sizeof(int16_t), (size_t)total_samples, envelope_file);
+                    free(mono_flux);
+                }
+            }
+
+            if (peaks) free(peaks);
+            if (troughs) free(troughs);
+        }
 
         double *mod_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
         if (mod_flux_buf) {
@@ -869,11 +905,12 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
 
-        // Export the companion modified flux WAV file immediately
-        if (mod_flux_buf) {
+        // Export the companion modified flux WAV file immediately (debug only)
+        if (debug_mode && mod_flux_buf) {
             char mod_flux_filepath[4096];
-            snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
-                     stem_dir, mod_filename);
+            snprintf(mod_flux_filepath, sizeof(mod_flux_filepath),
+                     "%s/%s_pitch_%03d_%s_modified_flux.wav",
+                     stem_dir, basename, p, note_name);
             write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
         }
 
@@ -968,6 +1005,7 @@ typedef struct {
     pthread_mutex_t *queue_mutex;
     int thread_slot;
     int num_slots;
+    int debug_mode;
 } WorkerArgs;
 
 void* worker_thread_func(void *arg) {
@@ -983,7 +1021,8 @@ void* worker_thread_func(void *arg) {
         if (idx < 0) break;
 
         const char *input_path = wargs->file_list[idx];
-        process_audio(input_path, wargs->stem_dir, &wargs->results[idx], wargs->thread_slot, wargs->num_slots);
+        process_audio(input_path, wargs->stem_dir, &wargs->results[idx], wargs->thread_slot,
+                      wargs->num_slots, wargs->debug_mode);
     }
     return NULL;
 }
@@ -998,12 +1037,24 @@ int main(int argc, char *argv[]) {
     char **file_list = NULL;
     int num_files = 0;
     int capacity = 0;
+    int debug_mode = 0;
+    int have_path_args = 0;
 
     if (argc > 1) {
         for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--debug") == 0) {
+                debug_mode = 1;
+                continue;
+            }
+            if (starts_with_icase(argv[i], "--")) {
+                printf("Ignoring unknown option: %s\n", argv[i]);
+                continue;
+            }
+
             char path[1024];
             snprintf(path, sizeof(path), "%s", argv[i]);
             trim_string(path);
+            have_path_args = 1;
 
             DIR *d = opendir(path);
             if (d) {
@@ -1017,8 +1068,10 @@ int main(int argc, char *argv[]) {
                 file_list[num_files++] = strdup(path);
             }
         }
-    } else {
-        /* Double-clicked or run with no arguments: scan current directory */
+    }
+
+    if (!have_path_args) {
+        /* Double-clicked, or run with only flags: scan current directory */
         scan_directory_for_wavs(".", &file_list, &num_files, &capacity);
 
         /* Fallback: If no WAV files found in current directory, prompt interactively */
@@ -1081,7 +1134,10 @@ int main(int argc, char *argv[]) {
     printf("  Total Audio Files: %d\n", num_files);
     printf("  CPU Cores:         %d\n", cpu_cores);
     printf("  Worker Threads:    %d\n", num_threads);
-    printf("  Output Directory:  %s/\n\n", stem_dir);
+    printf("  Output Directory:  %s/\n", stem_dir);
+    printf("  Debug Output:      %s\n\n", debug_mode
+           ? "enabled (per-stem flux WAVs + report data)"
+           : "disabled (recombined flux WAV only)");
 
     int is_tty = 1;
 #if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
@@ -1116,6 +1172,7 @@ int main(int argc, char *argv[]) {
             wargs[t].queue_mutex = &queue_mutex;
             wargs[t].thread_slot = t;
             wargs[t].num_slots = num_threads;
+            wargs[t].debug_mode = debug_mode;
 
             pthread_create(&threads[t], NULL, worker_thread_func, &wargs[t]);
         }
@@ -1126,7 +1183,7 @@ int main(int argc, char *argv[]) {
         free(threads);
         free(wargs);
     } else {
-        process_audio(file_list[0], stem_dir, &results[0], 0, 1);
+        process_audio(file_list[0], stem_dir, &results[0], 0, 1, debug_mode);
     }
 
     if (is_tty) {
@@ -1153,14 +1210,18 @@ int main(int argc, char *argv[]) {
     printf("  Total Wall-Clock Time:  %.2f seconds\n", total_wall_clock_sec);
     printf("  Output Stem Folder:     %s/\n", stem_dir);
 
-    char report_tool_path[4096];
-    snprintf(report_tool_path, sizeof(report_tool_path), "%s/flux_report.exe", stem_dir);
-    FILE *report_tool = fopen(report_tool_path, "rb");
-    if (report_tool) {
-        fclose(report_tool);
-        printf("  Reports On Demand:      double-click %s\n", report_tool_path);
+    if (debug_mode) {
+        char report_tool_path[4096];
+        snprintf(report_tool_path, sizeof(report_tool_path), "%s/flux_report.exe", stem_dir);
+        FILE *report_tool = fopen(report_tool_path, "rb");
+        if (report_tool) {
+            fclose(report_tool);
+            printf("  Reports On Demand:      double-click %s\n", report_tool_path);
+        } else {
+            printf("  Reports On Demand:      copy flux_report.exe into %s, then double-click it\n", stem_dir);
+        }
     } else {
-        printf("  Reports On Demand:      copy flux_report.exe into %s, then double-click it\n", stem_dir);
+        printf("  Debug Output:           disabled (double-click flux_separator_debug.bat for it)\n");
     }
     printf("====================================================\n");
 
