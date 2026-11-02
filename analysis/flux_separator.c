@@ -6,7 +6,7 @@
  *
  * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
  * identifying peak and trough markers, generating modified flux envelopes via peak salience,
- * exporting companion _flux.wav and _modified_flux.wav files to [flux]/,
+ * exporting companion _modified_flux.wav files next to the pitch stems,
  * and producing interactive HTML reports in [flux]/<basename>_index.html as well as
  * a master batch dashboard in [flux]/index.html.
  *
@@ -273,8 +273,8 @@ static int starts_with_icase(const char *str, const char *prefix) {
 
 /*
  * Returns 1 when the directory holds any pitch stem WAV exported for the given
- * source basename. Raw and modified flux stems are named
- * "<basename>_pitch_<nnn>_<note>_flux.wav" and
+ * source basename. Pitch stems and their modified flux companions are named
+ * "<basename>_pitch_<nnn>_<note>.wav" and
  * "<basename>_pitch_<nnn>_<note>_modified_flux.wav", so the "<basename>_pitch_"
  * prefix identifies stems belonging to exactly this source file.
  */
@@ -298,12 +298,7 @@ static int dir_contains_pitch_stems_for(const char *dir_path, const char *basena
 }
 
 static int pitch_stems_exist_for(const char *stem_dir, const char *basename) {
-    char flux_dir[8192];
-    snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
-
-    if (dir_contains_pitch_stems_for(stem_dir, basename)) return 1;
-    if (dir_contains_pitch_stems_for(flux_dir, basename)) return 1;
-    return 0;
+    return dir_contains_pitch_stems_for(stem_dir, basename);
 }
 
 int is_valid_input_wav(const char *path) {
@@ -2171,12 +2166,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
 
-        // Export companion flux WAV files immediately
-        char raw_flux_filepath[4096];
-        snprintf(raw_flux_filepath, sizeof(raw_flux_filepath), "%s/[flux]/%s_pitch_%03d_%s_flux.wav",
-                 stem_dir, basename, p, stem->note_name);
-        write_wav_16bit(raw_flux_filepath, sample_rate, num_channels, total_samples, raw_flux_buf);
-
+        // Export the companion modified flux WAV file immediately
         if (mod_flux_buf) {
             char mod_flux_filepath[4096];
             snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
