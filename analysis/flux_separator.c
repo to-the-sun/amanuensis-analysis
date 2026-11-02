@@ -5,10 +5,14 @@
  * Multi-File, Directory Scanning & Multi-Threaded Concurrent Execution
  *
  * Focuses strictly on deriving per-pitch-stem transience flux envelopes,
- * identifying peak and trough markers, generating modified flux envelopes via peak salience,
- * exporting companion _modified_flux.wav files next to the pitch stems,
- * and producing interactive HTML reports in [flux]/<basename>_index.html as well as
- * a master batch dashboard in [flux]/index.html.
+ * exporting each stem's modified flux WAV next to the pitch stems, and
+ * recombining them into the [flux] modified flux WAV the later tools consume.
+ *
+ * A normal run writes pitch_stems/<basename>_pitch_<nnn>_<note>_modified_flux.wav
+ * for every audible stem and [flux]/<basename>_recombined_modified_flux.wav. The
+ * [flux] HTML reports are debug artifacts, produced only when --debug is passed
+ * (see flux_separator_debug.bat), so a normal run pays for no peak/trough
+ * detection, no 16-bit report arrays and no report writing.
  *
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
@@ -299,6 +303,17 @@ static int dir_contains_pitch_stems_for(const char *dir_path, const char *basena
 
 static int pitch_stems_exist_for(const char *stem_dir, const char *basename) {
     return dir_contains_pitch_stems_for(stem_dir, basename);
+}
+
+/* Does <stem_dir>/<relative> exist? Used to tell whether a run is already done. */
+static int flux_output_exists(const char *stem_dir, const char *relative) {
+    char path[8192];
+    snprintf(path, sizeof(path), "%s/%s", stem_dir, relative);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
 }
 
 int is_valid_input_wav(const char *path) {
@@ -1817,7 +1832,7 @@ static void copy_helper_files_to_pitch_stems(const char *dir, const char *stem_d
     }
 }
 
-int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int thread_slot, int num_slots) {
+int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int thread_slot, int num_slots, int debug_mode) {
     clock_t start_clock = clock();
 
     init_fft_tables();
@@ -1831,11 +1846,27 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         snprintf(result->basename, sizeof(result->basename), "%s", basename);
     }
 
-    /* Existing pitch stems for this file mean the work is already done: skip it. */
-    if (pitch_stems_exist_for(stem_dir, basename)) {
+    /*
+     * Exported pitch stems mean the work is done. A debug run also has to leave
+     * that file's [flux] report data behind, so a folder separated without debug
+     * is separated again when the reports are requested.
+     */
+    char report_data_rel[4300];
+    snprintf(report_data_rel, sizeof(report_data_rel), "[flux]/%s_flux_waveform_data.js", basename);
+
+    int already_processed = pitch_stems_exist_for(stem_dir, basename);
+    if (already_processed && debug_mode) {
+        already_processed = flux_output_exists(stem_dir, report_data_rel);
+    }
+
+    if (already_processed) {
         if (result) result->skipped = 1;
         pthread_mutex_lock(&g_console_mutex);
-        printf("  Skipping %s: pitch stems already exist for it.\n", input_path);
+        if (debug_mode) {
+            printf("  Skipping %s: pitch stems and reports already exist for it.\n", input_path);
+        } else {
+            printf("  Skipping %s: pitch stems already exist for it.\n", input_path);
+        }
         fflush(stdout);
         pthread_mutex_unlock(&g_console_mutex);
         print_multithreaded_progress(thread_slot, num_slots, basename, "Skipped", 100, 100, 0.0);
@@ -2134,14 +2165,16 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             memcpy(mod_flux_buf, raw_flux_buf, total_channel_samples * sizeof(double));
 
             // Detect peaks and troughs on channel 0 raw flux envelope for report visualization
-            double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
-            if (ch0_flux) {
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    ch0_flux[s] = raw_flux_buf[s * num_channels];
+            if (debug_mode) {
+                double *ch0_flux = (double*)malloc(total_samples * sizeof(double));
+                if (ch0_flux) {
+                    for (uint32_t s = 0; s < total_samples; s++) {
+                        ch0_flux[s] = raw_flux_buf[s * num_channels];
+                    }
+                    detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
+                    detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
+                    free(ch0_flux);
                 }
-                detect_all_peaks(ch0_flux, total_samples, &stem->peaks, &stem->num_peaks);
-                detect_all_troughs(ch0_flux, total_samples, &stem->troughs, &stem->num_troughs);
-                free(ch0_flux);
             }
 
             // Process modified flux envelope for each channel
@@ -2166,7 +2199,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
 
-        // Export the companion modified flux WAV file immediately
+        // Export the companion modified flux WAV file immediately: this is the
+        // stem audio the analyzer consumes.
         if (mod_flux_buf) {
             char mod_flux_filepath[4096];
             snprintf(mod_flux_filepath, sizeof(mod_flux_filepath), "%s/%s",
@@ -2174,35 +2208,40 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             write_wav_16bit(mod_flux_filepath, sample_rate, num_channels, total_samples, mod_flux_buf);
         }
 
-        // Store compact 16-bit PCM mono arrays for JS report generation
-        stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-        if (stem->raw_flux_i16) {
-            for (uint32_t s = 0; s < total_samples; s++) {
-                double sum_f = 0.0;
-                for (uint32_t c = 0; c < num_channels; c++) {
-                    sum_f += raw_flux_buf[s * num_channels + c];
-                }
-                double val = sum_f / num_channels;
-                if (val > 1.0) val = 1.0;
-                if (val < 0.0) val = 0.0;
-                stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
-            }
-        }
-
-        if (mod_flux_buf) {
-            stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-            if (stem->mod_flux_i16) {
+        // Store compact 16-bit PCM mono arrays for JS report generation (debug only)
+        if (debug_mode) {
+            stem->raw_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+            if (stem->raw_flux_i16) {
                 for (uint32_t s = 0; s < total_samples; s++) {
                     double sum_f = 0.0;
                     for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += mod_flux_buf[s * num_channels + c];
+                        sum_f += raw_flux_buf[s * num_channels + c];
                     }
                     double val = sum_f / num_channels;
                     if (val > 1.0) val = 1.0;
                     if (val < 0.0) val = 0.0;
-                    stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
+                    stem->raw_flux_i16[s] = (int16_t)round(val * 32767.0);
                 }
             }
+
+            if (mod_flux_buf) {
+                stem->mod_flux_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
+                if (stem->mod_flux_i16) {
+                    for (uint32_t s = 0; s < total_samples; s++) {
+                        double sum_f = 0.0;
+                        for (uint32_t c = 0; c < num_channels; c++) {
+                            sum_f += mod_flux_buf[s * num_channels + c];
+                        }
+                        double val = sum_f / num_channels;
+                        if (val > 1.0) val = 1.0;
+                        if (val < 0.0) val = 0.0;
+                        stem->mod_flux_i16[s] = (int16_t)round(val * 32767.0);
+                    }
+                }
+            }
+        }
+
+        if (mod_flux_buf) {
             free(mod_flux_buf);
             mod_flux_buf = NULL;
         }
@@ -2240,8 +2279,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     int exported_count = audible_count;
 
-    // Construct Flux HTML report in [flux] directory
-    if (flux_stems) {
+    // Construct Flux HTML report in [flux] directory (debug only)
+    if (debug_mode && flux_stems) {
         generate_flux_html_report(
             flux_dir,
             basename,
@@ -2261,6 +2300,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             if (flux_stems[idx].troughs) free(flux_stems[idx].troughs);
         }
         free(flux_stems);
+        flux_stems = NULL;
     }
 
     double total_elapsed = (double)(clock() - start_clock) / CLOCKS_PER_SEC;
@@ -2296,6 +2336,7 @@ typedef struct {
     pthread_mutex_t *queue_mutex;
     int thread_slot;
     int num_slots;
+    int debug_mode;
 } WorkerArgs;
 
 void* worker_thread_func(void *arg) {
@@ -2311,7 +2352,8 @@ void* worker_thread_func(void *arg) {
         if (idx < 0) break;
 
         const char *input_path = wargs->file_list[idx];
-        process_audio(input_path, wargs->stem_dir, &wargs->results[idx], wargs->thread_slot, wargs->num_slots);
+        process_audio(input_path, wargs->stem_dir, &wargs->results[idx], wargs->thread_slot,
+                      wargs->num_slots, wargs->debug_mode);
     }
     return NULL;
 }
@@ -2326,12 +2368,24 @@ int main(int argc, char *argv[]) {
     char **file_list = NULL;
     int num_files = 0;
     int capacity = 0;
+    int debug_mode = 0;
+    int have_path_args = 0;
 
     if (argc > 1) {
         for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--debug") == 0) {
+                debug_mode = 1;
+                continue;
+            }
+            if (starts_with_icase(argv[i], "--")) {
+                printf("Ignoring unknown option: %s\n", argv[i]);
+                continue;
+            }
+
             char path[1024];
             snprintf(path, sizeof(path), "%s", argv[i]);
             trim_string(path);
+            have_path_args = 1;
 
             DIR *d = opendir(path);
             if (d) {
@@ -2345,8 +2399,10 @@ int main(int argc, char *argv[]) {
                 file_list[num_files++] = strdup(path);
             }
         }
-    } else {
-        /* Double-clicked or run with no arguments: scan current directory */
+    }
+
+    if (!have_path_args) {
+        /* Double-clicked, or run with only flags: scan current directory */
         scan_directory_for_wavs(".", &file_list, &num_files, &capacity);
 
         /* Fallback: If no WAV files found in current directory, prompt interactively */
@@ -2409,7 +2465,10 @@ int main(int argc, char *argv[]) {
     printf("  Total Audio Files: %d\n", num_files);
     printf("  CPU Cores:         %d\n", cpu_cores);
     printf("  Worker Threads:    %d\n", num_threads);
-    printf("  Output Directory:  %s/\n\n", stem_dir);
+    printf("  Output Directory:  %s/\n", stem_dir);
+    printf("  Debug Output:      %s\n\n", debug_mode
+           ? "enabled (markers and [flux] reports)"
+           : "disabled (no [flux] reports)");
 
     int is_tty = 1;
 #if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
@@ -2444,6 +2503,7 @@ int main(int argc, char *argv[]) {
             wargs[t].queue_mutex = &queue_mutex;
             wargs[t].thread_slot = t;
             wargs[t].num_slots = num_threads;
+            wargs[t].debug_mode = debug_mode;
 
             pthread_create(&threads[t], NULL, worker_thread_func, &wargs[t]);
         }
@@ -2454,7 +2514,7 @@ int main(int argc, char *argv[]) {
         free(threads);
         free(wargs);
     } else {
-        process_audio(file_list[0], stem_dir, &results[0], 0, 1);
+        process_audio(file_list[0], stem_dir, &results[0], 0, 1, debug_mode);
     }
 
     if (is_tty) {
@@ -2463,8 +2523,10 @@ int main(int argc, char *argv[]) {
 
     double total_wall_clock_sec = (double)(clock() - batch_start_clock) / CLOCKS_PER_SEC;
 
-    /* Generate Master Batch HTML Report in [flux]/index.html */
-    generate_master_flux_html_report(flux_dir, stem_dir, results, num_files, total_wall_clock_sec);
+    /* Generate Master Batch HTML Report in [flux]/index.html (debug only) */
+    if (debug_mode) {
+        generate_master_flux_html_report(flux_dir, stem_dir, results, num_files, total_wall_clock_sec);
+    }
 
     int total_success = 0;
     int total_skipped = 0;
@@ -2482,7 +2544,11 @@ int main(int argc, char *argv[]) {
     }
     printf("  Total Wall-Clock Time:  %.2f seconds\n", total_wall_clock_sec);
     printf("  Output Stem Folder:     %s/\n", stem_dir);
-    printf("  Batch Report URL:       %s/index.html\n", flux_dir);
+    if (debug_mode) {
+        printf("  Batch Report URL:       %s/index.html\n", flux_dir);
+    } else {
+        printf("  Debug Output:           disabled (double-click flux_separator_debug.bat for the flux reports)\n");
+    }
     printf("====================================================\n");
 
     for (int i = 0; i < num_files; i++) {
