@@ -9,6 +9,7 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
+#include <process.h>
 #include <direct.h>
 #define PATH_SEP '\\'
 #define PATH_SEP_STR "\\"
@@ -16,6 +17,7 @@
 #else
 #include <dirent.h>
 #include <unistd.h>
+#include <pthread.h>
 #define PATH_SEP '/'
 #define PATH_SEP_STR "/"
 #define mkdir_win(path) mkdir(path, 0755)
@@ -259,79 +261,354 @@ static void accumulator_remove(CorrAccumulator* acc, const PatternInfo* pat) {
     }
 }
 
+#define SONG_TASK_PREFIX_MAX 3
+#define SONG_MAX_WORKERS 64
+#define SONG_PROGRESS_STEP 200000ULL
+#define SONG_PROGRESS_FLUSH 8192ULL
+
+// One unit of parallel work: a prefix of the depth-first search tree. Every
+// combination the serial search would reach below that prefix belongs to the
+// worker that claims it, so splitting the tree never changes which combinations
+// are evaluated, in what order, or with which arithmetic.
 typedef struct {
+    int prefix[SONG_TASK_PREFIX_MAX];
+    int length;
+    uint64_t combinations;
+} ComboTask;
+
+typedef struct {
+    const PatternInfo* patterns;
+    int num_eligible;
+    ComboTask* tasks;
+    int num_tasks;
+    uint64_t total_combinations;
+    volatile long long next_task;
+    volatile long long evaluated;
+    volatile long long reported;
+} ComboJob;
+
+typedef struct {
+    ComboJob* job;
+    CorrAccumulator acc;
     int* best_indices;
     int best_count;
     double best_corr;
     int* scratch;
-} CombinationSearch;
+    uint64_t local_steps;
+    bool verbose;
+} ComboWorker;
+
+#if defined(_WIN32) || defined(_WIN64)
+static long long atomic_increment(volatile long long* counter) {
+    return (long long)InterlockedIncrement64((volatile LONG64*)counter) - 1;
+}
+
+static long long atomic_add(volatile long long* counter, long long delta) {
+    return (long long)InterlockedExchangeAdd64((volatile LONG64*)counter, delta) + delta;
+}
+
+static long long atomic_exchange(volatile long long* target, long long value) {
+    return (long long)InterlockedExchange64((volatile LONG64*)target, value);
+}
+#else
+static long long atomic_increment(volatile long long* counter) {
+    return (long long)__sync_fetch_and_add(counter, 1);
+}
+
+static long long atomic_add(volatile long long* counter, long long delta) {
+    return (long long)__sync_add_and_fetch(counter, delta);
+}
+
+static long long atomic_exchange(volatile long long* target, long long value) {
+    return (long long)__sync_lock_test_and_set(target, value);
+}
+#endif
+
+static int hardware_thread_count(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    int cores = (int)info.dwNumberOfProcessors;
+#else
+    int cores = (int)sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    if (cores < 1) cores = 1;
+    if (cores > SONG_MAX_WORKERS) cores = SONG_MAX_WORKERS;
+    return cores;
+}
+
+// Every worker keeps its own copy of the per-sample accumulator, so the worker
+// count is bounded by the core count and by the memory that state may occupy.
+static int song_worker_count(int num_eligible, uint64_t accum_frames) {
+    if (num_eligible < 6) return 1;  // 63 combinations or fewer: threading only adds overhead.
+
+    int cores = hardware_thread_count();
+    if (cores <= 1) return 1;
+
+    uint64_t per_worker = (accum_frames > 0 ? accum_frames : 1) * (uint64_t)(sizeof(double) + sizeof(int));
+    uint64_t budget = 1024ULL * 1024ULL * 1024ULL;
+    uint64_t affordable = per_worker > 0 ? budget / per_worker : (uint64_t)cores;
+    if (affordable < 1) affordable = 1;
+    if ((uint64_t)cores > affordable) cores = (int)affordable;
+    if (cores < 1) cores = 1;
+    return cores;
+}
+
+// A combination replaces the current best when it correlates more strongly; on a
+// tie the smaller combination wins, then the one whose patterns rank earliest
+// (i.e. the longest patterns first). The ordering is total, so the winner does
+// not depend on the order in which workers finish.
+static bool combination_is_better(int count, const int* indices, double corr,
+                                  int best_count, const int* best_indices, double best_corr) {
+    if (corr > best_corr) return true;
+    if (corr < best_corr) return false;
+    if (best_count == 0) return true;
+    if (count != best_count) return count < best_count;
+    for (int k = 0; k < count; k++) {
+        if (indices[k] != best_indices[k]) {
+            return indices[k] < best_indices[k];
+        }
+    }
+    return false;
+}
+
+static void flush_progress(ComboWorker* worker) {
+    ComboJob* job = worker->job;
+    long long done = atomic_add(&job->evaluated, (long long)SONG_PROGRESS_FLUSH);
+    if (job->total_combinations == 0) return;
+
+    long long boundary = done - (done % (long long)SONG_PROGRESS_STEP);
+    if (boundary <= 0 || (uint64_t)boundary >= job->total_combinations) return;
+    if (atomic_exchange(&job->reported, boundary) == boundary) return;
+
+    printf("[Progress] %lld / %llu combinations evaluated (%.2f%%)\n",
+           boundary,
+           (unsigned long long)job->total_combinations,
+           100.0 * (double)boundary / (double)job->total_combinations);
+}
+
+static void consider_combination(ComboWorker* worker, int count) {
+    if (count <= 0) return;
+
+    double corr = corr_stats_to_stddev(worker->acc.sum, worker->acc.sum_sq, worker->acc.qualifying);
+    if (!combination_is_better(count, worker->scratch, corr,
+                               worker->best_count, worker->best_indices, worker->best_corr)) {
+        return;
+    }
+
+    for (int k = 0; k < count; k++) {
+        worker->best_indices[k] = worker->scratch[k];
+    }
+    worker->best_count = count;
+    worker->best_corr = corr;
+
+    if (worker->verbose) {
+        uint64_t total = worker->job->total_combinations;
+        if (total > 0) {
+            printf("[Best] %2d pattern(s), correlation %.6f (combination %llu of %llu)\n",
+                   count, corr, (unsigned long long)worker->local_steps, (unsigned long long)total);
+        } else {
+            printf("[Best] %2d pattern(s), correlation %.6f (combination %llu)\n",
+                   count, corr, (unsigned long long)worker->local_steps);
+        }
+    }
+}
 
 // Depth-first enumeration of every subset of the candidate patterns. Because the
 // accumulator is mutated in place and undone on the way back up, each of the
 // 2^n - 1 combinations costs only the samples where the added pattern is active.
-static void search_combinations_recursive(
-    CorrAccumulator* acc,
-    const PatternInfo* patterns,
-    int num_eligible,
-    int start_index,
-    int current_count,
-    uint64_t* steps,
-    uint64_t total_combinations,
-    CombinationSearch* search
-) {
-    for (int i = start_index; i < num_eligible; i++) {
-        search->scratch[current_count] = i;
-        accumulator_add(acc, &patterns[i]);
-        (*steps)++;
+static void search_combinations_recursive(ComboWorker* worker, int start_index, int current_count) {
+    ComboJob* job = worker->job;
 
-        int count = current_count + 1;
-        double corr = corr_stats_to_stddev(acc->sum, acc->sum_sq, acc->qualifying);
+    for (int i = start_index; i < job->num_eligible; i++) {
+        worker->scratch[current_count] = i;
+        accumulator_add(&worker->acc, &job->patterns[i]);
+        worker->local_steps++;
 
-        bool better = false;
-        if (corr > search->best_corr) {
-            better = true;
-        } else if (corr == search->best_corr) {
-            // Equal correlation: prefer the smaller combination, then the one
-            // whose candidates appear earliest (i.e. the longest patterns first).
-            if (search->best_count == 0 || count < search->best_count) {
-                better = true;
-            } else if (count == search->best_count) {
-                for (int k = 0; k < count; k++) {
-                    if (search->scratch[k] != search->best_indices[k]) {
-                        better = search->scratch[k] < search->best_indices[k];
-                        break;
-                    }
-                }
+        consider_combination(worker, current_count + 1);
+
+        if (!worker->verbose) {
+            if ((worker->local_steps % SONG_PROGRESS_FLUSH) == 0) {
+                flush_progress(worker);
             }
-        }
-
-        if (better) {
-            for (int k = 0; k < count; k++) {
-                search->best_indices[k] = search->scratch[k];
-            }
-            search->best_count = count;
-            search->best_corr = corr;
-
-            if (total_combinations > 0) {
-                printf("[Best] %2d pattern(s), correlation %.6f (combination %llu of %llu)\n",
-                       count, corr, (unsigned long long)*steps, (unsigned long long)total_combinations);
-            } else {
-                printf("[Best] %2d pattern(s), correlation %.6f (combination %llu)\n",
-                       count, corr, (unsigned long long)*steps);
-            }
-        }
-
-        if (total_combinations > 0 && (*steps % 200000ULL) == 0 && *steps != total_combinations) {
+        } else if (job->total_combinations > 0 &&
+                   (worker->local_steps % SONG_PROGRESS_STEP) == 0 &&
+                   worker->local_steps != job->total_combinations) {
             printf("[Progress] %llu / %llu combinations evaluated (%.2f%%)\n",
-                   (unsigned long long)*steps,
-                   (unsigned long long)total_combinations,
-                   100.0 * (double)*steps / (double)total_combinations);
+                   (unsigned long long)worker->local_steps,
+                   (unsigned long long)job->total_combinations,
+                   100.0 * (double)worker->local_steps / (double)job->total_combinations);
         }
 
-        search_combinations_recursive(acc, patterns, num_eligible, i + 1, count, steps, total_combinations, search);
+        search_combinations_recursive(worker, i + 1, current_count + 1);
 
-        accumulator_remove(acc, &patterns[i]);
+        accumulator_remove(&worker->acc, &job->patterns[i]);
     }
+}
+
+static int compare_task_combinations_desc(const void* a, const void* b) {
+    const ComboTask* ta = (const ComboTask*)a;
+    const ComboTask* tb = (const ComboTask*)b;
+    if (ta->combinations > tb->combinations) return -1;
+    if (ta->combinations < tb->combinations) return 1;
+    return 0;
+}
+
+// Split the tree at `depth`: every prefix of exactly that many patterns becomes
+// one task, covering the prefix itself plus every extension hanging below it.
+// Tasks are handed out largest first so the longest subtree never starts last.
+static ComboTask* build_combo_tasks(int num_eligible, int depth, int* out_count) {
+    *out_count = 0;
+    if (depth < 2 || depth > SONG_TASK_PREFIX_MAX || num_eligible < depth || num_eligible > 32) {
+        return NULL;
+    }
+
+    uint64_t count = 1;
+    for (int k = 0; k < depth; k++) {
+        count = count * (uint64_t)(num_eligible - k) / (uint64_t)(k + 1);
+    }
+    if (count == 0) return NULL;
+
+    ComboTask* tasks = (ComboTask*)calloc((size_t)count, sizeof(ComboTask));
+    if (!tasks) return NULL;
+
+    int index = 0;
+    for (int i = 0; i < num_eligible; i++) {
+        for (int j = i + 1; j < num_eligible; j++) {
+            if (depth == 2) {
+                ComboTask* task = &tasks[index++];
+                task->prefix[0] = i;
+                task->prefix[1] = j;
+                task->length = 2;
+                task->combinations = 1ULL << (num_eligible - 1 - j);
+                continue;
+            }
+            for (int k = j + 1; k < num_eligible; k++) {
+                ComboTask* task = &tasks[index++];
+                task->prefix[0] = i;
+                task->prefix[1] = j;
+                task->prefix[2] = k;
+                task->length = 3;
+                task->combinations = 1ULL << (num_eligible - 1 - k);
+            }
+        }
+    }
+
+    qsort(tasks, (size_t)index, sizeof(ComboTask), compare_task_combinations_desc);
+    *out_count = index;
+    return tasks;
+}
+
+// Combinations with fewer patterns than the split depth sit above the tasks, so
+// they are evaluated once rather than by every worker.
+static void evaluate_shallow_combinations(ComboWorker* worker, int depth, int start_index, int current_count) {
+    for (int i = start_index; i < worker->job->num_eligible; i++) {
+        worker->scratch[current_count] = i;
+        accumulator_add(&worker->acc, &worker->job->patterns[i]);
+        worker->local_steps++;
+
+        consider_combination(worker, current_count + 1);
+
+        if (current_count + 2 < depth) {
+            evaluate_shallow_combinations(worker, depth, i + 1, current_count + 1);
+        }
+
+        accumulator_remove(&worker->acc, &worker->job->patterns[i]);
+    }
+}
+
+static void worker_evaluate_task(ComboWorker* worker, const ComboTask* task) {
+    ComboJob* job = worker->job;
+
+    for (int k = 0; k < task->length; k++) {
+        worker->scratch[k] = task->prefix[k];
+        accumulator_add(&worker->acc, &job->patterns[task->prefix[k]]);
+    }
+
+    worker->local_steps++;
+    consider_combination(worker, task->length);
+
+    search_combinations_recursive(worker, task->prefix[task->length - 1] + 1, task->length);
+
+    for (int k = task->length - 1; k >= 0; k--) {
+        accumulator_remove(&worker->acc, &job->patterns[task->prefix[k]]);
+    }
+}
+
+static void combo_worker_run(ComboWorker* worker) {
+    ComboJob* job = worker->job;
+
+    for (;;) {
+        long long index = atomic_increment(&job->next_task);
+        if (index >= (long long)job->num_tasks) break;
+        worker_evaluate_task(worker, &job->tasks[index]);
+    }
+
+    uint64_t remaining = worker->local_steps % SONG_PROGRESS_FLUSH;
+    if (remaining > 0) {
+        atomic_add(&job->evaluated, (long long)remaining);
+    }
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+static unsigned __stdcall combo_worker_thread(void* arg) {
+    combo_worker_run((ComboWorker*)arg);
+    return 0;
+}
+#else
+static void* combo_worker_thread(void* arg) {
+    combo_worker_run((ComboWorker*)arg);
+    return NULL;
+}
+#endif
+
+// Task claiming is dynamic, so a worker that never starts simply leaves its share
+// of the tree to the others.
+static void run_combo_workers(ComboWorker* workers, int num_workers) {
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE* handles = (HANDLE*)calloc((size_t)num_workers, sizeof(HANDLE));
+    if (!handles) {
+        combo_worker_run(&workers[0]);
+        return;
+    }
+
+    for (int w = 0; w < num_workers; w++) {
+        handles[w] = (HANDLE)_beginthreadex(NULL, 0, combo_worker_thread, &workers[w], 0, NULL);
+        if (!handles[w]) {
+            combo_worker_run(&workers[w]);
+        }
+    }
+
+    for (int w = 0; w < num_workers; w++) {
+        if (handles[w]) {
+            WaitForSingleObject(handles[w], INFINITE);
+            CloseHandle(handles[w]);
+        }
+    }
+    free(handles);
+#else
+    pthread_t* threads = (pthread_t*)calloc((size_t)num_workers, sizeof(pthread_t));
+    bool* started = (bool*)calloc((size_t)num_workers, sizeof(bool));
+    if (!threads || !started) {
+        free(threads);
+        free(started);
+        combo_worker_run(&workers[0]);
+        return;
+    }
+
+    for (int w = 0; w < num_workers; w++) {
+        started[w] = pthread_create(&threads[w], NULL, combo_worker_thread, &workers[w]) == 0;
+        if (!started[w]) {
+            combo_worker_run(&workers[w]);
+        }
+    }
+
+    for (int w = 0; w < num_workers; w++) {
+        if (started[w]) pthread_join(threads[w], NULL);
+    }
+    free(started);
+    free(threads);
+#endif
 }
 
 static int compare_patterns_by_length_desc(const void* a, const void* b) {
@@ -1166,37 +1443,91 @@ int main(int argc, char** argv) {
             }
         }
 
-        int* best_indices = (int*)malloc((size_t)num_eligible * sizeof(int));
-        int* scratch_indices = (int*)malloc((size_t)num_eligible * sizeof(int));
+        int num_workers = song_worker_count(num_eligible, accum_frames);
+        // Splitting three levels down keeps individual tasks small enough that no
+        // single subtree can leave the other workers waiting on it.
+        int split_depth = (num_workers > 1 && num_eligible <= 32)
+            ? ((num_eligible >= 10) ? 3 : 2)
+            : 0;
 
-        CorrAccumulator acc;
-        acc.frames = accum_frames;
-        acc.val = (double*)calloc((size_t)(accum_frames > 0 ? accum_frames : 1), sizeof(double));
-        acc.active = (int*)calloc((size_t)(accum_frames > 0 ? accum_frames : 1), sizeof(int));
-        acc.sum = 0.0;
-        acc.sum_sq = 0.0;
-        acc.qualifying = 0;
+        ComboJob job;
+        memset(&job, 0, sizeof(job));
+        job.patterns = patterns;
+        job.num_eligible = num_eligible;
+        job.total_combinations = total_combinations;
 
-        CombinationSearch search;
-        search.best_indices = best_indices;
-        search.scratch = scratch_indices;
-        search.best_count = 0;
-        search.best_corr = -1.0;
-
-        uint64_t steps = 0;
-        if (accum_frames > 0 && best_indices && scratch_indices && acc.val && acc.active) {
-            search_combinations_recursive(&acc, patterns, num_eligible, 0, 0, &steps, total_combinations, &search);
+        ComboWorker* workers = (ComboWorker*)calloc((size_t)num_workers, sizeof(ComboWorker));
+        int ready_workers = 0;
+        if (workers) {
+            for (int w = 0; w < num_workers; w++) {
+                workers[w].job = &job;
+                workers[w].best_corr = -1.0;
+                workers[w].best_indices = (int*)malloc((size_t)num_eligible * sizeof(int));
+                workers[w].scratch = (int*)malloc((size_t)num_eligible * sizeof(int));
+                workers[w].acc.frames = accum_frames;
+                workers[w].acc.val = (double*)calloc((size_t)(accum_frames > 0 ? accum_frames : 1), sizeof(double));
+                workers[w].acc.active = (int*)calloc((size_t)(accum_frames > 0 ? accum_frames : 1), sizeof(int));
+                if (!workers[w].best_indices || !workers[w].scratch || !workers[w].acc.val || !workers[w].acc.active) {
+                    break;
+                }
+                ready_workers++;
+            }
         }
 
-        printf("\nExhaustive search complete: %llu combination(s) evaluated.\n", (unsigned long long)steps);
+        int* best_indices = NULL;
+        int best_count = 0;
+        double best_corr = -1.0;
+        uint64_t evaluated_combinations = 0;
 
-        num_selected = search.best_count;
-        for (int s = 0; s < num_selected; s++) {
-            int idx = search.best_indices[s];
-            selected_indices[s] = idx;
-            patterns[idx].selected = true;
-            patterns[idx].selection_order = s;
-        }
+        if (accum_frames == 0 || ready_workers == 0) {
+            printf("\nExhaustive search skipped: no usable pattern audio to combine.\n");
+        } else {
+            if (split_depth > 0) {
+                job.tasks = build_combo_tasks(num_eligible, split_depth, &job.num_tasks);
+                if (!job.tasks || job.num_tasks < ready_workers * 2) {
+                    free(job.tasks);
+                    job.tasks = NULL;
+                    job.num_tasks = 0;
+                    split_depth = 0;
+                }
+            }
+
+            best_indices = (int*)malloc((size_t)num_eligible * sizeof(int));
+
+            if (split_depth > 0) {
+                workers[0].verbose = false;
+                printf("[Workers] Evaluating every combination across %d thread(s).\n\n", ready_workers);
+                evaluate_shallow_combinations(&workers[0], split_depth, 0, 0);
+                run_combo_workers(workers, ready_workers);
+                evaluated_combinations = total_combinations;
+            } else {
+                workers[0].verbose = true;
+                search_combinations_recursive(&workers[0], 0, 0);
+                evaluated_combinations = workers[0].local_steps;
+            }
+
+            // Each worker found the best combination inside its own share of the
+            // tree; the same total order picks the overall winner.
+            for (int w = 0; w < ready_workers; w++) {
+                if (workers[w].best_count <= 0) continue;
+                if (best_indices && combination_is_better(workers[w].best_count, workers[w].best_indices, workers[w].best_corr,
+                                                          best_count, best_indices, best_corr)) {
+                    memcpy(best_indices, workers[w].best_indices, (size_t)workers[w].best_count * sizeof(int));
+                    best_count = workers[w].best_count;
+                    best_corr = workers[w].best_corr;
+                }
+            }
+
+            printf("\nExhaustive search complete: %llu combination(s) evaluated.\n",
+                   (unsigned long long)evaluated_combinations);
+
+            num_selected = best_count;
+            for (int s = 0; s < num_selected; s++) {
+                int idx = best_indices[s];
+                selected_indices[s] = idx;
+                patterns[idx].selected = true;
+                patterns[idx].selection_order = s;
+            }
 
         // Recompute through the canonical function so the reported correlation matches
         // exactly what compute_correlation_ext() yields for the winning combination.
@@ -1232,10 +1563,17 @@ int main(int argc, char** argv) {
             printf("  (none)\n");
         }
 
+            for (int w = 0; w < ready_workers; w++) {
+                free(workers[w].best_indices);
+                free(workers[w].scratch);
+                free(workers[w].acc.val);
+                free(workers[w].acc.active);
+            }
+        }
+
         free(best_indices);
-        free(scratch_indices);
-        free(acc.val);
-        free(acc.active);
+        free(workers);
+        free(job.tasks);
     }
 
     char song_dir[4096];

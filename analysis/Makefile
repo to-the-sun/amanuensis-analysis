@@ -29,7 +29,7 @@ $(WIN_TARGET): $(SOURCES)
 	$(WIN_CC) $(CFLAGS) $(SOURCES) -o $@ $(WIN_STACK) -lm -lpthread -lOpenCL || $(WIN_CC) $(CFLAGS) $(SOURCES) -o $@ $(WIN_STACK) -lm
 
 $(SONG_TARGET): $(SONG_SOURCES)
-	$(CC) $(CFLAGS) $(SONG_SOURCES) -o $@ -lm
+	$(CC) $(CFLAGS) -pthread $(SONG_SOURCES) -o $@ -lm -lpthread
 
 $(SONG_WIN_TARGET): $(SONG_SOURCES)
 	$(WIN_CC) $(CFLAGS) $(SONG_SOURCES) -o $@ -lm
