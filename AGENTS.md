@@ -9,7 +9,7 @@ In general, the algorithms you're working with will be understood very well by t
 
 Don't describe things that haven't changed. That's just redundant and makes it sound like they have changed. If something is not mentioned then it can be assumed that it has not changed. This goes both ways and should be assumed by the agent as well as the user. 
 
-Testing and verification is important, of course, but the user doesn't need to be told about it. The user will assume if you submit something, you have tested it thoroughly enough to verify it is working correctly. 
+Testing and verification are important, of course, but the user doesn't need to be told about it. The user will assume if you submit something, you have tested it thoroughly enough to verify it is working correctly. 
 
 These things apply to messages sent to the user, reports and even comments in the code. 
 
