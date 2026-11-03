@@ -9,6 +9,8 @@ In general, the algorithms you're working with will be understood very well by t
 
 Don't describe things that haven't changed. That's just redundant and makes it sound like they have changed. If something is not mentioned then it can be assumed that it has not changed. This goes both ways and should be assumed by the agent as well as the user. 
 
+Testing and verification is important, of course, but the user doesn't need to be told about it. The user will assume if you submit something, you have tested it thoroughly enough to verify it is working correctly. 
+
 These things apply to messages sent to the user, reports and even comments in the code. 
 
 In regards to comments in the code, a human will almost never look at the code at all, so if you can just as easily understand the code by looking at it there is no need to make a comment. Comments would be for things that would not be immediately obvious from just looking at the local code. This is one way to keep line count down which should be considered a goal. 
