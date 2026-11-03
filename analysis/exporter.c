@@ -3701,7 +3701,10 @@ static int export_group_html_report_for_original(
               report_stem_name, group_audio_len, group_audio_sr,
               (double)group_audio_len / (double)group_audio_sr, pass2_win_ms);
 
-    if (!analyzer_batch_analyze_shared(group_audio, group_audio_len, group_audio_sr, pass2_win_ms, 1, NULL, &res2_group, 1)) {
+    // Four mel bands, so a transient is detected and scored in the band it lives
+    // in.  The direct-flux path is not used: it copies the per-millisecond peak
+    // of its input into every band, which would give four identical peak series.
+    if (!analyzer_batch_analyze_shared(group_audio, group_audio_len, group_audio_sr, pass2_win_ms, 4, NULL, &res2_group, 0)) {
         ERRPRINTF("Error: Failed to perform transience analysis for group HTML report '%s'.\n"
                   "       The folder %s was created but no assets were written to it.\n",
                   report_stem_name, report_dir);
