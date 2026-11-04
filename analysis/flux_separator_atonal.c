@@ -1858,14 +1858,9 @@ static void copy_helper_files_to_pitch_stems(const char *dir, const char *stem_d
 
 #define LABEL_PITCH_BASE 1   /* 1..128 = pitch slot + 1 */
 #define LABEL_RIDGE_BASE 512 /* 512 + ridge id for residual bins */
-#define ROUTE_EPS 0.01       /* a comb must explain 1% of the frame's residual */
 #define TROUGH_SPLIT 0.5     /* split only where the trough is half the lower peak */
 #define ATTACK_FRAMES 2
 #define DECAY_RATIO 3.0
-#define MAX_COMB_CANDIDATES 48
-#define MAX_COMB_HARMONICS 24
-#define MIN_F0_HZ 20.0
-#define MAX_F0_HZ 5000.0
 
 typedef struct {
     int lo, hi;
@@ -1911,9 +1906,61 @@ static int region_overlap(const Region *a, const Region *b) {
     return (hi >= lo) ? (hi - lo + 1) : 0;
 }
 
-/* Claim harmonic combs, then carve what is left into mode regions. */
-static int route_frame(const double *power, double *resid, int nbins, double binw,
-                       uint16_t *labels, Region *regions) {
+/* Energy and peak bin per semitone slot for one frame. The slot, not the FFT
+ * bin, is the candidate: one peak per slot keeps spectral noise out of it. */
+static void slot_stats(const double *power, int nbins, const int *slot_of_bin,
+                       double *energy, int *peak_bin) {
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        energy[p] = 0.0;
+        peak_bin[p] = -1;
+    }
+    for (int k = 0; k < nbins; k++) {
+        int p = slot_of_bin[k];
+        energy[p] += power[k];
+        if (peak_bin[p] < 0 || power[k] > power[peak_bin[p]]) peak_bin[p] = k;
+    }
+}
+
+/* A slot is a harmonic of the lowest louder slot whose peak bin divides its
+ * own within one bin; a root is a series once its octave and twelfth both
+ * attribute to it. */
+static void slot_roots(double *energy, const int *peak_bin, int *root, uint8_t *series) {
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) root[p] = -1;
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (peak_bin[p] < 1) continue;
+        for (int q = 0; q < p; q++) {
+            if (peak_bin[q] < 1 || !(energy[q] > energy[p])) continue;
+            int k = (int)lround((double)peak_bin[p] / (double)peak_bin[q]);
+            if (k < 2) continue;
+            if (abs(peak_bin[p] - k * peak_bin[q]) > 1) continue;
+            root[p] = q;
+            break;
+        }
+    }
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        int r = p;
+        while (r >= 0 && root[r] >= 0) r = root[r];
+        root[p] = (r == p) ? -1 : r;
+    }
+    memset(series, 0, NUM_MIDI_PITCHES);
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (root[p] >= 0 || peak_bin[p] < 1) continue;
+        int b = peak_bin[p];
+        int h2 = -1, h3 = -1;
+        for (int q = p + 1; q < NUM_MIDI_PITCHES; q++) {
+            if (root[q] != p) continue;
+            if (h2 < 0 && abs(peak_bin[q] - 2 * b) <= 1) h2 = q;
+            if (h3 < 0 && abs(peak_bin[q] - 3 * b) <= 1) h3 = q;
+        }
+        if (h2 >= 0 && h3 >= 0) series[p] = 1;
+    }
+}
+
+/* Label the bins of every slot a series explains; the rest is residual and is
+ * carved into mode regions. */
+static int route_frame(const double *power, double *resid, int nbins,
+                       uint16_t *labels, Region *regions,
+                       const int *slot_of_bin, const int *root, const uint8_t *series) {
     memcpy(resid, power, (size_t)nbins * sizeof(double));
     memset(labels, 0, (size_t)nbins * sizeof(uint16_t));
 
@@ -1921,75 +1968,12 @@ static int route_frame(const double *power, double *resid, int nbins, double bin
     for (int k = 0; k < nbins; k++) total += resid[k];
     if (!(total > 0.0)) return 0;
 
-    int cand[MAX_COMB_CANDIDATES];
-    for (;;) {
-        double frame_peak = 0.0;
-        for (int k = 0; k < nbins; k++) if (resid[k] > frame_peak) frame_peak = resid[k];
-        if (!(frame_peak > 0.0)) break;
-
-        int ncand = 0;
-        double low = frame_peak * 1e-4;
-        for (int k = 2; k < nbins - 1; k++) {
-            if (!(resid[k] > resid[k - 1] && resid[k] >= resid[k + 1])) continue;
-            if (resid[k] < low) continue;
-            double f0 = k * binw;
-            if (f0 < MIN_F0_HZ || f0 > MAX_F0_HZ) continue;
-            if (ncand < MAX_COMB_CANDIDATES) {
-                cand[ncand++] = k;
-            } else {
-                int weakest = 0;
-                for (int c = 1; c < ncand; c++) if (resid[cand[c]] < resid[cand[weakest]]) weakest = c;
-                if (resid[k] > resid[cand[weakest]]) cand[weakest] = k;
-            }
-        }
-        if (ncand == 0) break;
-
-        double best = 0.0;
-        int best_k = -1;
-        for (int c = 0; c < ncand; c++) {
-            double f0 = cand[c] * binw;
-            int idx0 = (int)lround(f0 / binw);
-            int lo0 = idx0 - 2, hi0 = idx0 + 2;
-            if (lo0 < 0) lo0 = 0;
-            if (hi0 > nbins - 1) hi0 = nbins - 1;
-            double fund = 0.0;
-            for (int j = lo0; j <= hi0; j++) if (resid[j] > fund) fund = resid[j];
-            if (!(fund > 0.0)) continue;
-
-            double score = 0.0;
-            int hits = 0;
-            for (int h = 1; h <= MAX_COMB_HARMONICS; h++) {
-                double f = f0 * h;
-                if (f >= binw * (double)(nbins - 1)) break;
-                int idx = (int)lround(f / binw);
-                int tol = 2 + h / 4;
-                int lo = idx - tol, hi = idx + tol;
-                if (lo < 0) lo = 0;
-                if (hi > nbins - 1) hi = nbins - 1;
-                double m = 0.0;
-                for (int j = lo; j <= hi; j++) if (resid[j] > m) m = resid[j];
-                if (m >= 0.05 * fund) { score += m; hits++; }
-            }
-            /* a single partial is a mode, not a harmonic series */
-            if (hits < 3) continue;
-            if (score > best) { best = score; best_k = cand[c]; }
-        }
-        if (best_k < 0 || best <= ROUTE_EPS * total) break;
-
-        double f0 = best_k * binw;
-        uint16_t lab = (uint16_t)(LABEL_PITCH_BASE + freq_to_midi_pitch(f0));
-        for (int h = 1; h <= MAX_COMB_HARMONICS; h++) {
-            double f = f0 * h;
-            if (f >= binw * (double)(nbins - 1)) break;
-            int idx = (int)lround(f / binw);
-            int tol = 2 + h / 4;
-            int lo = idx - tol, hi = idx + tol;
-            if (lo < 0) lo = 0;
-            if (hi > nbins - 1) hi = nbins - 1;
-            for (int j = lo; j <= hi; j++) {
-                if (resid[j] > 0.0) { labels[j] = lab; resid[j] = 0.0; }
-            }
-        }
+    for (int k = 0; k < nbins; k++) {
+        int p = slot_of_bin[k];
+        int r = (root[p] >= 0) ? root[p] : p;
+        if (!series[r]) continue;
+        labels[k] = (uint16_t)(LABEL_PITCH_BASE + r);
+        resid[k] = 0.0;
     }
 
     int *max_idx = (int*)malloc((size_t)nbins * sizeof(int));
@@ -2261,6 +2245,13 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     int nridges = 0, ridge_cap = 0;
     int nprev = 0;
 
+    int *slot_of_bin = (int*)malloc((size_t)nbins * sizeof(int));
+    for (int k = 0; k < nbins; k++) slot_of_bin[k] = freq_to_midi_pitch((double)k * binw);
+    double *slot_energy = (double*)malloc(NUM_MIDI_PITCHES * sizeof(double));
+    int *slot_peak = (int*)malloc(NUM_MIDI_PITCHES * sizeof(int));
+    int *slot_root = (int*)malloc(NUM_MIDI_PITCHES * sizeof(int));
+    uint8_t *slot_series = (uint8_t*)malloc(NUM_MIDI_PITCHES);
+
     clock_t route_start_clock = clock();
 
     for (uint32_t m = 0; m < num_frames; m++) {
@@ -2274,8 +2265,11 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             power[k] = acc;
         }
 
+        slot_stats(power, nbins, slot_of_bin, slot_energy, slot_peak);
+        slot_roots(slot_energy, slot_peak, slot_root, slot_series);
+
         uint16_t *row = labels + base;
-        int nreg = route_frame(power, resid, nbins, binw, row, regions);
+        int nreg = route_frame(power, resid, nbins, row, regions, slot_of_bin, slot_root, slot_series);
 
         for (int i = 0; i < nreg; i++) {
             int best = -1, best_ov = 0;
@@ -2316,8 +2310,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     int ngroups = group_ridges(ridges, nridges, groups);
 
     size_t dest_count = (size_t)NUM_MIDI_PITCHES + (size_t)ngroups;
-    size_t mask_bytes = ((size_t)nbins + 7) / 8;
-    uint8_t *dest_bins = (uint8_t*)calloc(dest_count * mask_bytes, 1);
     uint8_t *dest_active = (uint8_t*)calloc(dest_count * (size_t)num_frames, 1);
 
     for (uint32_t m = 0; m < num_frames; m++) {
@@ -2336,7 +2328,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
                 d = (size_t)NUM_MIDI_PITCHES + (size_t)g;
             }
             if (d >= dest_count) continue;
-            dest_bins[d * mask_bytes + (size_t)(k >> 3)] |= (uint8_t)(1u << (k & 7));
             dest_active[d * (size_t)num_frames + m] = 1;
         }
     }
@@ -2357,10 +2348,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     int dest_done = 0;
 
     for (size_t d = 0; d < dest_count; d++) {
-        int any_bin = 0;
-        for (size_t b = 0; b < mask_bytes; b++) if (dest_bins[d * mask_bytes + b]) { any_bin = 1; break; }
-        if (!any_bin) continue;
-
         int any_frame = 0;
         for (uint32_t m = 0; m < num_frames; m++) if (dest_active[d * (size_t)num_frames + m]) { any_frame = 1; break; }
         if (!any_frame) continue;
@@ -2379,8 +2366,21 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
                 if (!dest_active[d * (size_t)num_frames + m]) continue;
                 size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
                 memset(pitch_frame, 0, FFT_SIZE * sizeof(Complex));
+                uint16_t *row = labels + (size_t)m * (size_t)nbins;
                 for (int k = 0; k < nbins; k++) {
-                    if (!(dest_bins[d * mask_bytes + (size_t)(k >> 3)] & (uint8_t)(1u << (k & 7)))) continue;
+                    uint16_t lab = row[k];
+                    if (lab == 0) continue;
+                    size_t dd;
+                    if (lab < LABEL_RIDGE_BASE) {
+                        dd = (size_t)(lab - LABEL_PITCH_BASE);
+                    } else {
+                        int rid = (int)lab - LABEL_RIDGE_BASE;
+                        if (rid < 0 || rid >= nridges) continue;
+                        int g = ridges[rid].group;
+                        if (g < 0) continue;
+                        dd = (size_t)NUM_MIDI_PITCHES + (size_t)g;
+                    }
+                    if (dd != d) continue;
                     ComplexFloat v = stft_data[frame_base + k];
                     pitch_frame[k].r = (double)v.r;
                     pitch_frame[k].i = (double)v.i;
@@ -2644,8 +2644,12 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     free(regions);
     free(prev_regions);
     free(prev_ridge);
-    free(dest_bins);
     free(dest_active);
+    free(slot_of_bin);
+    free(slot_energy);
+    free(slot_peak);
+    free(slot_root);
+    free(slot_series);
     if (orig_audio_buffer) free(orig_audio_buffer);
     free(pitch_frame);
     free(fft_frame);
