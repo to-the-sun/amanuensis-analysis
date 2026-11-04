@@ -17,7 +17,9 @@
  * Under --debug (see flux_separator_atonal_debug.bat) every stem's unmodified
  * flux envelope is also written into [flux] as <stem>_raw_flux.wav, beside the
  * modified envelope in pitch_stems, with the raw recombined file
- * (basename_recombined_raw_flux.wav) next to the modified one.
+ * (basename_recombined_raw_flux.wav) next to the modified one, and the
+ * interactive report ([flux]/<basename>_index.html with its JS data, plus the
+ * batch dashboard) plots raw against modified for every stem.
  *
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
@@ -864,7 +866,11 @@ void generate_flux_html_report(
         fprintf(f, "  <div class=\"stem-card\">\n");
         fprintf(f, "    <div class=\"stem-header\">\n");
         fprintf(f, "      <div class=\"stem-title\">\n");
-        fprintf(f, "        <span class=\"pitch-tag\">MIDI %03d</span> %s (%.2f Hz)\n", st->pitch, st->note_name, midi_to_frequency(st->pitch));
+        if (st->pitch >= NUM_MIDI_PITCHES) {
+            fprintf(f, "        <span class=\"pitch-tag\">ATONAL %03d</span> %s\n", st->pitch - NUM_MIDI_PITCHES, st->note_name);
+        } else {
+            fprintf(f, "        <span class=\"pitch-tag\">MIDI %03d</span> %s (%.2f Hz)\n", st->pitch, st->note_name, midi_to_frequency(st->pitch));
+        }
         fprintf(f, "      </div>\n");
         fprintf(f, "      <div class=\"stem-metrics\">\n");
         fprintf(f, "        <span>Peaks: %d</span>\n", st->num_peaks);
@@ -2140,7 +2146,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     }
 
     char raw_done[1024];
-    snprintf(raw_done, sizeof(raw_done), "[flux]/%s_recombined_raw_flux.wav", basename);
+    snprintf(raw_done, sizeof(raw_done), "[flux]/%s_flux_waveform_data.js", basename);
     if (pitch_stems_exist_for(stem_dir, basename) &&
         (!debug_mode || flux_output_exists(stem_dir, raw_done))) {
         if (result) result->skipped = 1;
@@ -2183,6 +2189,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             padded_input[c][i + pad_samples] = wav->data[i * num_channels + c];
         }
     }
+
+    double *orig_audio_buffer = wav->data;
+    wav->data = NULL;
 
     double window[FFT_SIZE];
     for (int i = 0; i < FFT_SIZE; i++) window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FFT_SIZE));
@@ -2484,6 +2493,56 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     for (int i = 0; i < nout; i++) if (outs[i].peak > shared_peak) shared_peak = outs[i].peak;
     if (!(shared_peak > 1e-12)) shared_peak = 1.0;
 
+    FluxStem *flux_stems = NULL;
+    if (debug_mode && nout > 0) {
+        flux_stems = (FluxStem*)calloc((size_t)nout, sizeof(FluxStem));
+        for (int i = 0; flux_stems && i < nout; i++) {
+            DestOut *o = &outs[i];
+            FluxStem *st = &flux_stems[i];
+            if (o->atonal) {
+                st->pitch = NUM_MIDI_PITCHES + o->index;
+                snprintf(st->note_name, sizeof(st->note_name), "atonal %03d", o->index);
+            } else {
+                st->pitch = o->index;
+                get_note_name(o->index, st->note_name, sizeof(st->note_name));
+            }
+            snprintf(st->mod_filename, sizeof(st->mod_filename), "%s", o->name);
+
+            double raw_peak = 0.0;
+            if (o->raw) for (size_t k = 0; k < total_channel_samples; k++) {
+                double v = (double)o->raw[k];
+                if (v > raw_peak) raw_peak = v;
+            }
+            st->raw_flux_i16 = (int16_t*)calloc(total_samples, sizeof(int16_t));
+            st->mod_flux_i16 = (int16_t*)calloc(total_samples, sizeof(int16_t));
+            if (!o->raw || !o->flux || !st->raw_flux_i16 || !st->mod_flux_i16 || !(raw_peak > 1e-12)) continue;
+
+            for (uint32_t s = 0; s < total_samples; s++) {
+                double r = 0.0, m = 0.0;
+                for (uint32_t c = 0; c < num_channels; c++) {
+                    r += (double)o->raw[(size_t)s * num_channels + c];
+                    m += (double)o->flux[(size_t)s * num_channels + c];
+                }
+                r = r / num_channels / raw_peak;
+                m = m / num_channels / raw_peak;
+                if (r > 1.0) r = 1.0;
+                if (m > 1.0) m = 1.0;
+                st->raw_flux_i16[s] = (int16_t)lround(r * 32767.0);
+                st->mod_flux_i16[s] = (int16_t)lround(m * 32767.0);
+            }
+
+            double *ch0 = (double*)malloc((size_t)total_samples * sizeof(double));
+            if (ch0) {
+                for (uint32_t s = 0; s < total_samples; s++) {
+                    ch0[s] = (double)o->raw[(size_t)s * num_channels];
+                }
+                detect_all_peaks(ch0, total_samples, &st->peaks, &st->num_peaks);
+                detect_all_troughs(ch0, total_samples, &st->troughs, &st->num_troughs);
+                free(ch0);
+            }
+        }
+    }
+
     double *recombined = (double*)calloc(total_channel_samples, sizeof(double));
     double *recombined_raw = debug_mode ? (double*)calloc(total_channel_samples, sizeof(double)) : NULL;
     double *wb = (double*)malloc(total_channel_samples * sizeof(double));
@@ -2541,6 +2600,18 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     }
     free(wb);
 
+    if (flux_stems) {
+        generate_flux_html_report(flux_dir, basename, sample_rate, num_channels, total_samples,
+                                  audio_duration, orig_audio_buffer, flux_stems, nout);
+        for (int i = 0; i < nout; i++) {
+            free(flux_stems[i].raw_flux_i16);
+            free(flux_stems[i].mod_flux_i16);
+            free(flux_stems[i].peaks);
+            free(flux_stems[i].troughs);
+        }
+        free(flux_stems);
+    }
+
     int atonal_written = 0;
     for (int i = 0; i < nout; i++) if (outs[i].atonal) atonal_written++;
 
@@ -2575,6 +2646,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     free(prev_ridge);
     free(dest_bins);
     free(dest_active);
+    if (orig_audio_buffer) free(orig_audio_buffer);
     free(pitch_frame);
     free(fft_frame);
     free(stft_data);
@@ -2724,7 +2796,7 @@ int main(int argc, char *argv[]) {
     printf("  Worker Threads:    %d\n", num_threads);
     printf("  Output Directory:  %s/\n", stem_dir);
     printf("  Debug Output:      %s\n\n", debug_mode
-           ? "enabled (raw and modified flux side by side in [flux])"
+           ? "enabled (raw flux WAVs and [flux] reports)"
            : "disabled (no raw flux comparison)");
 
     int is_tty = 1;
