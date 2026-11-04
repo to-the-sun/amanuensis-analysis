@@ -14,9 +14,10 @@
  *
  * A normal run writes pitch_stems/<basename>_pitch_<nnn>_<note>_modified_flux.wav
  * for every audible stem and [flux]/<basename>_recombined_modified_flux.wav. The
- * [flux] HTML reports are debug artifacts, produced only when --debug is passed
- * (see flux_separator_debug.bat), so a normal run pays for no peak/trough
- * detection, no 16-bit report arrays and no report writing.
+ * Under --debug (see flux_separator_atonal_debug.bat) every stem's unmodified
+ * flux envelope is also written into [flux] as <stem>_raw_flux.wav, beside the
+ * modified envelope in pitch_stems, with the raw recombined file
+ * (basename_recombined_raw_flux.wav) next to the modified one.
  *
  * Supports single file drag-and-drop, multi-file drag-and-drop, and double-clicking
  * (which automatically scans the folder for all WAV files and processes them simultaneously
@@ -1375,7 +1376,14 @@ void generate_master_flux_html_report(
     FILE *f = fopen(master_html_path, "w");
     if (!f) return;
 
-    if (num_results == 1 && (results[0].success || results[0].skipped)) {
+    char single_report[4096];
+    snprintf(single_report, sizeof(single_report), "%s/%s_index.html", flux_dir,
+             num_results > 0 ? results[0].basename : "");
+    FILE *single_f = (num_results == 1 && (results[0].success || results[0].skipped))
+        ? fopen(single_report, "rb") : NULL;
+    if (single_f) fclose(single_f);
+
+    if (single_f) {
         /* Single file redirect to <basename>_index.html */
         fprintf(f, "<!DOCTYPE html>\n<html>\n<head>\n");
         fprintf(f, "<meta http-equiv=\"refresh\" content=\"0; url=%s_index.html\">\n", results[0].basename);
@@ -1435,7 +1443,11 @@ void generate_master_flux_html_report(
             fprintf(f, "      <span>Flux Stems Exported: %d</span>\n", r->stem_count);
             fprintf(f, "      <span>Processing Time: %.2fs (%.1fx Real-Time)</span>\n", r->elapsed_sec, r->speed_ratio);
             fprintf(f, "    </div>\n");
-            if (r->success || r->skipped) {
+            char report_path[4096];
+            snprintf(report_path, sizeof(report_path), "%s/%s_index.html", flux_dir, r->basename);
+            FILE *rf = fopen(report_path, "rb");
+            if (rf) {
+                fclose(rf);
                 fprintf(f, "    <a class=\"btn\" href=\"%s_index.html\">Open Interactive Report &rarr;</a>\n", r->basename);
             }
             fprintf(f, "  </div>\n");
@@ -1884,6 +1896,7 @@ typedef struct {
     int atonal;
     int index;
     double anchor_hz;
+    float *raw;
 } DestOut;
 
 static int region_overlap(const Region *a, const Region *b) {
@@ -2114,7 +2127,6 @@ static int group_ridges(Ridge *ridges, int nridges, Group *groups) {
 
 int process_audio(const char *input_path, const char *stem_dir, FileBatchResult *result, int thread_slot, int num_slots, int debug_mode) {
     clock_t start_clock = clock();
-    (void)debug_mode;
 
     init_fft_tables();
 
@@ -2127,7 +2139,10 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         snprintf(result->basename, sizeof(result->basename), "%s", basename);
     }
 
-    if (pitch_stems_exist_for(stem_dir, basename)) {
+    char raw_done[1024];
+    snprintf(raw_done, sizeof(raw_done), "[flux]/%s_recombined_raw_flux.wav", basename);
+    if (pitch_stems_exist_for(stem_dir, basename) &&
+        (!debug_mode || flux_output_exists(stem_dir, raw_done))) {
         if (result) result->skipped = 1;
         pthread_mutex_lock(&g_console_mutex);
         printf("  Skipping %s: stems already exist for it.\n", input_path);
@@ -2407,6 +2422,14 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         compute_stem_transience_flux(unpadded, total_samples, num_channels, sample_rate, raw_flux, 0);
         free(unpadded);
 
+        float *raw_snapshot = NULL;
+        if (debug_mode) {
+            raw_snapshot = (float*)malloc(total_channel_samples * sizeof(float));
+            if (raw_snapshot) {
+                for (size_t k = 0; k < total_channel_samples; k++) raw_snapshot[k] = (float)raw_flux[k];
+            }
+        }
+
         for (uint32_t c = 0; c < num_channels; c++) {
             double *env = (double*)malloc((size_t)total_samples * sizeof(double));
             if (!env) continue;
@@ -2426,8 +2449,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         DestOut *o = &outs[nout];
         memset(o, 0, sizeof(*o));
         o->peak = peak;
+        o->raw = raw_snapshot;
         o->flux = (float*)malloc(total_channel_samples * sizeof(float));
-        if (!o->flux) { free(raw_flux); continue; }
+        if (!o->flux) { free(raw_flux); free(raw_snapshot); continue; }
         for (size_t k = 0; k < total_channel_samples; k++) o->flux[k] = (float)raw_flux[k];
         free(raw_flux);
 
@@ -2461,6 +2485,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     if (!(shared_peak > 1e-12)) shared_peak = 1.0;
 
     double *recombined = (double*)calloc(total_channel_samples, sizeof(double));
+    double *recombined_raw = debug_mode ? (double*)calloc(total_channel_samples, sizeof(double)) : NULL;
     double *wb = (double*)malloc(total_channel_samples * sizeof(double));
     int written = 0;
 
@@ -2474,6 +2499,23 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         char path[8192];
         snprintf(path, sizeof(path), "%s/%s", stem_dir, outs[i].name);
         if (write_wav_16bit(path, sample_rate, num_channels, total_samples, wb)) written++;
+
+        if (outs[i].raw) {
+            char raw_name[512];
+            snprintf(raw_name, sizeof(raw_name), "%s", outs[i].name);
+            char *tag = strstr(raw_name, "_modified_flux.wav");
+            if (tag) snprintf(tag, sizeof(raw_name) - (size_t)(tag - raw_name), "_raw_flux.wav");
+            for (size_t k = 0; k < total_channel_samples; k++) {
+                double v = (double)outs[i].raw[k] / shared_peak;
+                wb[k] = v;
+                if (recombined_raw) recombined_raw[k] += v;
+            }
+            snprintf(path, sizeof(path), "%s/%s", flux_dir, raw_name);
+            write_wav_16bit(path, sample_rate, num_channels, total_samples, wb);
+            free(outs[i].raw);
+            outs[i].raw = NULL;
+        }
+
         free(outs[i].flux);
         outs[i].flux = NULL;
     }
@@ -2486,6 +2528,16 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         snprintf(rec_path, sizeof(rec_path), "%s/%s_recombined_modified_flux.wav", flux_dir, basename);
         write_wav_16bit(rec_path, sample_rate, num_channels, total_samples, recombined);
         free(recombined);
+    }
+
+    if (recombined_raw) {
+        double raw_peak = 0.0;
+        for (size_t k = 0; k < total_channel_samples; k++) if (fabs(recombined_raw[k]) > raw_peak) raw_peak = fabs(recombined_raw[k]);
+        if (raw_peak > 1e-12) for (size_t k = 0; k < total_channel_samples; k++) recombined_raw[k] /= raw_peak;
+        char raw_rec_path[12288];
+        snprintf(raw_rec_path, sizeof(raw_rec_path), "%s/%s_recombined_raw_flux.wav", flux_dir, basename);
+        write_wav_16bit(raw_rec_path, sample_rate, num_channels, total_samples, recombined_raw);
+        free(recombined_raw);
     }
     free(wb);
 
@@ -2672,8 +2724,8 @@ int main(int argc, char *argv[]) {
     printf("  Worker Threads:    %d\n", num_threads);
     printf("  Output Directory:  %s/\n", stem_dir);
     printf("  Debug Output:      %s\n\n", debug_mode
-           ? "enabled (markers and [flux] reports)"
-           : "disabled (no [flux] reports)");
+           ? "enabled (raw and modified flux side by side in [flux])"
+           : "disabled (no raw flux comparison)");
 
     int is_tty = 1;
 #if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
@@ -2752,7 +2804,7 @@ int main(int argc, char *argv[]) {
     if (debug_mode) {
         printf("  Batch Report URL:       %s/index.html\n", flux_dir);
     } else {
-        printf("  Debug Output:           disabled (double-click flux_separator_debug.bat for the flux reports)\n");
+        printf("  Debug Output:           disabled (double-click flux_separator_atonal_debug.bat for raw flux)\n");
     }
     printf("====================================================\n");
 
