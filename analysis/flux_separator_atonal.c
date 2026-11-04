@@ -1922,8 +1922,7 @@ static void slot_stats(const double *power, int nbins, const int *slot_of_bin,
 }
 
 /* A slot is a harmonic of the lowest louder slot whose peak bin divides its
- * own within one bin; a root is a series once its octave and twelfth both
- * attribute to it. */
+ * own within one bin; a root is a series once its octave attributes to it. */
 static void slot_roots(double *energy, const int *peak_bin, int *root, uint8_t *series) {
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) root[p] = -1;
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
@@ -1946,13 +1945,10 @@ static void slot_roots(double *energy, const int *peak_bin, int *root, uint8_t *
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
         if (root[p] >= 0 || peak_bin[p] < 1) continue;
         int b = peak_bin[p];
-        int h2 = -1, h3 = -1;
         for (int q = p + 1; q < NUM_MIDI_PITCHES; q++) {
             if (root[q] != p) continue;
-            if (h2 < 0 && abs(peak_bin[q] - 2 * b) <= 1) h2 = q;
-            if (h3 < 0 && abs(peak_bin[q] - 3 * b) <= 1) h3 = q;
+            if (abs(peak_bin[q] - 2 * b) <= 1) { series[p] = 1; break; }
         }
-        if (h2 >= 0 && h3 >= 0) series[p] = 1;
     }
 }
 
