@@ -1996,13 +1996,24 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
 
 
-        /* Normalize flux envelope to peak 1.0 */
-        double peak_flux = 0.0;
+        /* Find unnormalized raw flux peak across channels */
+        double unnorm_peak_flux = 0.0;
         for (size_t k = 0; k < total_channel_samples; k++) {
-            if (raw_flux_buf[k] > peak_flux) {
-                peak_flux = raw_flux_buf[k];
+            if (raw_flux_buf[k] > unnorm_peak_flux) {
+                unnorm_peak_flux = raw_flux_buf[k];
             }
         }
+
+        char note_str[32];
+        get_note_name(p, note_str, sizeof(note_str));
+        pthread_mutex_lock(&g_console_mutex);
+        printf("  [%s] Pitch %03d (%s) unnormalized raw flux peak: %.6f\n",
+               basename, p, note_str, unnorm_peak_flux);
+        fflush(stdout);
+        pthread_mutex_unlock(&g_console_mutex);
+
+        /* Normalize flux envelope to peak 1.0 */
+        double peak_flux = unnorm_peak_flux;
         if (peak_flux > 1e-12) {
             double scale = 1.0 / peak_flux;
             for (size_t k = 0; k < total_channel_samples; k++) {
