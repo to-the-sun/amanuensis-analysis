@@ -53,8 +53,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define FFT_SIZE 2048
-#define HOP_SIZE 512
+#define FFT_SIZE 8192
+#define HOP_SIZE 2048
 #define MAX_CHANNELS 2
 #define NUM_MIDI_PITCHES 128
 
@@ -1796,7 +1796,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     uint32_t num_frames = (padded_total_samples >= FFT_SIZE) ? ((padded_total_samples - FFT_SIZE) / HOP_SIZE + 1) : 0;
 
-    int bin_pitch[FFT_SIZE / 2 + 1];
     int pitch_bin_count[NUM_MIDI_PITCHES] = {0};
     int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_MIDI_PITCHES * (FFT_SIZE / 2 + 1) * sizeof(int));
     if (!pitch_bins) {
@@ -1813,7 +1812,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     for (int k = 0; k <= FFT_SIZE / 2; k++) {
         double freq = (double)k * sample_rate / FFT_SIZE;
         int p = freq_to_midi_pitch(freq);
-        bin_pitch[k] = p;
         pitch_bins[p][pitch_bin_count[p]++] = k;
     }
 
@@ -1861,18 +1859,10 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             fft(fft_frame, FFT_SIZE, 0);
 
             size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
-            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
 
             for (int k = 0; k <= FFT_SIZE / 2; k++) {
                 stft_data[frame_base + k].r = (float)fft_frame[k].r;
                 stft_data[frame_base + k].i = (float)fft_frame[k].i;
-
-                double mag_sq = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
-                if (mag_sq > 1e-18) {
-                    int p = bin_pitch[k];
-                    pitch_active[p] = 1;
-                    frame_pitch_active[frame_p_base + p] = 1;
-                }
             }
         }
     }
@@ -1896,13 +1886,43 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     double *recombined_mod_flux = (double*)calloc(total_channel_samples, sizeof(double));
 
     /*
-     * Frequency-domain energy and active duration thresholds:
-     * A frame's STFT bin energy for sinusoidal amplitude A equals A^2 * (FFT_SIZE^2 / 16).
-     * Frame energy threshold corresponds to the 19% peak noise floor threshold.
+     * Frequency-domain calibrated peak-bin amplitude threshold:
+     * For a sinusoidal tone with peak amplitude A, the peak bin magnitude in a Hann
+     * windowed STFT is A * (FFT_SIZE / 4).
+     * Therefore, the threshold on individual bin magnitude squared is:
+     *   peak_bin_mag_threshold_sq = (noise_floor_threshold * FFT_SIZE / 4)^2
      */
-    double bin_energy_scale = (double)FFT_SIZE * (double)FFT_SIZE / 16.0;
-    double frame_energy_threshold = noise_floor_threshold * noise_floor_threshold * bin_energy_scale;
+    double bin_amp_scale = (double)FFT_SIZE / 4.0;
+    double peak_bin_mag_threshold = noise_floor_threshold * bin_amp_scale;
+    double peak_bin_mag_threshold_sq = peak_bin_mag_threshold * peak_bin_mag_threshold;
+    double bin_energy_scale = bin_amp_scale * bin_amp_scale;
     double frame_hop_sec = (double)HOP_SIZE / (double)sample_rate;
+
+    /*
+     * Populate frame_pitch_active and pitch_active based on calibrated peak-bin amplitude
+     */
+    for (uint32_t c = 0; c < num_channels; c++) {
+        for (uint32_t m = 0; m < num_frames; m++) {
+            size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
+            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
+
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                double max_bin_sq = 0.0;
+                for (int b = 0; b < pitch_bin_count[p]; b++) {
+                    int k = pitch_bins[p][b];
+                    ComplexFloat val = stft_data[frame_base + k];
+                    double mag_sq = (double)val.r * (double)val.r + (double)val.i * (double)val.i;
+                    if (mag_sq > max_bin_sq) {
+                        max_bin_sq = mag_sq;
+                    }
+                }
+                if (max_bin_sq >= peak_bin_mag_threshold_sq) {
+                    frame_pitch_active[frame_p_base + p] = 1;
+                    pitch_active[p] = 1;
+                }
+            }
+        }
+    }
 
     clock_t flux_start_clock = clock();
 
@@ -1916,8 +1936,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
         /*
          * Frequency-domain audibility evaluation:
-         * Compute frame energy across STFT bins for pitch stem p, counting frames above
-         * the noise floor threshold and accumulating total energy for RMS estimation.
+         * Count frames meeting the calibrated peak-bin threshold and accumulate energy for RMS estimation.
          */
         uint32_t active_stft_frames = 0;
         double total_pitch_energy = 0.0;
@@ -1926,19 +1945,15 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             int frame_active = 0;
             for (uint32_t c = 0; c < num_channels; c++) {
                 size_t frame_p_idx = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES + p;
-                if (!frame_pitch_active[frame_p_idx]) continue;
+                if (frame_pitch_active[frame_p_idx]) {
+                    frame_active = 1;
+                }
 
                 size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
-                double frame_energy = 0.0;
                 for (int b = 0; b < pitch_bin_count[p]; b++) {
                     int k = pitch_bins[p][b];
                     ComplexFloat val = stft_data[frame_base + k];
-                    frame_energy += (double)val.r * (double)val.r + (double)val.i * (double)val.i;
-                }
-                total_pitch_energy += frame_energy;
-
-                if (frame_energy >= frame_energy_threshold) {
-                    frame_active = 1;
+                    total_pitch_energy += (double)val.r * (double)val.r + (double)val.i * (double)val.i;
                 }
             }
             if (frame_active) {
