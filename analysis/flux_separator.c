@@ -84,6 +84,12 @@ typedef struct {
 } WAVFile;
 
 typedef struct {
+    int pitch;
+    char note_name[32];
+    double unnorm_peak_flux;
+} StemFluxPeakInfo;
+
+typedef struct {
     char input_path[1024];
     char basename[512];
     uint32_t sample_rate;
@@ -95,6 +101,7 @@ typedef struct {
     double speed_ratio;
     int success;
     int skipped;
+    StemFluxPeakInfo stem_peaks[NUM_MIDI_PITCHES];
 } FileBatchResult;
 
 const char *NOTE_NAMES[12] = {
@@ -1887,10 +1894,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     clock_t flux_start_clock = clock();
 
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-        if (p % 16 == 0 || p == NUM_MIDI_PITCHES - 1) {
-            double elapsed = (double)(clock() - flux_start_clock) / CLOCKS_PER_SEC;
-            print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", p + 1, NUM_MIDI_PITCHES, elapsed);
-        }
+        double elapsed = (double)(clock() - flux_start_clock) / CLOCKS_PER_SEC;
+        print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", p + 1, NUM_MIDI_PITCHES, elapsed);
 
         if (!pitch_active[p] || pitch_bin_count[p] == 0) continue;
 
@@ -2004,13 +2009,11 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             }
         }
 
-        char note_str[32];
-        get_note_name(p, note_str, sizeof(note_str));
-        pthread_mutex_lock(&g_console_mutex);
-        printf("  [%s] Pitch %03d (%s) unnormalized raw flux peak: %.6f\n",
-               basename, p, note_str, unnorm_peak_flux);
-        fflush(stdout);
-        pthread_mutex_unlock(&g_console_mutex);
+        if (result && audible_count < NUM_MIDI_PITCHES) {
+            result->stem_peaks[audible_count].pitch = p;
+            get_note_name(p, result->stem_peaks[audible_count].note_name, sizeof(result->stem_peaks[audible_count].note_name));
+            result->stem_peaks[audible_count].unnorm_peak_flux = unnorm_peak_flux;
+        }
 
         /* Normalize flux envelope to peak 1.0 */
         double peak_flux = unnorm_peak_flux;
@@ -2416,6 +2419,30 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_files; i++) {
         if (results[i].success) total_success++;
         if (results[i].skipped) total_skipped++;
+    }
+
+    /* Informational table of unnormalized raw flux peaks for all exported stems */
+    printf("====================================================\n");
+    printf("           UNNORMALIZED RAW FLUX PEAKS              \n");
+    printf("====================================================\n");
+    int any_stems_printed = 0;
+    for (int i = 0; i < num_files; i++) {
+        const FileBatchResult *r = &results[i];
+        if (!r->success || r->stem_count == 0) continue;
+        printf("  Source File: %s (%d stems)\n", r->basename, r->stem_count);
+        printf("    MIDI Pitch | Note Name | Unnormalized Raw Flux Peak\n");
+        printf("    -----------+-----------+---------------------------\n");
+        for (int s = 0; s < r->stem_count; s++) {
+            printf("       %03d     |   %-7s | %.6f\n",
+                   r->stem_peaks[s].pitch,
+                   r->stem_peaks[s].note_name,
+                   r->stem_peaks[s].unnorm_peak_flux);
+        }
+        printf("\n");
+        any_stems_printed = 1;
+    }
+    if (!any_stems_printed) {
+        printf("  No new stems were exported in this run.\n\n");
     }
 
     printf("====================================================\n");
