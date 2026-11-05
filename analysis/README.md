@@ -1,6 +1,6 @@
 # Standalone Offline Cumulative Transience Analyzer & Exporter
 
-This directory contains the pure C implementation of the offline transience analyzer and HTML report exporter (`analyze`), pitch stem spectral flux separator (`flux_separator`), pattern song correlation builder (`song_builder`), and group analysis launcher (`analyze_group.bat`).
+This directory contains the pure C implementation of the offline transience analyzer and HTML report exporter (`analyze`), pitch stem spectral flux separator (`flux_separator`), pattern song rating builder (`song_builder`), and group analysis launcher (`analyze_group.bat`).
 
 ## Architecture
 
@@ -67,7 +67,7 @@ To compile the analysis executables:
 - **Linux**: `make` (produces `analyze`, `song_builder`, and `flux_separator`)
 - **Windows (64-bit Cross-Compilation)**:
   - `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra analyze.c exporter.c cumulative_transience.c crossfade.c -o analyze.exe -lm -lpthread -lOpenCL`
-  - `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra song_builder.c -o song_builder.exe -lm`
+  - `x86_64-w64-mingw32-gcc -O3 -I. -Wall -Wextra song_builder.c cumulative_transience.c -o song_builder.exe -lm -lpthread -lOpenCL`
   - `x86_64-w64-mingw32-gcc -O3 -Wall -std=c99 -I. -pthread flux_separator.c -o flux_separator.exe -lm`
 
 ## Executables Summary
@@ -76,4 +76,4 @@ To compile the analysis executables:
 - **`flux_separator_debug.bat`**: Double-click launcher for `flux_separator.exe --debug`. It runs the separator from its own folder, so every WAV beside it is separated with the debug artifacts enabled; keep it next to `flux_separator.exe`.
 - **`analyze` / `analyze.exe`**: C cumulative transience analyzer generating palette pattern maps, loop/stem WAV slices, JSON manifests, and interactive HTML reports.
 - **`analyze_group.bat`**: Batch launcher for group stem analysis. Launches `analyze.exe --group`, which copies `song_builder.exe` into `[palettes]/[stems]/` itself, leaving the original in place.
-- **`song_builder` / `song_builder.exe`**: Evaluates correlation across candidate patterns using recombined flux audio envelopes. All prospective patterns in a potential song are added together sample index by sample index to form a summed envelope. The standard deviation across samples where more than one pattern is present (a pattern alone with itself does not count towards standard deviation) serves as the overall correlation metric. Patterns are sorted descending by active length and evaluated sequentially in a unified loop: starting with the longest pattern (zero correlation being better than null/uninitialized correlation), each subsequent candidate pattern in descending length order is tested and accepted if it increases overall standard deviation correlation, or rejected if it decreases or maintains correlation. Selected pattern WAV files are copied into `[stems]/[song]`, mixed into `[song]/finished_song.wav` normalized to peak 1.0 (omitting leading zero samples prior to the first non-zero sample so that the first non-zero sample is at index zero), and exported with an interactive HTML report (`song_correlation_report.html`, displaying patterns in the order they were judged, descending from longest to shortest) and companion JS data file (`song_correlation_waveform_data.js`).
+- **`song_builder` / `song_builder.exe`**: Rates candidate pattern sets with the cumulative transience algorithm using 4 bands and a 15,000ms window. Every pattern in a proposed song runs through its own analyzer, all analyzers accumulate into one shared group history, and the scores they generate are summed to give the song rating. A random pattern starts the song; at each step a random pattern not yet in the song is proposed, and it is added when the rating of the song including it is higher than the rating without it. Rounds of random proposals continue until a full round adds nothing. The random seed is printed and can be passed as the second argument to repeat a run. Selected pattern WAV files are copied into `[stems]/[song]`, mixed into `[song]/finished_song.wav` normalized to peak 1.0 (omitting leading zero samples prior to the first non-zero sample so that the first non-zero sample is at index zero), and exported with an interactive HTML report (`song_rating_report.html`, displaying patterns in the order they were judged) and companion JS data file (`song_rating_waveform_data.js`).
