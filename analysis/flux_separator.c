@@ -1979,6 +1979,16 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         free(frame_flux);
         free(prev_bin_mag);
 
+        // When debug mode is enabled, save the raw unnormalized flux WAV to [flux]
+        if (debug_mode) {
+            char raw_flux_filename[1024];
+            char note_str[32];
+            get_note_name(p, note_str, sizeof(note_str));
+            snprintf(raw_flux_filename, sizeof(raw_flux_filename), "%s/%s_pitch_%03d_%s_flux.wav",
+                     flux_dir, basename, p, note_str);
+            write_wav_16bit(raw_flux_filename, sample_rate, num_channels, total_samples, raw_flux_buf);
+        }
+
         /* Normalize flux envelope to peak 1.0 */
         double peak_flux = 0.0;
         for (size_t k = 0; k < total_channel_samples; k++) {
