@@ -850,7 +850,6 @@ void generate_flux_html_report(
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
     fprintf(f, "    }\n");
-
     fprintf(f, "    if (window.WAVEFORM_DATA.modFluxPcm) {\n");
     fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "        if (window.WAVEFORM_DATA.modFluxPcm[i]) {\n");
@@ -1008,7 +1007,6 @@ void generate_flux_html_report(
     fprintf(f, "          let maxV = pcm[s1];\n");
     fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
     fprintf(f, "            const v = pcm[s];\n");
-    fprintf(f, "            if (v < minV) minV = v;\n");
     fprintf(f, "            if (v > maxV) maxV = v;\n");
     fprintf(f, "          }\n");
     fprintf(f, "          maxArr[px] = Math.max(0, Math.min(1, maxV));\n");
@@ -1869,37 +1867,16 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
 
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                int has_prominent_peak = 0;
+                double max_bin_sq = 0.0;
                 for (int b = 0; b < pitch_bin_count[p]; b++) {
                     int k = pitch_bins[p][b];
                     ComplexFloat val = stft_data[frame_base + k];
                     double mag_sq = (double)val.r * (double)val.r + (double)val.i * (double)val.i;
-                    if (mag_sq < peak_bin_mag_threshold_sq) {
-                        continue;
-                    }
-
-                    /*
-                     * Verify that bin k is a local spectral peak (strictly greater than adjacent bins k-1 and k+1)
-                     * to reject sidelobe skirt leakage from adjacent loud pitches.
-                     */
-                    double left_mag_sq = 0.0;
-                    if (k > 0) {
-                        ComplexFloat left_val = stft_data[frame_base + k - 1];
-                        left_mag_sq = (double)left_val.r * (double)left_val.r + (double)left_val.i * (double)left_val.i;
-                    }
-
-                    double right_mag_sq = 0.0;
-                    if (k < (int)(num_bins_per_frame - 1)) {
-                        ComplexFloat right_val = stft_data[frame_base + k + 1];
-                        right_mag_sq = (double)right_val.r * (double)right_val.r + (double)right_val.i * (double)right_val.i;
-                    }
-
-                    if (mag_sq > left_mag_sq && mag_sq > right_mag_sq) {
-                        has_prominent_peak = 1;
-                        break;
+                    if (mag_sq > max_bin_sq) {
+                        max_bin_sq = mag_sq;
                     }
                 }
-                if (has_prominent_peak) {
+                if (max_bin_sq >= peak_bin_mag_threshold_sq) {
                     frame_pitch_active[frame_p_base + p] = 1;
                     pitch_active[p] = 1;
                 }
@@ -2017,15 +1994,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         free(frame_flux);
         free(prev_bin_mag);
 
-        // When debug mode is enabled, save the raw unnormalized flux WAV to [flux]
-        if (debug_mode) {
-            char raw_flux_filename[12288];
-            char note_str[32];
-            get_note_name(p, note_str, sizeof(note_str));
-            snprintf(raw_flux_filename, sizeof(raw_flux_filename), "%s/%s_pitch_%03d_%s_flux.wav",
-                     flux_dir, basename, p, note_str);
-            write_wav_16bit(raw_flux_filename, sample_rate, num_channels, total_samples, raw_flux_buf);
-        }
+
 
         /* Normalize flux envelope to peak 1.0 */
         double peak_flux = 0.0;
