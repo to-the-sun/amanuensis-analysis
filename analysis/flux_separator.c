@@ -158,10 +158,8 @@ typedef struct {
     int pitch;
     char note_name[32];
     double max_flux_peak;
-    double unnorm_flux_peak;
     double rms_flux;
     int16_t *raw_flux_i16; // mono averaged int16_t PCM array for JS report data
-    int16_t *unnorm_raw_flux_i16; // mono averaged int16_t PCM array for pre-normalized raw flux
     int16_t *mod_flux_i16; // mono averaged int16_t PCM array for JS report data
     int *peaks;
     int num_peaks;
@@ -677,7 +675,6 @@ void generate_flux_html_report(
     fprintf(f, "    <div class=\"legend\">\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: rgba(180, 190, 210, 0.45);\"></div> Original Audio Waveform</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ff5722;\"></div> Raw Spectral Flux Envelope</div>\n");
-    fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #e040fb;\"></div> Pre-Normalized Raw Flux</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #4caf50;\"></div> Modified Flux Envelope</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #ffeb3b;\"></div> Detected Peaks (Top Marks)</div>\n");
     fprintf(f, "      <div class=\"legend-item\"><div class=\"legend-box\" style=\"background: #00bcd4;\"></div> Detected Troughs (Bottom Marks)</div>\n");
@@ -749,26 +746,6 @@ void generate_flux_html_report(
             } else {
                 fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
             }
-        }
-        fprintf(fjs, "  ],\n");
-
-        fprintf(fjs, "  unnormRawFluxPcm: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            if (st->unnorm_raw_flux_i16) {
-                char *b64 = encode_base64_bytes((const uint8_t*)st->unnorm_raw_flux_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
-                if (b64) free(b64);
-            } else {
-                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
-            }
-        }
-        fprintf(fjs, "  ],\n");
-
-        fprintf(fjs, "  unnormFluxPeaks: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            fprintf(fjs, "    %.6f%s\n", st->unnorm_flux_peak, (i + 1 < stem_count) ? "," : "");
         }
         fprintf(fjs, "  ],\n");
 
@@ -873,18 +850,7 @@ void generate_flux_html_report(
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
     fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.unnormRawFluxPcm) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        if (window.WAVEFORM_DATA.unnormRawFluxPcm[i]) {\n");
-    fprintf(f, "          DATA.stems[i].unnormRawFluxPcm = base64ToFloat32(window.WAVEFORM_DATA.unnormRawFluxPcm[i]);\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.unnormFluxPeaks) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        DATA.stems[i].unnormFluxPeak = window.WAVEFORM_DATA.unnormFluxPeaks[i] || 1.0;\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
+
     fprintf(f, "    if (window.WAVEFORM_DATA.modFluxPcm) {\n");
     fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "        if (window.WAVEFORM_DATA.modFluxPcm[i]) {\n");
@@ -962,20 +928,19 @@ void generate_flux_html_report(
     fprintf(f, "  const graphBottom = height - 18;\n");
     fprintf(f, "  const graphTop = 8;\n");
     fprintf(f, "  const graphHeight = graphBottom - graphTop;\n");
-    fprintf(f, "  const stem = DATA.stems[index];\n");
-    fprintf(f, "  const maxEnvScale = Math.max(1.0, stem.unnormFluxPeak || 1.0);\n");
 
     fprintf(f, "  // Grid lines\n");
     fprintf(f, "  ctx.strokeStyle = '#1e1e2c';\n");
     fprintf(f, "  ctx.lineWidth = 1;\n");
     fprintf(f, "  [0.0, 0.25, 0.5, 0.75, 1.0].forEach(val => {\n");
-    fprintf(f, "    const y = graphBottom - (val / maxEnvScale) * graphHeight;\n");
+    fprintf(f, "    const y = graphBottom - val * graphHeight;\n");
     fprintf(f, "    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();\n");
     fprintf(f, "  });\n");
 
     fprintf(f, "  const sampleStart = Math.max(0, Math.floor((viewStart / DATA.duration) * DATA.totalSamples));\n");
     fprintf(f, "  const sampleEnd = Math.min(DATA.totalSamples - 1, Math.ceil((viewEnd / DATA.duration) * DATA.totalSamples));\n");
     fprintf(f, "  const visibleSamples = Math.max(1, sampleEnd - sampleStart + 1);\n");
+    fprintf(f, "  const stem = DATA.stems[index];\n");
 
     fprintf(f, "  function drawOriginalWaveform(pcm) {\n");
     fprintf(f, "    if (!pcm || pcm.length === 0) return;\n");
@@ -1017,17 +982,16 @@ void generate_flux_html_report(
     fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  function drawFluxLine(pcm, color, peakVal) {\n");
+    fprintf(f, "  function drawFluxLine(pcm, color) {\n");
     fprintf(f, "    if (!pcm) return;\n");
     fprintf(f, "    ctx.strokeStyle = color;\n");
     fprintf(f, "    ctx.lineWidth = 1.8;\n");
-    fprintf(f, "    const multiplier = (peakVal !== undefined ? peakVal : 1.0) / maxEnvScale;\n");
     fprintf(f, "    if (visibleSamples <= width * 2) {\n");
     fprintf(f, "      ctx.beginPath();\n");
     fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
     fprintf(f, "        const t = s / DATA.sampleRate;\n");
     fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        const val = Math.max(0, pcm[s]) * multiplier;\n");
+    fprintf(f, "        const val = Math.max(0, Math.min(1, pcm[s]));\n");
     fprintf(f, "        const y = graphBottom - val * graphHeight;\n");
     fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
     fprintf(f, "      }\n");
@@ -1044,9 +1008,10 @@ void generate_flux_html_report(
     fprintf(f, "          let maxV = pcm[s1];\n");
     fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
     fprintf(f, "            const v = pcm[s];\n");
+    fprintf(f, "            if (v < minV) minV = v;\n");
     fprintf(f, "            if (v > maxV) maxV = v;\n");
     fprintf(f, "          }\n");
-    fprintf(f, "          maxArr[px] = Math.max(0, maxV) * multiplier;\n");
+    fprintf(f, "          maxArr[px] = Math.max(0, Math.min(1, maxV));\n");
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
     fprintf(f, "      ctx.beginPath();\n");
@@ -1063,14 +1028,12 @@ void generate_flux_html_report(
     fprintf(f, "    drawOriginalWaveform(DATA.origPcm);\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  // 1. Draw Raw Spectral Flux Envelope (Normalized to 1.0)\n");
-    fprintf(f, "  drawFluxLine(stem.rawFluxPcm, '#ff5722', 1.0);\n");
+    fprintf(f, "  // 1. Draw Raw Spectral Flux Envelope\n");
+    fprintf(f, "  drawFluxLine(stem.rawFluxPcm, '#ff5722');\n");
 
-    fprintf(f, "  // 2. Draw Pre-Normalized Raw Flux Envelope\n");
-    fprintf(f, "  drawFluxLine(stem.unnormRawFluxPcm, '#e040fb', stem.unnormFluxPeak || 1.0);\n");
+    fprintf(f, "  // 2. Draw Modified Flux Envelope\n");
+    fprintf(f, "  drawFluxLine(stem.modFluxPcm, '#4caf50');\n");
 
-    fprintf(f, "  // 3. Draw Modified Flux Envelope (Derived from Normalized)\n");
-    fprintf(f, "  drawFluxLine(stem.modFluxPcm, '#4caf50', 1.0);\n");
     fprintf(f, "  // 3. Draw Peak Hash Marks (coming down from top)\n");
     fprintf(f, "  if (stem.peaks) {\n");
     fprintf(f, "    ctx.strokeStyle = '#ffeb3b';\n");
@@ -1173,10 +1136,9 @@ void generate_flux_html_report(
     fprintf(f, "      const t = xToTime(x, rect.width);\n");
     fprintf(f, "      const s = Math.min(DATA.totalSamples - 1, Math.max(0, Math.round(t * DATA.sampleRate)));\n");
     fprintf(f, "      const rawVal = (stem.rawFluxPcm && stem.rawFluxPcm.length > s) ? stem.rawFluxPcm[s] : 0;\n");
-    fprintf(f, "      const unnormVal = (stem.unnormRawFluxPcm && stem.unnormRawFluxPcm.length > s) ? (stem.unnormRawFluxPcm[s] * (stem.unnormFluxPeak || 1.0)) : 0;\n");
     fprintf(f, "      const modVal = (stem.modFluxPcm && stem.modFluxPcm.length > s) ? stem.modFluxPcm[s] : 0;\n");
     fprintf(f, "      tooltip.style.opacity = '1';\n");
-    fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Raw: ${rawVal.toFixed(4)} | Pre-Norm: ${unnormVal.toFixed(4)} | Mod: ${modVal.toFixed(4)}`;\n");
+    fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Raw Flux: ${rawVal.toFixed(4)} | Modified Flux: ${modVal.toFixed(4)}`;\n");
     fprintf(f, "    });\n");
 
     fprintf(f, "    canvas.addEventListener('mouseleave', () => {\n");
@@ -1907,16 +1869,37 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
 
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                double max_bin_sq = 0.0;
+                int has_prominent_peak = 0;
                 for (int b = 0; b < pitch_bin_count[p]; b++) {
                     int k = pitch_bins[p][b];
                     ComplexFloat val = stft_data[frame_base + k];
                     double mag_sq = (double)val.r * (double)val.r + (double)val.i * (double)val.i;
-                    if (mag_sq > max_bin_sq) {
-                        max_bin_sq = mag_sq;
+                    if (mag_sq < peak_bin_mag_threshold_sq) {
+                        continue;
+                    }
+
+                    /*
+                     * Verify that bin k is a local spectral peak (strictly greater than adjacent bins k-1 and k+1)
+                     * to reject sidelobe skirt leakage from adjacent loud pitches.
+                     */
+                    double left_mag_sq = 0.0;
+                    if (k > 0) {
+                        ComplexFloat left_val = stft_data[frame_base + k - 1];
+                        left_mag_sq = (double)left_val.r * (double)left_val.r + (double)left_val.i * (double)left_val.i;
+                    }
+
+                    double right_mag_sq = 0.0;
+                    if (k < (int)(num_bins_per_frame - 1)) {
+                        ComplexFloat right_val = stft_data[frame_base + k + 1];
+                        right_mag_sq = (double)right_val.r * (double)right_val.r + (double)right_val.i * (double)right_val.i;
+                    }
+
+                    if (mag_sq > left_mag_sq && mag_sq > right_mag_sq) {
+                        has_prominent_peak = 1;
+                        break;
                     }
                 }
-                if (max_bin_sq >= peak_bin_mag_threshold_sq) {
+                if (has_prominent_peak) {
                     frame_pitch_active[frame_p_base + p] = 1;
                     pitch_active[p] = 1;
                 }
@@ -2034,14 +2017,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         free(frame_flux);
         free(prev_bin_mag);
 
-        /* Find unnormalized peak flux */
-        double unnorm_peak_flux = 0.0;
-        for (size_t k = 0; k < total_channel_samples; k++) {
-            if (raw_flux_buf[k] > unnorm_peak_flux) {
-                unnorm_peak_flux = raw_flux_buf[k];
-            }
-        }
-
         // When debug mode is enabled, save the raw unnormalized flux WAV to [flux]
         if (debug_mode) {
             char raw_flux_filename[12288];
@@ -2052,27 +2027,15 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             write_wav_16bit(raw_flux_filename, sample_rate, num_channels, total_samples, raw_flux_buf);
         }
 
-        int16_t *unnorm_raw_i16 = NULL;
-        if (debug_mode) {
-            unnorm_raw_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-            if (unnorm_raw_i16) {
-                double inv_p = (unnorm_peak_flux > 1e-12) ? (1.0 / unnorm_peak_flux) : 1.0;
-                for (uint32_t s = 0; s < total_samples; s++) {
-                    double sum_f = 0.0;
-                    for (uint32_t c = 0; c < num_channels; c++) {
-                        sum_f += raw_flux_buf[s * num_channels + c];
-                    }
-                    double val = (sum_f / num_channels) * inv_p;
-                    if (val > 1.0) val = 1.0;
-                    if (val < 0.0) val = 0.0;
-                    unnorm_raw_i16[s] = (int16_t)round(val * 32767.0);
-                }
+        /* Normalize flux envelope to peak 1.0 */
+        double peak_flux = 0.0;
+        for (size_t k = 0; k < total_channel_samples; k++) {
+            if (raw_flux_buf[k] > peak_flux) {
+                peak_flux = raw_flux_buf[k];
             }
         }
-
-        /* Normalize flux envelope to peak 1.0 */
-        if (unnorm_peak_flux > 1e-12) {
-            double scale = 1.0 / unnorm_peak_flux;
+        if (peak_flux > 1e-12) {
+            double scale = 1.0 / peak_flux;
             for (size_t k = 0; k < total_channel_samples; k++) {
                 raw_flux_buf[k] *= scale;
             }
@@ -2098,8 +2061,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         stem->pitch = p;
         get_note_name(p, stem->note_name, sizeof(stem->note_name));
         stem->max_flux_peak = max_fl_peak;
-        stem->unnorm_flux_peak = unnorm_peak_flux;
-        stem->unnorm_raw_flux_i16 = unnorm_raw_i16;
         stem->rms_flux = fl_rms;
 
         snprintf(stem->mod_filename, sizeof(stem->mod_filename), "%s_pitch_%03d_%s_modified_flux.wav",
@@ -2240,7 +2201,6 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
         for (int idx = 0; idx < audible_count; idx++) {
             if (flux_stems[idx].raw_flux_i16) free(flux_stems[idx].raw_flux_i16);
-            if (flux_stems[idx].unnorm_raw_flux_i16) free(flux_stems[idx].unnorm_raw_flux_i16);
             if (flux_stems[idx].mod_flux_i16) free(flux_stems[idx].mod_flux_i16);
             if (flux_stems[idx].peaks) free(flux_stems[idx].peaks);
             if (flux_stems[idx].troughs) free(flux_stems[idx].troughs);
