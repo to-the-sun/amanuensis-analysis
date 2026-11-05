@@ -53,8 +53,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define FFT_SIZE 8192
-#define HOP_SIZE (FFT_SIZE / 4)
+#define FFT_SIZE 2048
+#define HOP_SIZE 512
 #define MAX_CHANNELS 2
 #define NUM_MIDI_PITCHES 128
 
