@@ -15,7 +15,7 @@ Testing and verification are important, of course, but the user doesn't need to 
 
 These things apply to messages sent to the user, reports and even comments in the code. 
 
-In regards to comments in the code, a human will almost never look at the code at all, so if you can just as easily understand the code by looking at it, there is no need to make a comment. Comments would be for things that would not be immediately obvious from just looking at the local code. This is one way to keep line count down which should be considered a goal. 
+In regards to comments in the code, a human will almost never look at the code at all, so if you can just as easily understand the code by looking at it, there is no need to make a comment. Comments are for things that are not immediately obvious from just looking at the local code. This is one way to keep line count down which should be considered a goal. 
 
 ## Git workflow: always use a pull request
 
