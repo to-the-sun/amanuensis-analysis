@@ -861,9 +861,27 @@ static void flux_report_write_streams(FILE *out, const int16_t *orig_i16, const 
     }
 }
 
+static void url_encode_component(const char *in, char *out, size_t size) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t j = 0;
+    for (size_t i = 0; in[i] && j + 4 < size; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out[j++] = (char)c;
+        } else {
+            out[j++] = '%';
+            out[j++] = hex[c >> 4];
+            out[j++] = hex[c & 15];
+        }
+    }
+    out[j] = '\0';
+}
+
 void generate_flux_html_report(
     const char *flux_dir,
     const char *basename,
+    const char *audio_filename,
     uint32_t sample_rate,
     uint32_t num_channels,
     uint32_t total_samples,
@@ -939,6 +957,9 @@ void generate_flux_html_report(
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n\n");
 
+    char audio_url[8192];
+    url_encode_component(audio_filename, audio_url, sizeof(audio_url));
+
     fprintf(f, "<div id=\"stemsContainer\">\n");
     for (int i = 0; i < stem_count; i++) {
         const FluxStem *st = &stems[i];
@@ -951,7 +972,7 @@ void generate_flux_html_report(
         fprintf(f, "        <span>Peaks: %d</span>\n", st->num_peaks);
         fprintf(f, "        <span>Troughs: %d</span>\n", st->num_troughs);
         fprintf(f, "      </div>\n");
-        fprintf(f, "      <audio controls src=\"../%s\" preload=\"metadata\"></audio>\n", st->mod_filename);
+        fprintf(f, "      <audio controls src=\"../../%s\" preload=\"metadata\"></audio>\n", audio_url);
         fprintf(f, "    </div>\n");
         fprintf(f, "    <div class=\"canvas-container\">\n");
         fprintf(f, "      <canvas id=\"canvas-%d\" data-index=\"%d\"></canvas>\n", i, i);
@@ -2460,9 +2481,15 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     // Construct Flux HTML report in [flux] directory (debug only)
     if (debug_mode && flux_stems) {
+        const char *orig_filename = input_path;
+        for (const char *p = input_path; *p; p++) {
+            if (*p == '/' || *p == '\\') orig_filename = p + 1;
+        }
+
         generate_flux_html_report(
             flux_dir,
             basename,
+            orig_filename,
             sample_rate,
             num_channels,
             total_samples,
