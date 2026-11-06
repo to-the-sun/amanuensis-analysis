@@ -297,6 +297,10 @@ int analyzer_process_peak(TransientAnalyzer* self, int p_idx, int global_p_idx, 
     if (self->lock_func) self->lock_func(self->lock_obj);
 
     double* acc_buf = self->shared_buffer ? self->shared_buffer->accumulated_buffer : self->private_accumulated_buffer;
+    double ref_peak = self->shared_buffer ? self->shared_buffer->max_peak : self->private_max_peak;
+    double weight = (ref_peak > 0.0) ? detected_peak_val / ref_peak : 1.0;
+    if (weight > 1.0) weight = 1.0;
+    else if (weight < 0.0) weight = 0.0;
     double q_sum = 0.0; bool found = false;
     // Exclude the last 99ms to avoid self-referential bias from the peak at zero.
     int m_len = win_len - 99; double sum = 0.0, max_v = -DBL_MAX, min_v = DBL_MAX;
@@ -370,7 +374,7 @@ int analyzer_process_peak(TransientAnalyzer* self, int p_idx, int global_p_idx, 
 
     memcpy(result_out->snapshot, acc_buf, sizeof(double) * win_len);
 
-    for (int i = 0; i < win_len; i++) acc_buf[i] += peak_flux[i];
+    for (int i = 0; i < win_len; i++) { peak_flux[i] *= weight; acc_buf[i] += peak_flux[i]; }
 
     SnapshotEntry* entry = (SnapshotEntry*)malloc(sizeof(SnapshotEntry));
     if (entry) {
