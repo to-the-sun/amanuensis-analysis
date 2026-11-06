@@ -54,12 +54,15 @@
 #endif
 
 #define FFT_SIZE 8192
-#define HOP_SIZE 2048
+#define HOP_SIZE (FFT_SIZE / 4)
 #define MAX_CHANNELS 2
 #define NUM_MIDI_PITCHES 128
 
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
+
+/* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
+double g_silence_threshold = 0.009;
 
 static pthread_mutex_t g_console_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -84,12 +87,6 @@ typedef struct {
 } WAVFile;
 
 typedef struct {
-    int pitch;
-    char note_name[32];
-    double unnorm_peak_flux;
-} StemFluxPeakInfo;
-
-typedef struct {
     char input_path[1024];
     char basename[512];
     uint32_t sample_rate;
@@ -101,7 +98,6 @@ typedef struct {
     double speed_ratio;
     int success;
     int skipped;
-    StemFluxPeakInfo stem_peaks[NUM_MIDI_PITCHES];
 } FileBatchResult;
 
 const char *NOTE_NAMES[12] = {
@@ -155,11 +151,71 @@ char* encode_base64_bytes(const uint8_t *data, size_t input_len) {
     return encoded;
 }
 
+#define FLUX_FFT_SIZE 2048
+#define FLUX_HOP_SIZE 512
+
 /* Pre-calculated FFT lookup tables */
 static Complex g_twiddle_fwd[FFT_SIZE];
 static Complex g_twiddle_inv[FFT_SIZE];
 static int g_bit_rev[FFT_SIZE];
 static int g_fft_tables_initialized = 0;
+
+static Complex g_flux_twiddle_fwd[FLUX_FFT_SIZE];
+static int g_flux_bit_rev[FLUX_FFT_SIZE];
+static int g_flux_tables_initialized = 0;
+
+void init_flux_fft_tables(void) {
+    if (g_flux_tables_initialized) return;
+
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        double angle_fwd = -2.0 * M_PI * i / FLUX_FFT_SIZE;
+        g_flux_twiddle_fwd[i].r = cos(angle_fwd);
+        g_flux_twiddle_fwd[i].i = sin(angle_fwd);
+    }
+
+    for (int i = 0, j = 0; i < FLUX_FFT_SIZE; i++) {
+        g_flux_bit_rev[i] = j;
+        int bit = FLUX_FFT_SIZE >> 1;
+        for (; j & bit; bit >>= 1) {
+            j ^= bit;
+        }
+        j ^= bit;
+    }
+
+    g_flux_tables_initialized = 1;
+}
+
+void fft_2048(Complex *x) {
+    init_flux_fft_tables();
+
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        int j = g_flux_bit_rev[i];
+        if (i < j) {
+            Complex temp = x[i];
+            x[i] = x[j];
+            x[j] = temp;
+        }
+    }
+
+    for (int len = 2; len <= FLUX_FFT_SIZE; len <<= 1) {
+        int half_len = len >> 1;
+        int step = FLUX_FFT_SIZE / len;
+        for (int i = 0; i < FLUX_FFT_SIZE; i += len) {
+            for (int j = 0; j < half_len; j++) {
+                Complex w = g_flux_twiddle_fwd[j * step];
+                Complex u = x[i + j];
+                Complex v = {
+                    x[i + j + half_len].r * w.r - x[i + j + half_len].i * w.i,
+                    x[i + j + half_len].r * w.i + x[i + j + half_len].i * w.r
+                };
+                x[i + j].r = u.r + v.r;
+                x[i + j].i = u.i + v.i;
+                x[i + j + half_len].r = u.r - v.r;
+                x[i + j + half_len].i = u.i - v.i;
+            }
+        }
+    }
+}
 
 typedef struct {
     int pitch;
@@ -434,6 +490,14 @@ static int find_trough_right(const double *env, uint32_t n, int x) {
 
 static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int *out_count);
 
+void apply_flux_noise_gate(double *env, uint32_t total_samples, double threshold) {
+    for (uint32_t i = 0; i < total_samples; i++) {
+        if (env[i] < threshold) {
+            env[i] = 0.0;
+        }
+    }
+}
+
 void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     if (total_samples < 3) return;
 
@@ -544,6 +608,105 @@ void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     free(peaks);
 }
 
+void compute_stem_transience_flux(const double *stem_data, uint32_t total_samples, uint32_t num_channels, uint32_t sample_rate, double *flux_out, int normalize) {
+    if (!stem_data || !flux_out || total_samples == 0 || num_channels == 0) return;
+
+    memset(flux_out, 0, (size_t)total_samples * num_channels * sizeof(double));
+
+    double window[FLUX_FFT_SIZE];
+    for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+        window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FLUX_FFT_SIZE));
+    }
+
+    uint32_t num_frames = (total_samples >= FLUX_FFT_SIZE) ? ((total_samples - FLUX_FFT_SIZE) / FLUX_HOP_SIZE + 1) : 0;
+    if (num_frames == 0) {
+        return;
+    }
+
+    double *frame_flux = (double*)malloc(num_frames * sizeof(double));
+    double *prev_mag = (double*)calloc(FLUX_FFT_SIZE / 2 + 1, sizeof(double));
+    double *curr_mag = (double*)malloc((FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+    Complex *fft_buf = (Complex*)malloc(FLUX_FFT_SIZE * sizeof(Complex));
+
+    if (!frame_flux || !prev_mag || !curr_mag || !fft_buf) {
+        if (frame_flux) free(frame_flux);
+        if (prev_mag) free(prev_mag);
+        if (curr_mag) free(curr_mag);
+        if (fft_buf) free(fft_buf);
+        return;
+    }
+
+    for (uint32_t c = 0; c < num_channels; c++) {
+        memset(prev_mag, 0, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+
+        for (uint32_t m = 0; m < num_frames; m++) {
+            uint32_t offset = m * FLUX_HOP_SIZE;
+
+            for (int i = 0; i < FLUX_FFT_SIZE; i++) {
+                fft_buf[i].r = stem_data[(offset + i) * num_channels + c] * window[i];
+                fft_buf[i].i = 0.0;
+            }
+
+            fft_2048(fft_buf);
+
+            double flux_sum = 0.0;
+            for (int k = 0; k <= FLUX_FFT_SIZE / 2; k++) {
+                double r = fft_buf[k].r;
+                double im = fft_buf[k].i;
+                double energy = r * r + im * im;
+                curr_mag[k] = energy;
+
+                double diff = energy - prev_mag[k];
+                if (diff > 0.0) {
+                    flux_sum += diff;
+                }
+            }
+
+            frame_flux[m] = flux_sum;
+            memcpy(prev_mag, curr_mag, (FLUX_FFT_SIZE / 2 + 1) * sizeof(double));
+        }
+
+        for (uint32_t i = 0; i < total_samples; i++) {
+            double f_idx = ((double)i - (double)(FLUX_FFT_SIZE / 2)) / (double)FLUX_HOP_SIZE;
+
+            double val = 0.0;
+            if (f_idx <= 0.0) {
+                val = frame_flux[0];
+            } else if (f_idx >= (double)(num_frames - 1)) {
+                val = frame_flux[num_frames - 1];
+            } else {
+                int m0 = (int)floor(f_idx);
+                int m1 = m0 + 1;
+                double alpha = f_idx - m0;
+                val = (1.0 - alpha) * frame_flux[m0] + alpha * frame_flux[m1];
+            }
+
+            flux_out[i * num_channels + c] = val;
+        }
+    }
+
+    free(frame_flux);
+    free(prev_mag);
+    free(curr_mag);
+    free(fft_buf);
+
+    if (normalize) {
+        double peak_flux = 0.0;
+        size_t total_samples_all_channels = (size_t)total_samples * num_channels;
+        for (size_t k = 0; k < total_samples_all_channels; k++) {
+            if (flux_out[k] > peak_flux) {
+                peak_flux = flux_out[k];
+            }
+        }
+
+        if (peak_flux > 1e-12) {
+            double scale = 1.0 / peak_flux;
+            for (size_t k = 0; k < total_samples_all_channels; k++) {
+                flux_out[k] *= scale;
+            }
+        }
+    }
+}
 
 static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int *out_count) {
     int capacity = 256;
@@ -1761,8 +1924,19 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         window[i] = 0.5 * (1.0 - cos(2.0 * M_PI * i / FFT_SIZE));
     }
 
+    double *cola_norm = (double*)calloc(padded_total_samples, sizeof(double));
     uint32_t num_frames = (padded_total_samples >= FFT_SIZE) ? ((padded_total_samples - FFT_SIZE) / HOP_SIZE + 1) : 0;
 
+    for (uint32_t m = 0; m < num_frames; m++) {
+        uint32_t offset = m * HOP_SIZE;
+        for (int i = 0; i < FFT_SIZE; i++) {
+            if (offset + i < padded_total_samples) {
+                cola_norm[offset + i] += window[i] * window[i];
+            }
+        }
+    }
+
+    int bin_pitch[FFT_SIZE / 2 + 1];
     int pitch_bin_count[NUM_MIDI_PITCHES] = {0};
     int (*pitch_bins)[FFT_SIZE / 2 + 1] = (int (*)[FFT_SIZE / 2 + 1])malloc(NUM_MIDI_PITCHES * (FFT_SIZE / 2 + 1) * sizeof(int));
     if (!pitch_bins) {
@@ -1771,6 +1945,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         pthread_mutex_unlock(&g_console_mutex);
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
         free(padded_input);
+        free(cola_norm);
         free(wav);
         if (result) result->success = 0;
         return 0;
@@ -1778,11 +1953,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     for (int k = 0; k <= FFT_SIZE / 2; k++) {
         double freq = (double)k * sample_rate / FFT_SIZE;
-        /* Discard any bins below 20 Hz as inaudible to human ear */
-        if (freq < 20.0) {
-            continue;
-        }
         int p = freq_to_midi_pitch(freq);
+        bin_pitch[k] = p;
         pitch_bins[p][pitch_bin_count[p]++] = k;
     }
 
@@ -1796,6 +1968,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         pthread_mutex_unlock(&g_console_mutex);
         for (uint32_t c = 0; c < num_channels; c++) free(padded_input[c]);
         free(padded_input);
+        free(cola_norm);
         free(pitch_bins);
         free(wav);
         if (result) result->success = 0;
@@ -1830,10 +2003,18 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             fft(fft_frame, FFT_SIZE, 0);
 
             size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
+            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
 
             for (int k = 0; k <= FFT_SIZE / 2; k++) {
                 stft_data[frame_base + k].r = (float)fft_frame[k].r;
                 stft_data[frame_base + k].i = (float)fft_frame[k].i;
+
+                double mag_sq = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
+                if (mag_sq > 1e-18) {
+                    int p = bin_pitch[k];
+                    pitch_active[p] = 1;
+                    frame_pitch_active[frame_p_base + p] = 1;
+                }
             }
         }
     }
@@ -1850,200 +2031,109 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     snprintf(flux_dir, sizeof(flux_dir), "%s/[flux]", stem_dir);
     ensure_dir_exists(flux_dir);
 
+    Complex *pitch_frame = (Complex*)malloc(FFT_SIZE * sizeof(Complex));
+
     FluxStem *flux_stems = NULL;
     int audible_count = 0;
     int audible_capacity = 0;
 
     double *recombined_mod_flux = (double*)calloc(total_channel_samples, sizeof(double));
 
-    /*
-     * Frequency-domain calibrated peak-bin amplitude threshold:
-     * For a sinusoidal tone with peak amplitude A, the peak bin magnitude in a Hann
-     * windowed STFT is A * (FFT_SIZE / 4).
-     * Therefore, the threshold on individual bin magnitude squared is:
-     *   peak_bin_mag_threshold_sq = (noise_floor_threshold * FFT_SIZE / 4)^2
-     */
-    double bin_amp_scale = (double)FFT_SIZE / 4.0;
-    double peak_bin_mag_threshold = noise_floor_threshold * bin_amp_scale;
-    double peak_bin_mag_threshold_sq = peak_bin_mag_threshold * peak_bin_mag_threshold;
-    double bin_energy_scale = bin_amp_scale * bin_amp_scale;
-    double frame_hop_sec = (double)HOP_SIZE / (double)sample_rate;
-
-    /*
-     * Populate frame_pitch_active and pitch_active based on calibrated peak-bin amplitude:
-     * 1) Peak amplitude in pitch p >= 19% noise floor threshold
-     * 2) Peak amplitude in pitch p >= 89% of the max amplitude seen across all pitches in this frame
-     */
-    double relative_pitch_ratio_sq = 0.89 * 0.89;
-
-    for (uint32_t c = 0; c < num_channels; c++) {
-        for (uint32_t m = 0; m < num_frames; m++) {
-            size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
-            size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
-
-            double pitch_max_sq[NUM_MIDI_PITCHES] = {0.0};
-            double frame_all_pitches_max_sq = 0.0;
-
-            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                double max_bin_sq = 0.0;
-                for (int b = 0; b < pitch_bin_count[p]; b++) {
-                    int k = pitch_bins[p][b];
-                    ComplexFloat val = stft_data[frame_base + k];
-                    double mag_sq = (double)val.r * (double)val.r + (double)val.i * (double)val.i;
-                    if (mag_sq > max_bin_sq) {
-                        max_bin_sq = mag_sq;
-                    }
-                }
-                pitch_max_sq[p] = max_bin_sq;
-                if (max_bin_sq > frame_all_pitches_max_sq) {
-                    frame_all_pitches_max_sq = max_bin_sq;
-                }
-            }
-
-            double frame_rel_threshold_sq = frame_all_pitches_max_sq * relative_pitch_ratio_sq;
-
-            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                if (pitch_max_sq[p] >= peak_bin_mag_threshold_sq &&
-                    pitch_max_sq[p] >= frame_rel_threshold_sq) {
-                    frame_pitch_active[frame_p_base + p] = 1;
-                    pitch_active[p] = 1;
-                }
-            }
-        }
-    }
-
     clock_t flux_start_clock = clock();
 
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-        double elapsed = (double)(clock() - flux_start_clock) / CLOCKS_PER_SEC;
-        print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", p + 1, NUM_MIDI_PITCHES, elapsed);
+        if (p % 16 == 0 || p == NUM_MIDI_PITCHES - 1) {
+            double elapsed = (double)(clock() - flux_start_clock) / CLOCKS_PER_SEC;
+            print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", p + 1, NUM_MIDI_PITCHES, elapsed);
+        }
 
         if (!pitch_active[p] || pitch_bin_count[p] == 0) continue;
 
-        /*
-         * Frequency-domain audibility evaluation:
-         * Count frames meeting the calibrated peak-bin threshold and accumulate energy for RMS estimation.
-         */
-        uint32_t active_stft_frames = 0;
-        double total_pitch_energy = 0.0;
+        double *stem_buf = (double*)calloc((size_t)padded_total_samples * num_channels, sizeof(double));
+        if (!stem_buf) continue;
 
-        for (uint32_t m = 0; m < num_frames; m++) {
-            int frame_active = 0;
-            for (uint32_t c = 0; c < num_channels; c++) {
+        for (uint32_t c = 0; c < num_channels; c++) {
+            for (uint32_t m = 0; m < num_frames; m++) {
                 size_t frame_p_idx = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES + p;
-                if (frame_pitch_active[frame_p_idx]) {
-                    frame_active = 1;
-                }
+                if (!frame_pitch_active[frame_p_idx]) continue;
 
                 size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
+
+                memset(pitch_frame, 0, FFT_SIZE * sizeof(Complex));
                 for (int b = 0; b < pitch_bin_count[p]; b++) {
                     int k = pitch_bins[p][b];
                     ComplexFloat val = stft_data[frame_base + k];
-                    total_pitch_energy += (double)val.r * (double)val.r + (double)val.i * (double)val.i;
+                    pitch_frame[k].r = (double)val.r;
+                    pitch_frame[k].i = (double)val.i;
+                    if (k > 0 && k < FFT_SIZE / 2) {
+                        pitch_frame[FFT_SIZE - k].r = (double)val.r;
+                        pitch_frame[FFT_SIZE - k].i = -(double)val.i;
+                    }
+                }
+
+                fft(pitch_frame, FFT_SIZE, 1);
+
+                uint32_t offset = m * HOP_SIZE;
+                for (int i = 0; i < FFT_SIZE; i++) {
+                    if (offset + i < padded_total_samples) {
+                        stem_buf[(offset + i) * num_channels + c] += pitch_frame[i].r * window[i];
+                    }
                 }
             }
-            if (frame_active) {
-                active_stft_frames++;
+        }
+
+        // Unpad stem audio
+        double *unpadded_data = (double*)malloc((size_t)total_samples * num_channels * sizeof(double));
+        for (uint32_t i = 0; i < total_samples; i++) {
+            uint32_t padded_idx = i + pad_samples;
+            double norm = cola_norm[padded_idx];
+
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double val = (norm > 1e-12) ? (stem_buf[padded_idx * num_channels + c] / norm) : 0.0;
+                unpadded_data[i * num_channels + c] = val;
+            }
+        }
+        free(stem_buf);
+
+        // Evaluate stem energy and active duration against noise floor threshold
+        double stem_max_peak = 0.0;
+        double stem_sum_sq = 0.0;
+        uint32_t active_frames = 0;
+
+        for (uint32_t i = 0; i < total_samples; i++) {
+            int frame_above_threshold = 0;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                double val = unpadded_data[i * num_channels + c];
+                double abs_val = fabs(val);
+                if (abs_val > stem_max_peak) stem_max_peak = abs_val;
+                stem_sum_sq += val * val;
+
+                if (abs_val >= noise_floor_threshold) {
+                    frame_above_threshold = 1;
+                }
+            }
+
+            if (frame_above_threshold) {
+                active_frames++;
             }
         }
 
-        double active_ms = (double)active_stft_frames * frame_hop_sec * 1000.0;
-        double stem_rms_approx = sqrt(total_pitch_energy / (bin_energy_scale * (double)num_frames * (double)num_channels + 1e-12));
+        double stem_rms = sqrt(stem_sum_sq / (total_samples * num_channels));
+        double active_ms = ((double)active_frames / sample_rate) * 1000.0;
 
-        if (active_ms < 99.0 || stem_rms_approx <= 1e-6) {
-            continue;
+        double *raw_flux_buf = NULL;
+        if (active_ms >= 99.0 && stem_rms > 1e-6) {
+            raw_flux_buf = (double*)malloc(total_channel_samples * sizeof(double));
+            if (raw_flux_buf) {
+                compute_stem_transience_flux(unpadded_data, total_samples, num_channels, sample_rate, raw_flux_buf, 1);
+            }
         }
 
-        /*
-         * Compute spectral flux directly from STFT bins across frames at ~46ms (2048 hop)
-         * resolution and linearly interpolate across audio sample points.
-         */
-        double *raw_flux_buf = (double*)calloc(total_channel_samples, sizeof(double));
+        // Free reconstructed main pitch stem audio immediately
+        free(unpadded_data);
+        unpadded_data = NULL;
+
         if (!raw_flux_buf) continue;
-
-        double *frame_flux = (double*)malloc(num_frames * sizeof(double));
-        double *prev_bin_mag = (double*)calloc(pitch_bin_count[p], sizeof(double));
-
-        if (!frame_flux || !prev_bin_mag) {
-            if (frame_flux) free(frame_flux);
-            if (prev_bin_mag) free(prev_bin_mag);
-            free(raw_flux_buf);
-            continue;
-        }
-
-        for (uint32_t c = 0; c < num_channels; c++) {
-            memset(prev_bin_mag, 0, pitch_bin_count[p] * sizeof(double));
-
-            for (uint32_t m = 0; m < num_frames; m++) {
-                size_t frame_p_idx = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES + p;
-                size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
-                double flux_sum = 0.0;
-
-                if (frame_pitch_active[frame_p_idx]) {
-                    for (int b = 0; b < pitch_bin_count[p]; b++) {
-                        int k = pitch_bins[p][b];
-                        ComplexFloat val = stft_data[frame_base + k];
-                        double energy = (double)val.r * (double)val.r + (double)val.i * (double)val.i;
-                        double diff = energy - prev_bin_mag[b];
-                        if (diff > 0.0) {
-                            flux_sum += diff;
-                        }
-                        prev_bin_mag[b] = energy;
-                    }
-                } else {
-                    for (int b = 0; b < pitch_bin_count[p]; b++) {
-                        prev_bin_mag[b] = 0.0;
-                    }
-                }
-                frame_flux[m] = flux_sum;
-            }
-
-            /* Interpolate frame flux to sample resolution */
-            for (uint32_t i = 0; i < total_samples; i++) {
-                double f_idx = ((double)i + (double)pad_samples - (double)(FFT_SIZE / 2)) / (double)HOP_SIZE;
-
-                double val = 0.0;
-                if (f_idx <= 0.0) {
-                    val = frame_flux[0];
-                } else if (f_idx >= (double)(num_frames - 1)) {
-                    val = frame_flux[num_frames - 1];
-                } else {
-                    int m0 = (int)floor(f_idx);
-                    int m1 = m0 + 1;
-                    double alpha = f_idx - (double)m0;
-                    val = (1.0 - alpha) * frame_flux[m0] + alpha * frame_flux[m1];
-                }
-                raw_flux_buf[i * num_channels + c] = val;
-            }
-        }
-
-        free(frame_flux);
-        free(prev_bin_mag);
-
-
-
-        /* Find unnormalized raw flux peak across channels */
-        double unnorm_peak_flux = 0.0;
-        for (size_t k = 0; k < total_channel_samples; k++) {
-            if (raw_flux_buf[k] > unnorm_peak_flux) {
-                unnorm_peak_flux = raw_flux_buf[k];
-            }
-        }
-
-        if (result && audible_count < NUM_MIDI_PITCHES) {
-            result->stem_peaks[audible_count].pitch = p;
-            get_note_name(p, result->stem_peaks[audible_count].note_name, sizeof(result->stem_peaks[audible_count].note_name));
-            result->stem_peaks[audible_count].unnorm_peak_flux = unnorm_peak_flux;
-        }
-
-        /* Normalize flux envelope to peak 1.0 */
-        double peak_flux = unnorm_peak_flux;
-        if (peak_flux > 1e-12) {
-            double scale = 1.0 / peak_flux;
-            for (size_t k = 0; k < total_channel_samples; k++) {
-                raw_flux_buf[k] *= scale;
-            }
-        }
 
         // Calculate flux metrics
         double max_fl_peak = 0.0;
@@ -2226,8 +2316,10 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     print_multithreaded_progress(thread_slot, num_slots, basename, "Complete", 100, 100, total_elapsed);
 
     free(fft_frame);
+    free(pitch_frame);
     free(stft_data);
     free(frame_pitch_active);
+    free(cola_norm);
     free(pitch_bins);
     if (orig_audio_buffer) free(orig_audio_buffer);
     free(wav);
@@ -2363,6 +2455,7 @@ int main(int argc, char *argv[]) {
     copy_helper_files_to_pitch_stems(dir, stem_dir);
 
     init_fft_tables();
+    init_flux_fft_tables();
 
     int cpu_cores = get_cpu_cores();
     int num_threads = (num_files < cpu_cores) ? num_files : cpu_cores;
@@ -2440,30 +2533,6 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_files; i++) {
         if (results[i].success) total_success++;
         if (results[i].skipped) total_skipped++;
-    }
-
-    /* Informational table of unnormalized raw flux peaks for all exported stems */
-    printf("====================================================\n");
-    printf("           UNNORMALIZED RAW FLUX PEAKS              \n");
-    printf("====================================================\n");
-    int any_stems_printed = 0;
-    for (int i = 0; i < num_files; i++) {
-        const FileBatchResult *r = &results[i];
-        if (!r->success || r->stem_count == 0) continue;
-        printf("  Source File: %s (%d stems)\n", r->basename, r->stem_count);
-        printf("    MIDI Pitch | Note Name | Unnormalized Raw Flux Peak\n");
-        printf("    -----------+-----------+---------------------------\n");
-        for (int s = 0; s < r->stem_count; s++) {
-            printf("       %03d     |   %-7s | %.6f\n",
-                   r->stem_peaks[s].pitch,
-                   r->stem_peaks[s].note_name,
-                   r->stem_peaks[s].unnorm_peak_flux);
-        }
-        printf("\n");
-        any_stems_printed = 1;
-    }
-    if (!any_stems_printed) {
-        printf("  No new stems were exported in this run.\n\n");
     }
 
     printf("====================================================\n");
