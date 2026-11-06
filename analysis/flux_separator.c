@@ -926,6 +926,7 @@ void generate_flux_html_report(
     fprintf(f, "  .pitch-tag { background: #333344; color: #82aaff; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; font-family: monospace; }\n");
     fprintf(f, "  .stem-metrics { font-size: 0.85rem; color: var(--muted); display: flex; gap: 15px; font-family: monospace; }\n");
     fprintf(f, "  audio { height: 32px; outline: none; border-radius: 4px; }\n");
+    fprintf(f, "  .playhead { position: absolute; top: 0; bottom: 18px; width: 2px; margin-left: -1px; background: #ff5252; box-shadow: 0 0 4px rgba(255, 82, 82, 0.8); pointer-events: none; display: none; }\n");
     fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 140px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 8px; user-select: none; }\n");
     fprintf(f, "  canvas { width: 100%%; height: 100%%; display: block; cursor: crosshair; }\n");
     fprintf(f, "  .tooltip { position: absolute; top: 8px; right: 12px; background: rgba(10, 10, 15, 0.85); border: 1px solid #333344; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; color: #fff; pointer-events: none; opacity: 0; transition: opacity 0.15s; }\n");
@@ -972,10 +973,11 @@ void generate_flux_html_report(
         fprintf(f, "        <span>Peaks: %d</span>\n", st->num_peaks);
         fprintf(f, "        <span>Troughs: %d</span>\n", st->num_troughs);
         fprintf(f, "      </div>\n");
-        fprintf(f, "      <audio controls src=\"../../%s\" preload=\"metadata\"></audio>\n", audio_url);
+        fprintf(f, "      <audio controls id=\"audio-%d\" src=\"../../%s\" preload=\"metadata\"></audio>\n", i, audio_url);
         fprintf(f, "    </div>\n");
         fprintf(f, "    <div class=\"canvas-container\">\n");
         fprintf(f, "      <canvas id=\"canvas-%d\" data-index=\"%d\"></canvas>\n", i, i);
+        fprintf(f, "      <div class=\"playhead\" id=\"playhead-%d\"></div>\n", i);
         fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", i);
         fprintf(f, "    </div>\n");
         fprintf(f, "  </div>\n");
@@ -1106,6 +1108,8 @@ void generate_flux_html_report(
     fprintf(f, "let activeDrag = null;\n");
     fprintf(f, "let hoverState = null;\n");
     fprintf(f, "let renderQueued = false;\n");
+    fprintf(f, "let activeAudio = null;\n");
+    fprintf(f, "let playheadRaf = 0;\n");
     fprintf(f, "const rangeOut = { mn: 0, mx: 0 };\n\n");
 
     fprintf(f, "function base64ToI16(b64) {\n");
@@ -1257,6 +1261,21 @@ void generate_flux_html_report(
     fprintf(f, "}\n");
     fprintf(f, "function xToTime(x, width) {\n");
     fprintf(f, "  return viewStart + (x / width) * (viewEnd - viewStart);\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function updatePlayheads() {\n");
+    fprintf(f, "  const t = activeAudio ? activeAudio.currentTime : 0;\n");
+    fprintf(f, "  for (let i = 0; i < STEM_COUNT; i++) {\n");
+    fprintf(f, "    const ph = document.getElementById('playhead-' + i);\n");
+    fprintf(f, "    if (!ph) continue;\n");
+    fprintf(f, "    const w = ph.parentElement.clientWidth;\n");
+    fprintf(f, "    if (!activeAudio || !w || t < viewStart || t > viewEnd) { ph.style.display = 'none'; continue; }\n");
+    fprintf(f, "    ph.style.display = 'block';\n");
+    fprintf(f, "    ph.style.left = timeToX(t, w) + 'px';\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  if (activeAudio && !activeAudio.paused && !playheadRaf) {\n");
+    fprintf(f, "    playheadRaf = requestAnimationFrame(() => { playheadRaf = 0; updatePlayheads(); });\n");
+    fprintf(f, "  }\n");
     fprintf(f, "}\n\n");
 
     fprintf(f, "function updateViewInfo() {\n");
@@ -1476,13 +1495,24 @@ void generate_flux_html_report(
     fprintf(f, "  for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "    renderCanvas(i);\n");
     fprintf(f, "  }\n");
+    fprintf(f, "  updatePlayheads();\n");
     fprintf(f, "}\n\n");
 
     fprintf(f, "function attachListeners() {\n");
     fprintf(f, "  DATA.stems.forEach((stem, idx) => {\n");
     fprintf(f, "    const canvas = document.getElementById(`canvas-${idx}`);\n");
     fprintf(f, "    const tooltip = document.getElementById(`tooltip-${idx}`);\n");
-    fprintf(f, "    if (!canvas) return;\n\n");
+    fprintf(f, "    if (!canvas) return;\n");
+    fprintf(f, "    const audio = document.getElementById(`audio-${idx}`);\n");
+    fprintf(f, "    if (audio) {\n");
+    fprintf(f, "      audio.addEventListener('play', () => {\n");
+    fprintf(f, "        for (const other of document.querySelectorAll('audio')) if (other !== audio) other.pause();\n");
+    fprintf(f, "        activeAudio = audio;\n");
+    fprintf(f, "        updatePlayheads();\n");
+    fprintf(f, "      });\n");
+    fprintf(f, "      audio.addEventListener('pause', updatePlayheads);\n");
+    fprintf(f, "      audio.addEventListener('ended', updatePlayheads);\n");
+    fprintf(f, "    }\n\n");
 
     fprintf(f, "    canvas.addEventListener('mousedown', (e) => {\n");
     fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
@@ -1533,6 +1563,15 @@ void generate_flux_html_report(
     fprintf(f, "          updateViewInfo();\n");
     fprintf(f, "          renderAll();\n");
     fprintf(f, "        } else {\n");
+    fprintf(f, "          const clickX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));\n");
+    fprintf(f, "          const audio = document.getElementById(`audio-${idx}`);\n");
+    fprintf(f, "          if (audio) {\n");
+    fprintf(f, "            audio.currentTime = Math.max(0, Math.min(DATA.duration, xToTime(clickX, rect.width)));\n");
+    fprintf(f, "            activeAudio = audio;\n");
+    fprintf(f, "            const started = audio.play();\n");
+    fprintf(f, "            if (started && started.catch) started.catch(() => {});\n");
+    fprintf(f, "            updatePlayheads();\n");
+    fprintf(f, "          }\n");
     fprintf(f, "          renderCanvas(idx);\n");
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
