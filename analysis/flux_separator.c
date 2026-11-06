@@ -1778,6 +1778,10 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     for (int k = 0; k <= FFT_SIZE / 2; k++) {
         double freq = (double)k * sample_rate / FFT_SIZE;
+        /* Discard any bins below 20 Hz as inaudible to human ear */
+        if (freq < 20.0) {
+            continue;
+        }
         int p = freq_to_midi_pitch(freq);
         pitch_bins[p][pitch_bin_count[p]++] = k;
     }
