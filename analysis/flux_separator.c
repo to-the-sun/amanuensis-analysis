@@ -775,9 +775,113 @@ static void detect_all_troughs(const double *env, uint32_t n, int **out_troughs,
     *out_count = count;
 }
 
+#define FLUX_REPORT_CHUNK_BINS 65536
+#define FLUX_REPORT_COARSE_STEP 4096
+
+/*
+ * Report tiers. Step 1 keeps one int16 per sample; coarser tiers keep each
+ * bin's min and max so decimation never hides a peak or trough. The coarsest
+ * tier is small enough to stay resident, so the zoomed-out view never needs
+ * full-rate data, and any visible window only ever materialises ~4 bins per
+ * pixel column for the tier that matches its resolution.
+ */
+typedef struct {
+    int step;
+    int minmax;
+} FluxReportLevel;
+
+static const FluxReportLevel g_flux_report_levels[] = {
+    {1, 0},
+    {8, 1},
+    {64, 1},
+    {512, 1}
+};
+
+#define FLUX_REPORT_NUM_LEVELS ((int)(sizeof(g_flux_report_levels) / sizeof(g_flux_report_levels[0])))
+
+static uint32_t flux_report_bins(uint32_t total_samples, int step) {
+    return (uint32_t)(((uint64_t)total_samples + (uint64_t)step - 1) / (uint64_t)step);
+}
+
+static void flux_report_write_tier(FILE *out, const int16_t *src, uint32_t total_samples, int step, int minmax, uint32_t first_bin, uint32_t bins) {
+    if (!src || bins == 0) {
+        fprintf(out, "\"\"");
+        return;
+    }
+
+    size_t per_bin = minmax ? 2 : 1;
+    int16_t *buf = (int16_t*)malloc((size_t)bins * per_bin * sizeof(int16_t));
+    if (!buf) {
+        fprintf(out, "\"\"");
+        return;
+    }
+
+    for (uint32_t b = 0; b < bins; b++) {
+        uint64_t a = ((uint64_t)first_bin + b) * (uint64_t)step;
+        uint64_t e = a + (uint64_t)step;
+        if (e > total_samples) e = total_samples;
+        int16_t mn = 0, mx = 0;
+        if (a < total_samples) {
+            mn = src[a];
+            mx = mn;
+            for (uint64_t s = a + 1; s < e; s++) {
+                int16_t v = src[s];
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
+            }
+        }
+        buf[b * per_bin] = mn;
+        if (minmax) buf[b * per_bin + 1] = mx;
+    }
+
+    char *b64 = encode_base64_bytes((const uint8_t*)buf, (size_t)bins * per_bin * sizeof(int16_t));
+    fprintf(out, "\"%s\"", b64 ? b64 : "");
+    if (b64) free(b64);
+    free(buf);
+}
+
+/*
+ * Stream order is fixed so the browser can index it arithmetically: 0 is the
+ * original mix, 1..stem_count are the stems' raw flux envelopes and
+ * 1+stem_count.. are their modified flux envelopes.
+ */
+static void flux_report_write_streams(FILE *out, const int16_t *orig_i16, const FluxStem *stems, int stem_count, uint32_t total_samples, int step, int minmax, uint32_t first_bin, uint32_t bins) {
+    int streams = 1 + stem_count * 2;
+    for (int s = 0; s < streams; s++) {
+        const int16_t *src = NULL;
+        if (s == 0) {
+            src = orig_i16;
+        } else if (s <= stem_count) {
+            src = stems[s - 1].raw_flux_i16;
+        } else {
+            src = stems[s - 1 - stem_count].mod_flux_i16;
+        }
+        flux_report_write_tier(out, src, total_samples, step, minmax, first_bin, bins);
+        if (s + 1 < streams) fprintf(out, ",");
+    }
+}
+
+static void url_encode_component(const char *in, char *out, size_t size) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t j = 0;
+    for (size_t i = 0; in[i] && j + 4 < size; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out[j++] = (char)c;
+        } else {
+            out[j++] = '%';
+            out[j++] = hex[c >> 4];
+            out[j++] = hex[c & 15];
+        }
+    }
+    out[j] = '\0';
+}
+
 void generate_flux_html_report(
     const char *flux_dir,
     const char *basename,
+    const char *audio_filename,
     uint32_t sample_rate,
     uint32_t num_channels,
     uint32_t total_samples,
@@ -822,6 +926,7 @@ void generate_flux_html_report(
     fprintf(f, "  .pitch-tag { background: #333344; color: #82aaff; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; font-family: monospace; }\n");
     fprintf(f, "  .stem-metrics { font-size: 0.85rem; color: var(--muted); display: flex; gap: 15px; font-family: monospace; }\n");
     fprintf(f, "  audio { height: 32px; outline: none; border-radius: 4px; }\n");
+    fprintf(f, "  .playhead { position: absolute; top: 0; bottom: 18px; width: 2px; margin-left: -1px; background: #ff5252; box-shadow: 0 0 4px rgba(255, 82, 82, 0.8); pointer-events: none; display: none; }\n");
     fprintf(f, "  .canvas-container { position: relative; width: 100%%; height: 140px; background: #0d0d11; border-radius: 6px; border: 1px solid #22222e; overflow: hidden; margin-top: 8px; user-select: none; }\n");
     fprintf(f, "  canvas { width: 100%%; height: 100%%; display: block; cursor: crosshair; }\n");
     fprintf(f, "  .tooltip { position: absolute; top: 8px; right: 12px; background: rgba(10, 10, 15, 0.85); border: 1px solid #333344; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-family: monospace; color: #fff; pointer-events: none; opacity: 0; transition: opacity 0.15s; }\n");
@@ -853,6 +958,9 @@ void generate_flux_html_report(
     fprintf(f, "  <div class=\"instructions\">Click and drag horizontally on any graph to zoom in. Right-click on a graph to zoom out one level. Click 'Reset Zoom' to restore full view.</div>\n");
     fprintf(f, "</header>\n\n");
 
+    char audio_url[8192];
+    url_encode_component(audio_filename, audio_url, sizeof(audio_url));
+
     fprintf(f, "<div id=\"stemsContainer\">\n");
     for (int i = 0; i < stem_count; i++) {
         const FluxStem *st = &stems[i];
@@ -865,29 +973,21 @@ void generate_flux_html_report(
         fprintf(f, "        <span>Peaks: %d</span>\n", st->num_peaks);
         fprintf(f, "        <span>Troughs: %d</span>\n", st->num_troughs);
         fprintf(f, "      </div>\n");
-        fprintf(f, "      <audio controls src=\"../%s\" preload=\"metadata\"></audio>\n", st->mod_filename);
+        fprintf(f, "      <audio controls id=\"audio-%d\" src=\"../../%s\" preload=\"metadata\"></audio>\n", i, audio_url);
         fprintf(f, "    </div>\n");
         fprintf(f, "    <div class=\"canvas-container\">\n");
         fprintf(f, "      <canvas id=\"canvas-%d\" data-index=\"%d\"></canvas>\n", i, i);
+        fprintf(f, "      <div class=\"playhead\" id=\"playhead-%d\"></div>\n", i);
         fprintf(f, "      <div class=\"tooltip\" id=\"tooltip-%d\"></div>\n", i);
         fprintf(f, "    </div>\n");
         fprintf(f, "  </div>\n");
     }
-
     fprintf(f, "</div>\n\n");
 
-    char js_data_filename[1024];
-    snprintf(js_data_filename, sizeof(js_data_filename), "%s_flux_waveform_data.js", basename);
-    char js_data_path[4096];
-    snprintf(js_data_path, sizeof(js_data_path), "%s/%s", flux_dir, js_data_filename);
-
-    FILE *fjs = fopen(js_data_path, "w");
-    if (fjs) {
-        fprintf(fjs, "window.WAVEFORM_DATA = {\n");
-
-        int16_t *pcm_i16 = (int16_t*)malloc(total_samples * sizeof(int16_t));
-
-        if (orig_audio_buffer && pcm_i16) {
+    int16_t *pcm_i16 = NULL;
+    if (orig_audio_buffer && total_samples > 0) {
+        pcm_i16 = (int16_t*)malloc((size_t)total_samples * sizeof(int16_t));
+        if (pcm_i16) {
             for (uint32_t s = 0; s < total_samples; s++) {
                 double sum_f = 0.0;
                 for (uint32_t c = 0; c < num_channels; c++) {
@@ -898,97 +998,127 @@ void generate_flux_html_report(
                 if (val < -1.0) val = -1.0;
                 pcm_i16[s] = (int16_t)round(val * 32767.0);
             }
-            char *b64 = encode_base64_bytes((const uint8_t*)pcm_i16, total_samples * sizeof(int16_t));
-            fprintf(fjs, "  origPcm: \"%s\",\n", b64 ? b64 : "");
-            if (b64) free(b64);
-        } else {
-            fprintf(fjs, "  origPcm: \"\",\n");
         }
-        if (pcm_i16) free(pcm_i16);
+    }
 
-        fprintf(fjs, "  rawFluxPcm: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            if (st->raw_flux_i16) {
-                char *b64 = encode_base64_bytes((const uint8_t*)st->raw_flux_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
-                if (b64) free(b64);
-            } else {
-                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
+    char data_dir[8192];
+    snprintf(data_dir, sizeof(data_dir), "%s/%s_flux_data", flux_dir, basename);
+    ensure_dir_exists(data_dir);
+
+    for (int li = 0; li < FLUX_REPORT_NUM_LEVELS; li++) {
+        int step = g_flux_report_levels[li].step;
+        int minmax = g_flux_report_levels[li].minmax;
+        uint32_t bins_total = flux_report_bins(total_samples, step);
+        uint32_t nchunks = (bins_total + FLUX_REPORT_CHUNK_BINS - 1) / FLUX_REPORT_CHUNK_BINS;
+        if (nchunks == 0) nchunks = 1;
+
+        for (uint32_t c = 0; c < nchunks; c++) {
+            uint32_t first_bin = c * FLUX_REPORT_CHUNK_BINS;
+            uint32_t bins = FLUX_REPORT_CHUNK_BINS;
+            if (first_bin + bins > bins_total) {
+                bins = (first_bin < bins_total) ? (bins_total - first_bin) : 0;
             }
-        }
-        fprintf(fjs, "  ],\n");
 
-        fprintf(fjs, "  modFluxPcm: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            if (st->mod_flux_i16) {
-                char *b64 = encode_base64_bytes((const uint8_t*)st->mod_flux_i16, total_samples * sizeof(int16_t));
-                fprintf(fjs, "    \"%s\"%s\n", b64 ? b64 : "", (i + 1 < stem_count) ? "," : "");
-                if (b64) free(b64);
-            } else {
-                fprintf(fjs, "    \"\"%s\n", (i + 1 < stem_count) ? "," : "");
+            char chunk_path[8192];
+            snprintf(chunk_path, sizeof(chunk_path), "%s/l%d_%u.js", data_dir, step, c);
+            FILE *fc = fopen(chunk_path, "w");
+            if (!fc) {
+                pthread_mutex_lock(&g_console_mutex);
+                printf("Error: Could not open Flux report data file '%s' for writing.\n", chunk_path);
+                pthread_mutex_unlock(&g_console_mutex);
+                continue;
             }
+            fprintf(fc, "__fluxChunkArrive(\"%d_%u\",[", li, c);
+            flux_report_write_streams(fc, pcm_i16, stems, stem_count, total_samples, step, minmax, first_bin, bins);
+            fprintf(fc, "]);\n");
+            fclose(fc);
         }
-        fprintf(fjs, "  ],\n");
+    }
 
-        fprintf(fjs, "  peaks: [\n");
+    char summary_path[8192];
+    snprintf(summary_path, sizeof(summary_path), "%s/summary.js", data_dir);
+    FILE *fs = fopen(summary_path, "w");
+    if (fs) {
+        uint32_t coarse_bins = flux_report_bins(total_samples, FLUX_REPORT_COARSE_STEP);
+
+        fprintf(fs, "window.FLUX_META = {\n");
+        fprintf(fs, "  sampleRate: %u,\n", sample_rate);
+        fprintf(fs, "  totalSamples: %u,\n", total_samples);
+        fprintf(fs, "  duration: %.6f,\n", duration);
+        fprintf(fs, "  dataDir: \"%s_flux_data\",\n", basename);
+        fprintf(fs, "  chunkBins: %d,\n", FLUX_REPORT_CHUNK_BINS);
+        fprintf(fs, "  coarseStep: %d,\n", FLUX_REPORT_COARSE_STEP);
+        fprintf(fs, "  coarseBins: %u,\n", coarse_bins);
+        fprintf(fs, "  levels: [\n");
+        for (int li = 0; li < FLUX_REPORT_NUM_LEVELS; li++) {
+            fprintf(fs, "    { step: %d, minmax: %s, bins: %u }%s\n",
+                    g_flux_report_levels[li].step,
+                    g_flux_report_levels[li].minmax ? "true" : "false",
+                    flux_report_bins(total_samples, g_flux_report_levels[li].step),
+                    (li + 1 < FLUX_REPORT_NUM_LEVELS) ? "," : "");
+        }
+        fprintf(fs, "  ],\n");
+        fprintf(fs, "  stems: [\n");
         for (int i = 0; i < stem_count; i++) {
             const FluxStem *st = &stems[i];
-            fprintf(fjs, "    [");
+            fprintf(fs, "    { pitch: %d, name: \"%s\", peaks: [", st->pitch, st->note_name);
             for (int k = 0; k < st->num_peaks; k++) {
-                fprintf(fjs, "%d%s", st->peaks[k], (k + 1 < st->num_peaks) ? "," : "");
+                fprintf(fs, "%d%s", st->peaks[k], (k + 1 < st->num_peaks) ? "," : "");
             }
-            fprintf(fjs, "]%s\n", (i + 1 < stem_count) ? "," : "");
-        }
-        fprintf(fjs, "  ],\n");
-
-        fprintf(fjs, "  troughs: [\n");
-        for (int i = 0; i < stem_count; i++) {
-            const FluxStem *st = &stems[i];
-            fprintf(fjs, "    [");
+            fprintf(fs, "], troughs: [");
             for (int k = 0; k < st->num_troughs; k++) {
-                fprintf(fjs, "%d%s", st->troughs[k], (k + 1 < st->num_troughs) ? "," : "");
+                fprintf(fs, "%d%s", st->troughs[k], (k + 1 < st->num_troughs) ? "," : "");
             }
-            fprintf(fjs, "]%s\n", (i + 1 < stem_count) ? "," : "");
+            fprintf(fs, "] }%s\n", (i + 1 < stem_count) ? "," : "");
         }
-        fprintf(fjs, "  ]\n");
+        fprintf(fs, "  ]\n};\n\n");
 
-        fprintf(fjs, "};\n");
-        fclose(fjs);
+        fprintf(fs, "window.FLUX_COARSE = [");
+        flux_report_write_streams(fs, pcm_i16, stems, stem_count, total_samples, FLUX_REPORT_COARSE_STEP, 1, 0, coarse_bins);
+        fprintf(fs, "];\n");
+        fclose(fs);
+    } else {
+        pthread_mutex_lock(&g_console_mutex);
+        printf("Error: Could not open Flux report summary file '%s' for writing.\n", summary_path);
+        pthread_mutex_unlock(&g_console_mutex);
     }
 
-    fprintf(f, "<script src=\"%s\"></script>\n", js_data_filename);
+    if (pcm_i16) free(pcm_i16);
+
+    fprintf(f, "<script src=\"%s_flux_data/summary.js\"></script>\n", basename);
     fprintf(f, "<script>\n");
+    fprintf(f, "const META = window.FLUX_META;\n");
+    fprintf(f, "const LEVELS = META.levels;\n");
+    fprintf(f, "const COARSE = { step: META.coarseStep, bins: META.coarseBins, arrays: null };\n");
     fprintf(f, "const DATA = {\n");
-    fprintf(f, "  sampleRate: %u,\n", sample_rate);
-    fprintf(f, "  numChannels: %u,\n", num_channels);
-    fprintf(f, "  totalSamples: %u,\n", total_samples);
-    fprintf(f, "  duration: %.6f,\n", duration);
-    fprintf(f, "  stems: [\n");
+    fprintf(f, "  sampleRate: META.sampleRate,\n");
+    fprintf(f, "  totalSamples: META.totalSamples,\n");
+    fprintf(f, "  duration: META.duration,\n");
+    fprintf(f, "  stems: META.stems\n");
+    fprintf(f, "};\n");
+    fprintf(f, "const STEM_COUNT = DATA.stems.length;\n");
+    fprintf(f, "const CACHE_BUDGET = 192 * 1024 * 1024;\n\n");
 
-    for (int i = 0; i < stem_count; i++) {
-        const FluxStem *st = &stems[i];
-        fprintf(f, "    {\n");
-        fprintf(f, "      pitch: %d,\n", st->pitch);
-        fprintf(f, "      name: \"%s\",\n", st->note_name);
-        fprintf(f, "      file: \"../%s\"\n", st->mod_filename);
-        fprintf(f, "    }%s\n", (i + 1 < stem_count) ? "," : "");
-    }
+    fprintf(f, "const cache = new Map();\n");
+    fprintf(f, "const pending = new Set();\n");
+    fprintf(f, "let cacheBytes = 0;\n");
+    fprintf(f, "let viewStart = 0.0;\n");
+    fprintf(f, "let viewEnd = DATA.duration;\n");
+    fprintf(f, "let zoomHistory = [];\n");
+    fprintf(f, "let activeDrag = null;\n");
+    fprintf(f, "let hoverState = null;\n");
+    fprintf(f, "let renderQueued = false;\n");
+    fprintf(f, "let activeAudio = null;\n");
+    fprintf(f, "let playheadRaf = 0;\n");
+    fprintf(f, "const rangeOut = { mn: 0, mx: 0 };\n\n");
 
-    fprintf(f, "  ]\n");
-    fprintf(f, "};\n\n");
-
-    fprintf(f, "function base64ToFloat32(b64) {\n");
-    fprintf(f, "  if (!b64) return new Float32Array(DATA.totalSamples);\n");
-    fprintf(f, "  const binaryString = atob(b64);\n");
-    fprintf(f, "  const len = binaryString.length;\n");
+    fprintf(f, "function base64ToI16(b64) {\n");
+    fprintf(f, "  if (!b64) return null;\n");
+    fprintf(f, "  const bin = atob(b64);\n");
+    fprintf(f, "  const len = bin.length;\n");
     fprintf(f, "  const bytes = new Uint8Array(len);\n");
-    fprintf(f, "  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);\n");
-    fprintf(f, "  const i16 = new Int16Array(bytes.buffer, 0, Math.floor(len / 2));\n");
-    fprintf(f, "  const f32 = new Float32Array(i16.length);\n");
-    fprintf(f, "  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32767.0;\n");
-    fprintf(f, "  return f32;\n");
+    fprintf(f, "  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);\n");
+    fprintf(f, "  return new Int16Array(bytes.buffer, 0, len >> 1);\n");
     fprintf(f, "}\n\n");
 
     fprintf(f, "function formatMSSPrecise(sec) {\n");
@@ -1008,56 +1138,150 @@ void generate_flux_html_report(
     fprintf(f, "  return `${m}:${sStr}`;\n");
     fprintf(f, "}\n\n");
 
-    fprintf(f, "function initAudioData() {\n");
-    fprintf(f, "  if (window.WAVEFORM_DATA) {\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.origPcm) {\n");
-    fprintf(f, "      DATA.origPcm = base64ToFloat32(window.WAVEFORM_DATA.origPcm);\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.rawFluxPcm) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        if (window.WAVEFORM_DATA.rawFluxPcm[i]) {\n");
-    fprintf(f, "          DATA.stems[i].rawFluxPcm = base64ToFloat32(window.WAVEFORM_DATA.rawFluxPcm[i]);\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.modFluxPcm) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        if (window.WAVEFORM_DATA.modFluxPcm[i]) {\n");
-    fprintf(f, "          DATA.stems[i].modFluxPcm = base64ToFloat32(window.WAVEFORM_DATA.modFluxPcm[i]);\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.peaks) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        DATA.stems[i].peaks = window.WAVEFORM_DATA.peaks[i] || [];\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
-    fprintf(f, "    if (window.WAVEFORM_DATA.troughs) {\n");
-    fprintf(f, "      for (let i = 0; i < DATA.stems.length; i++) {\n");
-    fprintf(f, "        DATA.stems[i].troughs = window.WAVEFORM_DATA.troughs[i] || [];\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "    }\n");
+    fprintf(f, "function evictCache() {\n");
+    fprintf(f, "  for (const entry of cache) {\n");
+    fprintf(f, "    if (cacheBytes <= CACHE_BUDGET) break;\n");
+    fprintf(f, "    for (const a of entry[1]) if (a) cacheBytes -= a.byteLength;\n");
+    fprintf(f, "    cache.delete(entry[0]);\n");
     fprintf(f, "  }\n");
-    fprintf(f, "  renderAll();\n");
     fprintf(f, "}\n\n");
 
-    fprintf(f, "let viewStart = 0.0;\n");
-    fprintf(f, "let viewEnd = DATA.duration;\n");
-    fprintf(f, "let zoomHistory = [];\n");
-    fprintf(f, "let activeDrag = null;\n");
-    fprintf(f, "let hoverState = null;\n");
+    fprintf(f, "window.__fluxChunkArrive = function (key, streams) {\n");
+    fprintf(f, "  pending.delete(key);\n");
+    fprintf(f, "  if (!cache.has(key)) {\n");
+    fprintf(f, "    const arrs = streams.map(base64ToI16);\n");
+    fprintf(f, "    for (const a of arrs) if (a) cacheBytes += a.byteLength;\n");
+    fprintf(f, "    cache.set(key, arrs);\n");
+    fprintf(f, "    evictCache();\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  scheduleRender();\n");
+    fprintf(f, "};\n\n");
+
+    fprintf(f, "function requestChunk(levelIdx, c) {\n");
+    fprintf(f, "  const key = levelIdx + '_' + c;\n");
+    fprintf(f, "  if (cache.has(key) || pending.has(key)) return;\n");
+    fprintf(f, "  pending.add(key);\n");
+    fprintf(f, "  const el = document.createElement('script');\n");
+    fprintf(f, "  el.src = META.dataDir + '/l' + LEVELS[levelIdx].step + '_' + c + '.js';\n");
+    fprintf(f, "  el.onload = () => el.remove();\n");
+    fprintf(f, "  el.onerror = () => { pending.delete(key); };\n");
+    fprintf(f, "  document.head.appendChild(el);\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function chunksForRange(levelIdx, s1, s2) {\n");
+    fprintf(f, "  const step = LEVELS[levelIdx].step;\n");
+    fprintf(f, "  const cb = META.chunkBins;\n");
+    fprintf(f, "  const last = Math.max(1, Math.ceil(LEVELS[levelIdx].bins / cb)) - 1;\n");
+    fprintf(f, "  const c1 = Math.min(last, Math.floor(Math.floor(s1 / step) / cb));\n");
+    fprintf(f, "  const c2 = Math.min(last, Math.floor(Math.floor(s2 / step) / cb));\n");
+    fprintf(f, "  const out = [];\n");
+    fprintf(f, "  for (let c = c1; c <= c2; c++) out.push(c);\n");
+    fprintf(f, "  return out;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function resident(levelIdx, s1, s2) {\n");
+    fprintf(f, "  for (const c of chunksForRange(levelIdx, s1, s2)) {\n");
+    fprintf(f, "    if (!cache.has(levelIdx + '_' + c)) return false;\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  return true;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function pickLevel(visibleSamples, width) {\n");
+    fprintf(f, "  const maxBins = Math.max(1, width * 4);\n");
+    fprintf(f, "  for (let i = 0; i < LEVELS.length; i++) {\n");
+    fprintf(f, "    if (visibleSamples / LEVELS[i].step <= maxBins) return i;\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  return -1;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function usableLevel(s1, s2, width) {\n");
+    fprintf(f, "  const want = pickLevel(s2 - s1 + 1, width);\n");
+    fprintf(f, "  for (let i = Math.max(0, want); i < LEVELS.length; i++) {\n");
+    fprintf(f, "    if (resident(i, s1, s2)) return i;\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  return -1;\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function requestViewLevel(s1, s2, width) {\n");
+    fprintf(f, "  const want = pickLevel(s2 - s1 + 1, width);\n");
+    fprintf(f, "  if (want < 0) return;\n");
+    fprintf(f, "  for (const c of chunksForRange(want, s1, s2)) requestChunk(want, c);\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function streamRange(levelIdx, stream, a, b) {\n");
+    fprintf(f, "  let ok = false;\n");
+    fprintf(f, "  if (levelIdx < 0) {\n");
+    fprintf(f, "    const arr = COARSE.arrays[stream];\n");
+    fprintf(f, "    if (!arr) return false;\n");
+    fprintf(f, "    let b1 = Math.floor(a / COARSE.step);\n");
+    fprintf(f, "    let b2 = Math.floor(b / COARSE.step);\n");
+    fprintf(f, "    if (b1 < 0) b1 = 0;\n");
+    fprintf(f, "    if (b2 > COARSE.bins - 1) b2 = COARSE.bins - 1;\n");
+    fprintf(f, "    if (b2 < b1) return false;\n");
+    fprintf(f, "    for (let i = b1; i <= b2; i++) {\n");
+    fprintf(f, "      const lo = arr[i * 2] / 32767;\n");
+    fprintf(f, "      const hi = arr[i * 2 + 1] / 32767;\n");
+    fprintf(f, "      if (!ok) { rangeOut.mn = lo; rangeOut.mx = hi; ok = true; }\n");
+    fprintf(f, "      else { if (lo < rangeOut.mn) rangeOut.mn = lo; if (hi > rangeOut.mx) rangeOut.mx = hi; }\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    return ok;\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  const L = LEVELS[levelIdx];\n");
+    fprintf(f, "  const cb = META.chunkBins;\n");
+    fprintf(f, "  let b1 = Math.floor(a / L.step);\n");
+    fprintf(f, "  let b2 = Math.floor(b / L.step);\n");
+    fprintf(f, "  if (b1 < 0) b1 = 0;\n");
+    fprintf(f, "  if (b2 > L.bins - 1) b2 = L.bins - 1;\n");
+    fprintf(f, "  if (b2 < b1) return false;\n");
+    fprintf(f, "  const stride = L.minmax ? 2 : 1;\n");
+    fprintf(f, "  let cur = b1;\n");
+    fprintf(f, "  while (cur <= b2) {\n");
+    fprintf(f, "    const c = Math.floor(cur / cb);\n");
+    fprintf(f, "    const arrs = cache.get(levelIdx + '_' + c);\n");
+    fprintf(f, "    if (!arrs) return false;\n");
+    fprintf(f, "    const arr = arrs[stream];\n");
+    fprintf(f, "    const end = Math.min(b2, (c + 1) * cb - 1);\n");
+    fprintf(f, "    if (arr) {\n");
+    fprintf(f, "      for (let i = cur; i <= end; i++) {\n");
+    fprintf(f, "        const loc = (i - c * cb) * stride;\n");
+    fprintf(f, "        if (loc + stride > arr.length) break;\n");
+    fprintf(f, "        const lo = arr[loc] / 32767;\n");
+    fprintf(f, "        const hi = L.minmax ? arr[loc + 1] / 32767 : lo;\n");
+    fprintf(f, "        if (!ok) { rangeOut.mn = lo; rangeOut.mx = hi; ok = true; }\n");
+    fprintf(f, "        else { if (lo < rangeOut.mn) rangeOut.mn = lo; if (hi > rangeOut.mx) rangeOut.mx = hi; }\n");
+    fprintf(f, "      }\n");
+    fprintf(f, "    } else if (!ok) { rangeOut.mn = 0; rangeOut.mx = 0; ok = true; }\n");
+    fprintf(f, "    cur = end + 1;\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  return ok;\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "function timeToX(t, width) {\n");
     fprintf(f, "  return ((t - viewStart) / (viewEnd - viewStart)) * width;\n");
     fprintf(f, "}\n");
     fprintf(f, "function xToTime(x, width) {\n");
     fprintf(f, "  return viewStart + (x / width) * (viewEnd - viewStart);\n");
-    fprintf(f, "}\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function updatePlayheads() {\n");
+    fprintf(f, "  const t = activeAudio ? activeAudio.currentTime : 0;\n");
+    fprintf(f, "  for (let i = 0; i < STEM_COUNT; i++) {\n");
+    fprintf(f, "    const ph = document.getElementById('playhead-' + i);\n");
+    fprintf(f, "    if (!ph) continue;\n");
+    fprintf(f, "    const w = ph.parentElement.clientWidth;\n");
+    fprintf(f, "    if (!activeAudio || !w || t < viewStart || t > viewEnd) { ph.style.display = 'none'; continue; }\n");
+    fprintf(f, "    ph.style.display = 'block';\n");
+    fprintf(f, "    ph.style.left = timeToX(t, w) + 'px';\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "  if (activeAudio && !activeAudio.paused && !playheadRaf) {\n");
+    fprintf(f, "    playheadRaf = requestAnimationFrame(() => { playheadRaf = 0; updatePlayheads(); });\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "function updateViewInfo() {\n");
     fprintf(f, "  const dur = viewEnd - viewStart;\n");
     fprintf(f, "  document.getElementById('viewInfo').innerHTML = `Visible: ${formatMSSPrecise(viewStart)} &ndash; ${formatMSSPrecise(viewEnd)} (Duration: ${formatMSSPrecise(dur)})`;\n");
-    fprintf(f, "}\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "function resetZoom() {\n");
     fprintf(f, "  zoomHistory = [];\n");
@@ -1065,7 +1289,7 @@ void generate_flux_html_report(
     fprintf(f, "  viewEnd = DATA.duration;\n");
     fprintf(f, "  updateViewInfo();\n");
     fprintf(f, "  renderAll();\n");
-    fprintf(f, "}\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "function zoomOut() {\n");
     fprintf(f, "  if (zoomHistory.length > 0) {\n");
@@ -1075,7 +1299,13 @@ void generate_flux_html_report(
     fprintf(f, "    updateViewInfo();\n");
     fprintf(f, "    renderAll();\n");
     fprintf(f, "  }\n");
-    fprintf(f, "}\n");
+    fprintf(f, "}\n\n");
+
+    fprintf(f, "function scheduleRender() {\n");
+    fprintf(f, "  if (renderQueued) return;\n");
+    fprintf(f, "  renderQueued = true;\n");
+    fprintf(f, "  requestAnimationFrame(() => { renderQueued = false; renderAll(); });\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "function renderCanvas(index) {\n");
     fprintf(f, "  const canvas = document.getElementById(`canvas-${index}`);\n");
@@ -1092,11 +1322,11 @@ void generate_flux_html_report(
     fprintf(f, "  const ctx = canvas.getContext('2d');\n");
     fprintf(f, "  ctx.save();\n");
     fprintf(f, "  ctx.scale(dpr, dpr);\n");
-    fprintf(f, "  ctx.clearRect(0, 0, width, height);\n");
+    fprintf(f, "  ctx.clearRect(0, 0, width, height);\n\n");
 
     fprintf(f, "  const graphBottom = height - 18;\n");
     fprintf(f, "  const graphTop = 8;\n");
-    fprintf(f, "  const graphHeight = graphBottom - graphTop;\n");
+    fprintf(f, "  const graphHeight = graphBottom - graphTop;\n\n");
 
     fprintf(f, "  // Grid lines\n");
     fprintf(f, "  ctx.strokeStyle = '#1e1e2c';\n");
@@ -1104,103 +1334,82 @@ void generate_flux_html_report(
     fprintf(f, "  [0.0, 0.25, 0.5, 0.75, 1.0].forEach(val => {\n");
     fprintf(f, "    const y = graphBottom - val * graphHeight;\n");
     fprintf(f, "    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();\n");
-    fprintf(f, "  });\n");
+    fprintf(f, "  });\n\n");
 
     fprintf(f, "  const sampleStart = Math.max(0, Math.floor((viewStart / DATA.duration) * DATA.totalSamples));\n");
     fprintf(f, "  const sampleEnd = Math.min(DATA.totalSamples - 1, Math.ceil((viewEnd / DATA.duration) * DATA.totalSamples));\n");
     fprintf(f, "  const visibleSamples = Math.max(1, sampleEnd - sampleStart + 1);\n");
     fprintf(f, "  const stem = DATA.stems[index];\n");
+    fprintf(f, "  const level = usableLevel(sampleStart, sampleEnd, width);\n");
+    fprintf(f, "  const rawStream = 1 + index;\n");
+    fprintf(f, "  const modStream = 1 + STEM_COUNT + index;\n\n");
 
-    fprintf(f, "  function drawOriginalWaveform(pcm) {\n");
-    fprintf(f, "    if (!pcm || pcm.length === 0) return;\n");
+    fprintf(f, "  function drawOriginalWaveform(levelIdx) {\n");
+    fprintf(f, "    const midY = graphTop + graphHeight / 2;\n");
+    fprintf(f, "    const halfH = graphHeight / 2;\n");
     fprintf(f, "    ctx.fillStyle = 'rgba(180, 190, 210, 0.35)';\n");
     fprintf(f, "    ctx.strokeStyle = 'rgba(180, 190, 210, 0.55)';\n");
     fprintf(f, "    ctx.lineWidth = 1;\n");
-    fprintf(f, "    const midY = graphTop + graphHeight / 2;\n");
-    fprintf(f, "    const halfH = graphHeight / 2;\n");
-    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
+    fprintf(f, "    if (levelIdx >= 0 && LEVELS[levelIdx].step === 1) {\n");
     fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      let started = false;\n");
     fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
-    fprintf(f, "        const t = s / DATA.sampleRate;\n");
-    fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        const val = pcm[s];\n");
-    fprintf(f, "        const y = midY - val * halfH;\n");
-    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "        if (!streamRange(levelIdx, 0, s, s)) continue;\n");
+    fprintf(f, "        const x = timeToX(s / DATA.sampleRate, width);\n");
+    fprintf(f, "        const y = midY - rangeOut.mx * halfH;\n");
+    fprintf(f, "        if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }\n");
     fprintf(f, "      }\n");
     fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    } else {\n");
-    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
-    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
-    fprintf(f, "        const t1 = xToTime(px, width);\n");
-    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
-    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
-    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
-    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
-    fprintf(f, "          let minV = pcm[s1];\n");
-    fprintf(f, "          let maxV = pcm[s1];\n");
-    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
-    fprintf(f, "            const v = pcm[s];\n");
-    fprintf(f, "            if (v < minV) minV = v;\n");
-    fprintf(f, "            if (v > maxV) maxV = v;\n");
-    fprintf(f, "          }\n");
-    fprintf(f, "          const y1 = midY - maxV * halfH;\n");
-    fprintf(f, "          const y2 = midY - minV * halfH;\n");
-    fprintf(f, "          ctx.fillRect(px, y1, 1, Math.max(1, y2 - y1));\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
+    fprintf(f, "      return;\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "    for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "      const a = sampleStart + Math.floor((px / width) * visibleSamples);\n");
+    fprintf(f, "      let b = sampleStart + Math.ceil(((px + 1) / width) * visibleSamples) - 1;\n");
+    fprintf(f, "      if (b < a) b = a;\n");
+    fprintf(f, "      if (!streamRange(levelIdx, 0, a, b)) continue;\n");
+    fprintf(f, "      const y1 = midY - rangeOut.mx * halfH;\n");
+    fprintf(f, "      const y2 = midY - rangeOut.mn * halfH;\n");
+    fprintf(f, "      ctx.fillRect(px, y1, 1, Math.max(1, y2 - y1));\n");
     fprintf(f, "    }\n");
     fprintf(f, "  }\n\n");
 
-    fprintf(f, "  function drawFluxLine(pcm, color) {\n");
-    fprintf(f, "    if (!pcm) return;\n");
+    fprintf(f, "  function drawFluxLine(levelIdx, stream, color) {\n");
     fprintf(f, "    ctx.strokeStyle = color;\n");
     fprintf(f, "    ctx.lineWidth = 1.8;\n");
-    fprintf(f, "    if (visibleSamples <= width * 2) {\n");
+    fprintf(f, "    if (levelIdx >= 0 && LEVELS[levelIdx].step === 1) {\n");
     fprintf(f, "      ctx.beginPath();\n");
+    fprintf(f, "      let started = false;\n");
     fprintf(f, "      for (let s = sampleStart; s <= sampleEnd; s++) {\n");
-    fprintf(f, "        const t = s / DATA.sampleRate;\n");
-    fprintf(f, "        const x = timeToX(t, width);\n");
-    fprintf(f, "        const val = Math.max(0, Math.min(1, pcm[s]));\n");
-    fprintf(f, "        const y = graphBottom - val * graphHeight;\n");
-    fprintf(f, "        if (s === sampleStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);\n");
+    fprintf(f, "        if (!streamRange(levelIdx, stream, s, s)) continue;\n");
+    fprintf(f, "        const x = timeToX(s / DATA.sampleRate, width);\n");
+    fprintf(f, "        const y = graphBottom - Math.max(0, Math.min(1, rangeOut.mx)) * graphHeight;\n");
+    fprintf(f, "        if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }\n");
     fprintf(f, "      }\n");
     fprintf(f, "      ctx.stroke();\n");
-    fprintf(f, "    } else {\n");
-    fprintf(f, "      const pxWidth = Math.ceil(width);\n");
-    fprintf(f, "      const maxArr = new Float32Array(pxWidth);\n");
-    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
-    fprintf(f, "        const t1 = xToTime(px, width);\n");
-    fprintf(f, "        const t2 = xToTime(px + 1, width);\n");
-    fprintf(f, "        const s1 = Math.max(0, Math.floor(t1 * DATA.sampleRate));\n");
-    fprintf(f, "        const s2 = Math.min(DATA.totalSamples - 1, Math.ceil(t2 * DATA.sampleRate));\n");
-    fprintf(f, "        if (s1 <= s2 && s1 < DATA.totalSamples) {\n");
-    fprintf(f, "          let maxV = pcm[s1];\n");
-    fprintf(f, "          for (let s = s1; s <= s2; s++) {\n");
-    fprintf(f, "            const v = pcm[s];\n");
-    fprintf(f, "            if (v > maxV) maxV = v;\n");
-    fprintf(f, "          }\n");
-    fprintf(f, "          maxArr[px] = Math.max(0, Math.min(1, maxV));\n");
-    fprintf(f, "        }\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.beginPath();\n");
-    fprintf(f, "      for (let px = 0; px < pxWidth; px++) {\n");
-    fprintf(f, "        const y = graphBottom - maxArr[px] * graphHeight;\n");
-    fprintf(f, "        if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
-    fprintf(f, "      }\n");
-    fprintf(f, "      ctx.stroke();\n");
+    fprintf(f, "      return;\n");
     fprintf(f, "    }\n");
+    fprintf(f, "    const pxWidth = Math.ceil(width);\n");
+    fprintf(f, "    ctx.beginPath();\n");
+    fprintf(f, "    for (let px = 0; px < pxWidth; px++) {\n");
+    fprintf(f, "      const a = sampleStart + Math.floor((px / width) * visibleSamples);\n");
+    fprintf(f, "      let b = sampleStart + Math.ceil(((px + 1) / width) * visibleSamples) - 1;\n");
+    fprintf(f, "      if (b < a) b = a;\n");
+    fprintf(f, "      if (!streamRange(levelIdx, stream, a, b)) continue;\n");
+    fprintf(f, "      const y = graphBottom - Math.max(0, Math.min(1, rangeOut.mx)) * graphHeight;\n");
+    fprintf(f, "      if (px === 0) ctx.moveTo(px, y); else ctx.lineTo(px, y);\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "    ctx.stroke();\n");
     fprintf(f, "  }\n\n");
 
     fprintf(f, "  // 0. Draw Original Waveform Background\n");
-    fprintf(f, "  if (DATA.origPcm) {\n");
-    fprintf(f, "    drawOriginalWaveform(DATA.origPcm);\n");
-    fprintf(f, "  }\n\n");
+    fprintf(f, "  drawOriginalWaveform(level);\n\n");
 
     fprintf(f, "  // 1. Draw Raw Spectral Flux Envelope\n");
-    fprintf(f, "  drawFluxLine(stem.rawFluxPcm, '#ff5722');\n");
+    fprintf(f, "  drawFluxLine(level, rawStream, '#ff5722');\n\n");
 
     fprintf(f, "  // 2. Draw Modified Flux Envelope\n");
-    fprintf(f, "  drawFluxLine(stem.modFluxPcm, '#4caf50');\n");
+    fprintf(f, "  drawFluxLine(level, modStream, '#4caf50');\n\n");
 
     fprintf(f, "  // 3. Draw Peak Hash Marks (coming down from top)\n");
     fprintf(f, "  if (stem.peaks) {\n");
@@ -1234,7 +1443,7 @@ void generate_flux_html_report(
     fprintf(f, "  const legendY = height - 16;\n");
     fprintf(f, "  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';\n");
     fprintf(f, "  ctx.lineWidth = 1;\n");
-    fprintf(f, "  ctx.beginPath(); ctx.moveTo(0, legendY); ctx.lineTo(width, legendY); ctx.stroke();\n");
+    fprintf(f, "  ctx.beginPath(); ctx.moveTo(0, legendY); ctx.lineTo(width, legendY); ctx.stroke();\n\n");
 
     fprintf(f, "  ctx.fillStyle = '#a0a0b0';\n");
     fprintf(f, "  ctx.font = '10px monospace';\n");
@@ -1260,7 +1469,7 @@ void generate_flux_html_report(
     fprintf(f, "    ctx.strokeStyle = '#ffeb3b';\n");
     fprintf(f, "    ctx.lineWidth = 1.5;\n");
     fprintf(f, "    ctx.strokeRect(x1, 0, x2 - x1, height);\n");
-    fprintf(f, "  }\n");
+    fprintf(f, "  }\n\n");
 
     fprintf(f, "  // Hover crosshair\n");
     fprintf(f, "  if (hoverState && hoverState.index === index) {\n");
@@ -1268,29 +1477,49 @@ void generate_flux_html_report(
     fprintf(f, "    ctx.setLineDash([4, 4]);\n");
     fprintf(f, "    ctx.beginPath(); ctx.moveTo(hoverState.mouseX, 0); ctx.lineTo(hoverState.mouseX, height); ctx.stroke();\n");
     fprintf(f, "    ctx.setLineDash([]);\n");
-    fprintf(f, "  }\n");
+    fprintf(f, "  }\n\n");
 
     fprintf(f, "  ctx.restore();\n");
-    fprintf(f, "}\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "function renderAll() {\n");
+    fprintf(f, "  const first = document.getElementById('canvas-0');\n");
+    fprintf(f, "  if (first) {\n");
+    fprintf(f, "    const w = first.getBoundingClientRect().width;\n");
+    fprintf(f, "    if (w > 0) {\n");
+    fprintf(f, "      const s1 = Math.max(0, Math.floor((viewStart / DATA.duration) * DATA.totalSamples));\n");
+    fprintf(f, "      const s2 = Math.min(DATA.totalSamples - 1, Math.ceil((viewEnd / DATA.duration) * DATA.totalSamples));\n");
+    fprintf(f, "      requestViewLevel(s1, s2, w);\n");
+    fprintf(f, "    }\n");
+    fprintf(f, "  }\n");
     fprintf(f, "  for (let i = 0; i < DATA.stems.length; i++) {\n");
     fprintf(f, "    renderCanvas(i);\n");
     fprintf(f, "  }\n");
-    fprintf(f, "}\n");
+    fprintf(f, "  updatePlayheads();\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "function attachListeners() {\n");
     fprintf(f, "  DATA.stems.forEach((stem, idx) => {\n");
     fprintf(f, "    const canvas = document.getElementById(`canvas-${idx}`);\n");
     fprintf(f, "    const tooltip = document.getElementById(`tooltip-${idx}`);\n");
     fprintf(f, "    if (!canvas) return;\n");
+    fprintf(f, "    const audio = document.getElementById(`audio-${idx}`);\n");
+    fprintf(f, "    if (audio) {\n");
+    fprintf(f, "      audio.addEventListener('play', () => {\n");
+    fprintf(f, "        for (const other of document.querySelectorAll('audio')) if (other !== audio) other.pause();\n");
+    fprintf(f, "        activeAudio = audio;\n");
+    fprintf(f, "        updatePlayheads();\n");
+    fprintf(f, "      });\n");
+    fprintf(f, "      audio.addEventListener('pause', updatePlayheads);\n");
+    fprintf(f, "      audio.addEventListener('ended', updatePlayheads);\n");
+    fprintf(f, "    }\n\n");
 
     fprintf(f, "    canvas.addEventListener('mousedown', (e) => {\n");
     fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
     fprintf(f, "      const x = e.clientX - rect.left;\n");
     fprintf(f, "      activeDrag = { index: idx, startX: x, currentX: x };\n");
     fprintf(f, "      renderCanvas(idx);\n");
-    fprintf(f, "    });\n");
+    fprintf(f, "    });\n\n");
 
     fprintf(f, "    canvas.addEventListener('mousemove', (e) => {\n");
     fprintf(f, "      const rect = canvas.getBoundingClientRect();\n");
@@ -1299,15 +1528,16 @@ void generate_flux_html_report(
     fprintf(f, "      if (activeDrag) {\n");
     fprintf(f, "        activeDrag.currentX = x;\n");
     fprintf(f, "      }\n");
-    fprintf(f, "      renderCanvas(idx);\n");
+    fprintf(f, "      renderCanvas(idx);\n\n");
 
     fprintf(f, "      const t = xToTime(x, rect.width);\n");
     fprintf(f, "      const s = Math.min(DATA.totalSamples - 1, Math.max(0, Math.round(t * DATA.sampleRate)));\n");
-    fprintf(f, "      const rawVal = (stem.rawFluxPcm && stem.rawFluxPcm.length > s) ? stem.rawFluxPcm[s] : 0;\n");
-    fprintf(f, "      const modVal = (stem.modFluxPcm && stem.modFluxPcm.length > s) ? stem.modFluxPcm[s] : 0;\n");
+    fprintf(f, "      const lvl = usableLevel(s, s, rect.width);\n");
+    fprintf(f, "      const rawVal = streamRange(lvl, 1 + idx, s, s) ? rangeOut.mx : 0;\n");
+    fprintf(f, "      const modVal = streamRange(lvl, 1 + STEM_COUNT + idx, s, s) ? rangeOut.mx : 0;\n");
     fprintf(f, "      tooltip.style.opacity = '1';\n");
     fprintf(f, "      tooltip.innerHTML = `Time: ${formatMSSPrecise(t)} (Sample #${s}) | Raw Flux: ${rawVal.toFixed(4)} | Modified Flux: ${modVal.toFixed(4)}`;\n");
-    fprintf(f, "    });\n");
+    fprintf(f, "    });\n\n");
 
     fprintf(f, "    canvas.addEventListener('mouseleave', () => {\n");
     fprintf(f, "      if (activeDrag && activeDrag.index === idx) {\n");
@@ -1316,7 +1546,7 @@ void generate_flux_html_report(
     fprintf(f, "      hoverState = null;\n");
     fprintf(f, "      tooltip.style.opacity = '0';\n");
     fprintf(f, "      renderCanvas(idx);\n");
-    fprintf(f, "    });\n");
+    fprintf(f, "    });\n\n");
 
     fprintf(f, "    canvas.addEventListener('mouseup', (e) => {\n");
     fprintf(f, "      if (activeDrag && activeDrag.index === idx) {\n");
@@ -1333,23 +1563,32 @@ void generate_flux_html_report(
     fprintf(f, "          updateViewInfo();\n");
     fprintf(f, "          renderAll();\n");
     fprintf(f, "        } else {\n");
+    fprintf(f, "          const clickX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));\n");
+    fprintf(f, "          const audio = document.getElementById(`audio-${idx}`);\n");
+    fprintf(f, "          if (audio) {\n");
+    fprintf(f, "            audio.currentTime = Math.max(0, Math.min(DATA.duration, xToTime(clickX, rect.width)));\n");
+    fprintf(f, "            activeAudio = audio;\n");
+    fprintf(f, "            const started = audio.play();\n");
+    fprintf(f, "            if (started && started.catch) started.catch(() => {});\n");
+    fprintf(f, "            updatePlayheads();\n");
+    fprintf(f, "          }\n");
     fprintf(f, "          renderCanvas(idx);\n");
     fprintf(f, "        }\n");
     fprintf(f, "      }\n");
-    fprintf(f, "    });\n");
+    fprintf(f, "    });\n\n");
 
     fprintf(f, "    canvas.addEventListener('contextmenu', (e) => {\n");
     fprintf(f, "      e.preventDefault();\n");
     fprintf(f, "      zoomOut();\n");
     fprintf(f, "    });\n");
     fprintf(f, "  });\n");
-    fprintf(f, "}\n");
+    fprintf(f, "}\n\n");
 
     fprintf(f, "window.addEventListener('resize', renderAll);\n");
     fprintf(f, "window.addEventListener('DOMContentLoaded', () => {\n");
+    fprintf(f, "  COARSE.arrays = window.FLUX_COARSE.map(base64ToI16);\n");
     fprintf(f, "  attachListeners();\n");
     fprintf(f, "  renderAll();\n");
-    fprintf(f, "  initAudioData();\n");
     fprintf(f, "});\n");
 
     fprintf(f, "</script>\n");
@@ -1852,7 +2091,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
      * is separated again when the reports are requested.
      */
     char report_data_rel[4300];
-    snprintf(report_data_rel, sizeof(report_data_rel), "[flux]/%s_flux_waveform_data.js", basename);
+    snprintf(report_data_rel, sizeof(report_data_rel), "[flux]/%s_flux_data/summary.js", basename);
 
     int already_processed = pitch_stems_exist_for(stem_dir, basename);
     if (already_processed && debug_mode) {
@@ -2281,9 +2520,15 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     // Construct Flux HTML report in [flux] directory (debug only)
     if (debug_mode && flux_stems) {
+        const char *orig_filename = input_path;
+        for (const char *p = input_path; *p; p++) {
+            if (*p == '/' || *p == '\\') orig_filename = p + 1;
+        }
+
         generate_flux_html_report(
             flux_dir,
             basename,
+            orig_filename,
             sample_rate,
             num_channels,
             total_samples,
