@@ -298,7 +298,7 @@ int analyzer_process_peak(TransientAnalyzer* self, int p_idx, int global_p_idx, 
 
     double* acc_buf = self->shared_buffer ? self->shared_buffer->accumulated_buffer : self->private_accumulated_buffer;
     double ref_peak = self->shared_buffer ? self->shared_buffer->max_peak : self->private_max_peak;
-    double weight = (ref_peak > 0.0) ? fabs(detected_peak_val) / ref_peak : 1.0;
+    double weight = (ref_peak > 0.0) ? detected_peak_val / ref_peak : 1.0;
     double q_sum = 0.0; bool found = false;
     // Exclude the last 99ms to avoid self-referential bias from the peak at zero.
     int m_len = win_len - 99; double sum = 0.0, max_v = -DBL_MAX, min_v = DBL_MAX;
