@@ -1866,12 +1866,19 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     double frame_hop_sec = (double)HOP_SIZE / (double)sample_rate;
 
     /*
-     * Populate frame_pitch_active and pitch_active based on calibrated peak-bin amplitude
+     * Populate frame_pitch_active and pitch_active based on calibrated peak-bin amplitude:
+     * 1) Peak amplitude in pitch p >= 19% noise floor threshold
+     * 2) Peak amplitude in pitch p >= 89% of the max amplitude seen across all pitches in this frame
      */
+    double relative_pitch_ratio_sq = 0.89 * 0.89;
+
     for (uint32_t c = 0; c < num_channels; c++) {
         for (uint32_t m = 0; m < num_frames; m++) {
             size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
             size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
+
+            double pitch_max_sq[NUM_MIDI_PITCHES] = {0.0};
+            double frame_all_pitches_max_sq = 0.0;
 
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
                 double max_bin_sq = 0.0;
@@ -1883,7 +1890,17 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
                         max_bin_sq = mag_sq;
                     }
                 }
-                if (max_bin_sq >= peak_bin_mag_threshold_sq) {
+                pitch_max_sq[p] = max_bin_sq;
+                if (max_bin_sq > frame_all_pitches_max_sq) {
+                    frame_all_pitches_max_sq = max_bin_sq;
+                }
+            }
+
+            double frame_rel_threshold_sq = frame_all_pitches_max_sq * relative_pitch_ratio_sq;
+
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                if (pitch_max_sq[p] >= peak_bin_mag_threshold_sq &&
+                    pitch_max_sq[p] >= frame_rel_threshold_sq) {
                     frame_pitch_active[frame_p_base + p] = 1;
                     pitch_active[p] = 1;
                 }
