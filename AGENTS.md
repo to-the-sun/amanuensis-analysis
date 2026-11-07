@@ -107,8 +107,10 @@ In regards to comments in the code, a human will almost never look at the code a
 
 - `analysis/` holds the C tools. `analyze.exe` builds from `analyze.c`,
   `exporter.c`, `cumulative_transience.c`, and `crossfade.c`;
+  `song_builder.exe` builds from `song_builder.c` and `cumulative_transience.c`;
   `flux_separator.exe` builds from `flux_separator.c`.
-- Windows build: `make analyze.exe` in `analysis/` with mingw-w64
+- Windows build: `make analyze.exe`, `make song_builder.exe`, and
+  `make flux_separator.exe` in `analysis/` with mingw-w64
   (`x86_64-w64-mingw32-gcc`) on PATH.
 - `analysis/analyze.exe`, `analysis/song_builder.exe`, and
   `analysis/flux_separator.exe` are tracked in git on purpose. Whenever the
