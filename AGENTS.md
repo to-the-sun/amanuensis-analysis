@@ -114,8 +114,7 @@ In regards to comments in the code, a human will almost never look at the code a
   (`x86_64-w64-mingw32-gcc`) on PATH.
 - `analysis/analyze.exe`, `analysis/song_builder.exe`, and
   `analysis/flux_separator.exe` are tracked in git on purpose. Whenever the
-  underlying C sources change, rebuild each affected `.exe` for Windows
-  (`make analyze.exe`, `make flux_separator.exe` in `analysis/`) and commit the
+  underlying C sources change, rebuild each affected `.exe` for Windows and commit the
   new binary together with the source change.
 - A cloud sandbox has no Windows runtime, so a rebuilt `.exe` can be compiled but
   not executed there. Say so plainly instead of implying it was tested; a Linux
