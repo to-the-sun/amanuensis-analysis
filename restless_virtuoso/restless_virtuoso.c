@@ -93,6 +93,18 @@ static void log_error(const char *format, ...)
     }
 }
 
+static void log_trace(const char *format, ...)
+{
+    if (!errorLog) open_error_log();
+    if (!errorLog) return;
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(errorLog, format, args);
+    va_end(args);
+    fflush(errorLog);
+}
+
 static volatile uint32_t midiHead, midiTail;
 static uint32_t midiQueue[MIDI_QUEUE];
 
@@ -351,14 +363,19 @@ static int open_driver(const char *name, HWND window)
         return -1;
     }
 
+    log_trace("creating driver object\n");
     HRESULT result = CoCreateInstance(&clsid, NULL, CLSCTX_INPROC_SERVER, &clsid, (void **)&g.asio);
     if (FAILED(result) || !g.asio) {
         log_error("Could not create the ASIO driver object (0x%08lx).\n", (unsigned long)result);
         g.asio = NULL;
         return -1;
     }
+    log_trace("driver object 0x%08lx\n", (unsigned long)result);
 
-    if (!g.asio->init(g.asio, window)) {
+    log_trace("initializing driver\n");
+    ASIOBool initialized = g.asio->init(g.asio, window);
+    log_trace("init returned %d\n", initialized);
+    if (!initialized) {
         char error[124] = {0};
         g.asio->getErrorMessage(g.asio, error);
         error[123] = 0;
@@ -370,8 +387,12 @@ static int open_driver(const char *name, HWND window)
 
     g.asio->getDriverName(g.asio, g.driverName);
     g.driverName[63] = 0;
+    log_trace("driver name '%s'\n", g.driverName);
 
-    if (g.asio->getChannels(g.asio, &g.inCount, &g.outCount) != ASE_OK) {
+    log_trace("querying channels\n");
+    ASIOError channels = g.asio->getChannels(g.asio, &g.inCount, &g.outCount);
+    log_trace("channels %s, in %d out %d\n", asio_error_text(channels), g.inCount, g.outCount);
+    if (channels != ASE_OK) {
         log_error("ASIOGetChannels failed.\n");
         return -1;
     }
@@ -809,6 +830,7 @@ static void pause_on_error(int exitCode)
 
 static int run(int argc, char **argv)
 {
+    log_trace("run start\n");
     Options options;
     memset(&options, 0, sizeof options);
     options.synth = 1;
@@ -816,6 +838,7 @@ static int run(int argc, char **argv)
     int parsed = parse_args(argc, argv, &options);
     if (parsed == 2) return 0;
     if (parsed != 0) return 1;
+    log_trace("arguments parsed\n");
     if (options.list) {
         list_devices();
         return 0;
@@ -841,6 +864,7 @@ static int run(int argc, char **argv)
         log_error("Could not create the ASIO message window.\n");
         return 1;
     }
+    log_trace("window %p\n", (void *)window);
 
     HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(com) && com != RPC_E_CHANGED_MODE) {
@@ -848,6 +872,7 @@ static int run(int argc, char **argv)
         DestroyWindow(window);
         return 1;
     }
+    log_trace("com 0x%08lx\n", (unsigned long)com);
 
     char names[64][128];
     int driverCount = list_drivers(names, 64);
@@ -864,15 +889,18 @@ static int run(int argc, char **argv)
         if (SUCCEEDED(com)) CoUninitialize();
         return 1;
     }
+    log_trace("driver '%s'\n", driver);
 
     int exitCode = 1;
     if (open_driver(driver, window) != 0) goto done;
+    log_trace("driver opened\n");
 
     printf("%s\n\n", g.driverName);
     print_channels("Audio inputs", ASIOTrue, g.inCount);
     print_channels("Audio outputs", ASIOFalse, g.outCount);
     print_midi_inputs();
     printf("\n");
+    log_trace("channels listed\n");
 
     if (select_channels(options.in, g.inCount, g.inCh, &g.nIn, 2, "input") != 0) goto done;
     if (select_channels(options.out, g.outCount, g.outCh, &g.nOut, 2, "output") != 0) goto done;
@@ -891,7 +919,9 @@ static int run(int argc, char **argv)
 
     if (setup_rate(options.rate) != 0) goto done;
     if (setup_buffer(options.buffer) != 0) goto done;
+    log_trace("rate and buffer set\n");
     if (create_buffers() != 0) goto done;
+    log_trace("buffers created\n");
 
     printf("  %d Hz, %d frames (%.2f ms), latency %d/%d frames\n",
            (int)g.rate, g.bufferSize, 1000.0 * g.bufferSize / g.rate, g.latencyIn, g.latencyOut);
@@ -917,6 +947,7 @@ static int run(int argc, char **argv)
         goto done;
     }
     g.started = 1;
+    log_trace("started\n");
 
     printf("m mute  +/- gain  p control panel  q quit\n");
 
