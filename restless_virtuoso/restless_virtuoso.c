@@ -62,15 +62,15 @@ static Monitor g;
 static ASIOCallbacks callbacks;
 
 static FILE *errorLog;
+static char logPath[MAX_PATH + 8];
 
 static void open_error_log(void)
 {
-    char path[MAX_PATH + 8];
-    DWORD length = GetModuleFileNameA(NULL, path, MAX_PATH);
+    DWORD length = GetModuleFileNameA(NULL, logPath, MAX_PATH);
     if (!length || length >= MAX_PATH) return;
 
-    strcpy(path + length, ".log");
-    errorLog = fopen(path, "a");
+    strcpy(logPath + length, ".log");
+    errorLog = fopen(logPath, "a");
     if (errorLog) {
         fprintf(errorLog, "--- restless_virtuoso run ---\n");
         fflush(errorLog);
@@ -103,6 +103,48 @@ static void log_trace(const char *format, ...)
     vfprintf(errorLog, format, args);
     va_end(args);
     fflush(errorLog);
+}
+
+static void append_log_line(const char *text)
+{
+    if (!logPath[0]) return;
+
+    HANDLE file = CreateFileA(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    DWORD written;
+    WriteFile(file, text, (DWORD)strlen(text), &written, NULL);
+    CloseHandle(file);
+}
+
+static volatile LONG initReturned;
+
+static DWORD WINAPI init_watchdog(void *unused)
+{
+    (void)unused;
+    Sleep(10000);
+    if (!InterlockedCompareExchange(&initReturned, 1, 1))
+        append_log_line("ASIOInit still running after 10 seconds\n");
+    return 0;
+}
+
+static LONG WINAPI crash_handler(EXCEPTION_POINTERS *info)
+{
+    const void *address = info->ExceptionRecord->ExceptionAddress;
+    HMODULE module = NULL;
+    char modulePath[MAX_PATH] = "unknown module";
+    char message[512];
+
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)address, &module))
+        GetModuleFileNameA(module, modulePath, MAX_PATH);
+
+    snprintf(message, sizeof message, "unhandled exception 0x%08lx at %p (%s+0x%lx)\n",
+             (unsigned long)info->ExceptionRecord->ExceptionCode, address, modulePath,
+             module ? (unsigned long)((ULONG_PTR)address - (ULONG_PTR)module) : 0);
+    append_log_line(message);
+    return EXCEPTION_EXECUTE_HANDLER;
 }
 
 static volatile uint32_t midiHead, midiTail;
@@ -373,7 +415,10 @@ static int open_driver(const char *name, HWND window)
     log_trace("driver object 0x%08lx\n", (unsigned long)result);
 
     log_trace("initializing driver\n");
+    HANDLE watchdog = errorLog ? CreateThread(NULL, 0, init_watchdog, NULL, 0, NULL) : NULL;
     ASIOBool initialized = g.asio->init(g.asio, window);
+    InterlockedExchange(&initReturned, 1);
+    if (watchdog) CloseHandle(watchdog);
     log_trace("init returned %d\n", initialized);
     if (!initialized) {
         char error[124] = {0};
@@ -1005,6 +1050,7 @@ done:
 
 int main(int argc, char **argv)
 {
+    SetUnhandledExceptionFilter(crash_handler);
     open_error_log();
     int exitCode = run(argc, argv);
     pause_on_error(exitCode);
