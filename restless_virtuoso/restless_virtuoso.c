@@ -23,6 +23,7 @@
 #define MAX_SELECTED 32
 #define MAX_METERS 4
 #define MIDI_QUEUE 1024
+#define DEFAULT_DRIVER "Focusrite USB ASIO"
 
 typedef struct {
     const char *driver, *in, *out, *midiIn, *midiOut;
@@ -700,7 +701,7 @@ static void usage(void)
         "  restless_virtuoso [options]\n"
         "\n"
         "Options:\n"
-        "  -d, --driver NAME|INDEX  ASIO driver (default: first installed)\n"
+        "  -d, --driver NAME|INDEX  ASIO driver (default: " DEFAULT_DRIVER ", else first installed)\n"
         "  -i, --in LIST            input channels, 1-based: 1,2 or 1-4 (default 1,2; \"none\" for MIDI only)\n"
         "  -o, --out LIST           output channels (default 1,2)\n"
         "  -g, --gain DB            input gain (default 0)\n"
@@ -810,7 +811,8 @@ int main(int argc, char **argv)
 
     char names[64][128];
     int driverCount = list_drivers(names, 64);
-    const char *driver = resolve_driver(options.driver, names, driverCount);
+    const char *driver = resolve_driver(options.driver ? options.driver : DEFAULT_DRIVER, names, driverCount);
+    if (!driver && !options.driver) driver = resolve_driver(NULL, names, driverCount);
     if (!driver) {
         if (!driverCount) fprintf(stderr, "No ASIO driver is installed.\n");
         else {

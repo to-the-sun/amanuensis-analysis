@@ -25,6 +25,7 @@ restless_virtuoso.exe --in 1 --out 1,2 --buffer 128 --rate 48000
 restless_virtuoso.exe --in none --midi-in "Keystation" --midi-out 0
 ```
 
+- Without `--driver`, `Focusrite USB ASIO` is loaded when installed; otherwise the first installed driver is used.
 - `--in` / `--out` take 1-based channel numbers (`1,2`, `1-4`, `3,5-6`), default `1,2`.
   Output channel `j` plays input channel `j`, wrapping if there are more outputs than inputs.
 - `--buffer` picks the ASIO buffer size; omitted, the driver's preferred size is used.
