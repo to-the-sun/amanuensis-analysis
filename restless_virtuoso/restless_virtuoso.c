@@ -28,8 +28,9 @@
 
 typedef struct {
     const char *driver, *in, *out, *midiIn, *midiOut;
+    char device[128];
     double gainDb;
-    int rate, buffer, synth, list;
+    int rate, buffer, synth, list, inputChannel;
 } Options;
 
 typedef struct {
@@ -50,6 +51,7 @@ typedef struct {
     HMIDIIN midiIn;
     HMIDIOUT midiOut;
     int midiInIndex, midiOutIndex;
+    int midiChannel, midiStream;
     int synthEnabled;
     int buffersCreated, started;
 
@@ -373,8 +375,16 @@ static void CALLBACK midi_in_proc(HMIDIIN handle, UINT message, DWORD_PTR instan
     (void)param2;
 
     if (message != MIM_DATA) return;
-    if (g.midiOut) midiOutShortMsg(g.midiOut, (DWORD)param1);
-    midi_push((uint32_t)param1);
+
+    uint32_t data = (uint32_t)param1;
+    int channel = (int)(data & 0x0f) + 1;
+    if (g.midiChannel && channel != g.midiChannel) return;
+
+    if (g.midiStream)
+        log_line("MIDI ch %d  %02X %02X %02X", channel, (int)(data & 0xff),
+                 (int)(data >> 8) & 0x7f, (int)(data >> 16) & 0x7f);
+    if (g.midiOut) midiOutShortMsg(g.midiOut, data);
+    midi_push(data);
 }
 
 static BOOL WINAPI ctrl_handler(DWORD type)
@@ -860,6 +870,31 @@ static void shutdown_monitor(void)
     free_buffers();
 }
 
+static int stream_midi(const char *device, int channel)
+{
+    if (channel > 16) {
+        log_error("MIDI channel %d is out of range (1-16).\n", channel);
+        return 1;
+    }
+    g.midiChannel = channel;
+    g.midiStream = 1;
+    if (open_midi_input(device) != 0) return 1;
+
+    if (channel) printf("streaming MIDI input '%s', channel %d\n", device, channel);
+    else printf("streaming MIDI input '%s', all channels\n", device);
+
+    while (!g.quit) {
+        while (_kbhit()) {
+            int key = _getch();
+            if (key == 'q' || key == 'Q' || key == 27) InterlockedExchange(&g.quit, 1);
+        }
+        Sleep(5);
+    }
+
+    shutdown_monitor();
+    return 0;
+}
+
 static void usage(void)
 {
     printf(
@@ -883,6 +918,62 @@ static void usage(void)
         "  -h, --help               show this help\n"
         "\n"
         "While running: m mute, +/- gain, p ASIO control panel, q quit.\n");
+}
+
+static int is_json_path(const char *path)
+{
+    const char *dot = strrchr(path, '.');
+    return dot && !_stricmp(dot, ".json");
+}
+
+static const char *json_value(const char *text, const char *key)
+{
+    size_t length = strlen(key);
+    for (const char *at = text; (at = strchr(at, '"')); at++) {
+        at++;
+        if (strncmp(at, key, length) || at[length] != '"') continue;
+        at += length + 1;
+        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
+        if (*at++ != ':') continue;
+        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
+        return at;
+    }
+    return NULL;
+}
+
+static int load_settings(const char *path, Options *options)
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        log_error("Could not open settings '%s'.\n", path);
+        return -1;
+    }
+
+    char text[4096];
+    size_t length = fread(text, 1, sizeof text - 1, file);
+    fclose(file);
+    text[length] = 0;
+
+    const char *device = json_value(text, "device");
+    const char *end = device && *device == '"' ? strchr(device + 1, '"') : NULL;
+    if (!end || end == device + 1 || (size_t)(end - device - 1) >= sizeof options->device) {
+        log_error("Settings '%s' need a \"device\" string.\n", path);
+        return -1;
+    }
+
+    size_t deviceLength = (size_t)(end - device - 1);
+    memcpy(options->device, device + 1, deviceLength);
+    options->device[deviceLength] = 0;
+
+    const char *channel = json_value(text, "input-channel");
+    char *stop = NULL;
+    long number = channel ? strtol(channel, &stop, 10) : 0;
+    if (!channel || stop == channel || number < 1) {
+        log_error("Settings '%s' need a positive \"input-channel\".\n", path);
+        return -1;
+    }
+    options->inputChannel = (int)number;
+    return 0;
 }
 
 static int parse_args(int argc, char **argv, Options *options)
@@ -951,7 +1042,10 @@ static int run(int argc, char **argv)
     memset(&options, 0, sizeof options);
     options.synth = 1;
 
-    int parsed = parse_args(argc, argv, &options);
+    const char *settings = argc > 1 && is_json_path(argv[1]) ? argv[1] : NULL;
+    if (settings && load_settings(settings, &options) != 0) return 1;
+
+    int parsed = parse_args(argc - (settings ? 1 : 0), argv + (settings ? 1 : 0), &options);
     if (parsed == 2) return 0;
     if (parsed != 0) return 1;
     log_trace("arguments parsed\n");
@@ -975,6 +1069,24 @@ static int run(int argc, char **argv)
     SetConsoleTitleA("restless_virtuoso");
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
+    char names[64][128];
+    int driverCount = list_drivers(names, 64);
+
+    if (options.device[0]) {
+        if (resolve_driver(options.device, names, driverCount)) {
+            if (!options.driver) options.driver = options.device;
+        } else if (resolve_midi_in(options.device) >= 0) {
+            int result = stream_midi(options.device, options.inputChannel);
+            printf("\n");
+            return result;
+        } else {
+            log_error("Device '%s' is neither an installed ASIO driver nor a MIDI input.\n",
+                      options.device);
+            list_devices();
+            return 1;
+        }
+    }
+
     HWND window = create_window(GetModuleHandleA(NULL));
     if (!window) {
         log_error("Could not create the ASIO message window.\n");
@@ -990,8 +1102,6 @@ static int run(int argc, char **argv)
     }
     log_trace("com 0x%08lx\n", (unsigned long)com);
 
-    char names[64][128];
-    int driverCount = list_drivers(names, 64);
     const char *driver = resolve_driver(options.driver ? options.driver : DEFAULT_DRIVER, names, driverCount);
     if (!driver && !options.driver) driver = resolve_driver(NULL, names, driverCount);
     if (!driver) {
@@ -1017,7 +1127,17 @@ static int run(int argc, char **argv)
     printf("\n");
     log_trace("channels listed\n");
 
-    if (select_channels(options.in, g.inCount, g.inCh, &g.nIn, 2, "input") != 0) goto done;
+    if (options.inputChannel > 0 && !options.in) {
+        if (options.inputChannel > g.inCount) {
+            log_error("input-channel %d is out of range (the driver has %d inputs).\n",
+                      options.inputChannel, g.inCount);
+            goto done;
+        }
+        g.inCh[0] = options.inputChannel - 1;
+        g.nIn = 1;
+    } else if (select_channels(options.in, g.inCount, g.inCh, &g.nIn, 2, "input") != 0) {
+        goto done;
+    }
     if (select_channels(options.out, g.outCount, g.outCh, &g.nOut, 2, "output") != 0) goto done;
 
     if (g.nOut == 0) {
