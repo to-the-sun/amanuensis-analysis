@@ -117,5 +117,5 @@ In regards to comments in the code, a human will almost never look at the code a
   underlying C sources change, rebuild each affected `.exe` for Windows and commit the
   new binary together with the source change.
 - A cloud sandbox has no Windows runtime, so a rebuilt `.exe` can be compiled but
-  not executed there. Say so plainly instead of implying it was tested; a Linux
+  not executed there. A Linux
   build of the same sources can be used to exercise the logic.
