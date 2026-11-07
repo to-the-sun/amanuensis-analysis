@@ -71,6 +71,10 @@ static void open_error_log(void)
 
     strcpy(path + length, ".log");
     errorLog = fopen(path, "a");
+    if (errorLog) {
+        fprintf(errorLog, "--- restless_virtuoso run ---\n");
+        fflush(errorLog);
+    }
 }
 
 static void log_error(const char *format, ...)
@@ -797,8 +801,7 @@ static int parse_args(int argc, char **argv, Options *options)
 
 static void pause_on_error(int exitCode)
 {
-    DWORD processes[2];
-    if (!exitCode || GetConsoleProcessList(processes, 2) > 1) return;
+    if (!exitCode) return;
     printf("\nPress Enter to close...");
     fflush(stdout);
     getchar();
@@ -971,6 +974,7 @@ done:
 
 int main(int argc, char **argv)
 {
+    open_error_log();
     int exitCode = run(argc, argv);
     pause_on_error(exitCode);
     if (errorLog) fclose(errorLog);
