@@ -118,8 +118,3 @@ In regards to comments in the code, a human will almost never look at the code a
 - A cloud sandbox has no Windows runtime, so a rebuilt `.exe` can be compiled but
   not executed there. Say so plainly instead of implying it was tested; a Linux
   build of the same sources can be used to exercise the logic.
-
-## Reporting results
-
-- Name what was actually verified (compiled, ran, which platform) and what was
-  not, rather than summarizing it as "tested".
