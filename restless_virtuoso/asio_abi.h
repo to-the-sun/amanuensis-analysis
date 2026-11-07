@@ -68,7 +68,7 @@ typedef struct ASIOCallbacks {
 
 typedef struct IASIO IASIO;
 
-struct IASIO {
+typedef struct IASIOVtbl {
     ASIOError (*QueryInterface)(IASIO *self, const void *iid, void **out);
     uint32_t (*AddRef)(IASIO *self);
     uint32_t (*Release)(IASIO *self);
@@ -94,6 +94,10 @@ struct IASIO {
     ASIOError (*controlPanel)(IASIO *self);
     ASIOError (*future)(IASIO *self, int32_t selector, void *opt);
     ASIOError (*outputReady)(IASIO *self);
+} IASIOVtbl;
+
+struct IASIO {
+    const IASIOVtbl *vtable;
 };
 
 #endif

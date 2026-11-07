@@ -249,14 +249,14 @@ static void on_buffer_switch(int32_t index, ASIOBool directProcess)
 {
     (void)directProcess;
     process_buffer(index);
-    if (g.postOutput) g.asio->outputReady(g.asio);
+    if (g.postOutput) g.asio->vtable->outputReady(g.asio);
 }
 
 static ASIOTime *on_buffer_switch_time_info(ASIOTime *params, int32_t index, ASIOBool directProcess)
 {
     (void)directProcess;
     process_buffer(index);
-    if (g.postOutput) g.asio->outputReady(g.asio);
+    if (g.postOutput) g.asio->vtable->outputReady(g.asio);
     return params;
 }
 
@@ -416,33 +416,33 @@ static int open_driver(const char *name, HWND window)
 
     log_trace("initializing driver\n");
     HANDLE watchdog = errorLog ? CreateThread(NULL, 0, init_watchdog, NULL, 0, NULL) : NULL;
-    ASIOBool initialized = g.asio->init(g.asio, window);
+    ASIOBool initialized = g.asio->vtable->init(g.asio, window);
     InterlockedExchange(&initReturned, 1);
     if (watchdog) CloseHandle(watchdog);
     log_trace("init returned %d\n", initialized);
     if (!initialized) {
         char error[124] = {0};
-        g.asio->getErrorMessage(g.asio, error);
+        g.asio->vtable->getErrorMessage(g.asio, error);
         error[123] = 0;
         log_error("ASIOInit failed: %s\n", error[0] ? error : "no error message from the driver");
-        g.asio->Release(g.asio);
+        g.asio->vtable->Release(g.asio);
         g.asio = NULL;
         return -1;
     }
 
-    g.asio->getDriverName(g.asio, g.driverName);
+    g.asio->vtable->getDriverName(g.asio, g.driverName);
     g.driverName[63] = 0;
     log_trace("driver name '%s'\n", g.driverName);
 
     log_trace("querying channels\n");
-    ASIOError channels = g.asio->getChannels(g.asio, &g.inCount, &g.outCount);
+    ASIOError channels = g.asio->vtable->getChannels(g.asio, &g.inCount, &g.outCount);
     log_trace("channels %s, in %d out %d\n", asio_error_text(channels), g.inCount, g.outCount);
     if (channels != ASE_OK) {
         log_error("ASIOGetChannels failed.\n");
         return -1;
     }
 
-    g.postOutput = g.asio->outputReady(g.asio) == ASE_OK;
+    g.postOutput = g.asio->vtable->outputReady(g.asio) == ASE_OK;
     return 0;
 }
 
@@ -461,7 +461,7 @@ static void print_channels(const char *label, ASIOBool isInput, int count)
         info.isInput = isInput;
 
         char name[33] = "(unnamed)";
-        if (g.asio->getChannelInfo(g.asio, &info) == ASE_OK) {
+        if (g.asio->vtable->getChannelInfo(g.asio, &info) == ASE_OK) {
             memcpy(name, info.name, 32);
             name[32] = 0;
         }
@@ -517,11 +517,11 @@ static int select_channels(const char *spec, int available, int *channels, int *
 static int setup_rate(int requested)
 {
     if (requested > 0) {
-        if (g.asio->canSampleRate(g.asio, (ASIOSampleRate)requested) != ASE_OK) {
+        if (g.asio->vtable->canSampleRate(g.asio, (ASIOSampleRate)requested) != ASE_OK) {
             log_error("The driver does not support %d Hz.\n", requested);
             return -1;
         }
-        ASIOError error = g.asio->setSampleRate(g.asio, (ASIOSampleRate)requested);
+        ASIOError error = g.asio->vtable->setSampleRate(g.asio, (ASIOSampleRate)requested);
         if (error != ASE_OK) {
             log_error("ASIOSetSampleRate failed (%s).\n", asio_error_text(error));
             return -1;
@@ -529,7 +529,7 @@ static int setup_rate(int requested)
     }
 
     ASIOSampleRate rate = 0;
-    g.asio->getSampleRate(g.asio, &rate);
+    g.asio->vtable->getSampleRate(g.asio, &rate);
     if (rate <= 0) rate = requested > 0 ? requested : 48000;
     g.rate = rate;
     synth_set_rate((int)rate);
@@ -539,7 +539,7 @@ static int setup_rate(int requested)
 static int setup_buffer(int requested)
 {
     int32_t minimum = 0, maximum = 0, preferred = 0, granularity = 0;
-    ASIOError error = g.asio->getBufferSize(g.asio, &minimum, &maximum, &preferred, &granularity);
+    ASIOError error = g.asio->vtable->getBufferSize(g.asio, &minimum, &maximum, &preferred, &granularity);
     if (error != ASE_OK) {
         log_error("ASIOGetBufferSize failed (%s).\n", asio_error_text(error));
         return -1;
@@ -569,7 +569,7 @@ static SampleFormat channel_format(int channel, ASIOBool isInput)
     info.channel = channel;
     info.isInput = isInput;
 
-    if (g.asio->getChannelInfo(g.asio, &info) != ASE_OK) {
+    if (g.asio->vtable->getChannelInfo(g.asio, &info) != ASE_OK) {
         log_error("ASIOGetChannelInfo failed for %s %d.\n", isInput ? "input" : "output", channel + 1);
         return SAMPLE_UNSUPPORTED;
     }
@@ -621,7 +621,7 @@ static int create_buffers(void)
         g.bufferInfo[g.nIn + j].channelNum = g.outCh[j];
     }
 
-    ASIOError error = g.asio->createBuffers(g.asio, g.bufferInfo, g.nIn + g.nOut,
+    ASIOError error = g.asio->vtable->createBuffers(g.asio, g.bufferInfo, g.nIn + g.nOut,
                                             g.bufferSize, &callbacks);
     if (error != ASE_OK) {
         log_error("ASIOCreateBuffers failed (%s).\n", asio_error_text(error));
@@ -631,7 +631,7 @@ static int create_buffers(void)
     g.buffersCreated = 1;
 
     int32_t latencyIn = 0, latencyOut = 0;
-    g.asio->getLatencies(g.asio, &latencyIn, &latencyOut);
+    g.asio->vtable->getLatencies(g.asio, &latencyIn, &latencyOut);
     g.latencyIn = latencyIn;
     g.latencyOut = latencyOut;
     return 0;
@@ -781,9 +781,9 @@ static void shutdown_monitor(void)
         g.midiOut = NULL;
     }
     if (g.asio) {
-        if (g.started) g.asio->stop(g.asio);
-        if (g.buffersCreated) g.asio->disposeBuffers(g.asio);
-        g.asio->Release(g.asio);
+        if (g.started) g.asio->vtable->stop(g.asio);
+        if (g.buffersCreated) g.asio->vtable->disposeBuffers(g.asio);
+        g.asio->vtable->Release(g.asio);
         g.asio = NULL;
     }
     free_buffers();
@@ -987,7 +987,7 @@ static int run(int argc, char **argv)
             printf("  MIDI thru -> %d (%s)\n", g.midiOutIndex, caps.szPname);
     }
 
-    if (g.asio->start(g.asio) != ASE_OK) {
+    if (g.asio->vtable->start(g.asio) != ASE_OK) {
         log_error("ASIOStart failed.\n");
         goto done;
     }
@@ -1003,17 +1003,17 @@ static int run(int argc, char **argv)
         if (InterlockedExchange(&g.reset, 0)) {
             log_line("driver settings changed, reconfiguring");
             if (g.started) {
-                g.asio->stop(g.asio);
+                g.asio->vtable->stop(g.asio);
                 g.started = 0;
             }
             if (g.buffersCreated) {
-                g.asio->disposeBuffers(g.asio);
+                g.asio->vtable->disposeBuffers(g.asio);
                 g.buffersCreated = 0;
             }
             free_buffers();
 
             if (setup_rate(0) != 0 || setup_buffer(options.buffer) != 0 ||
-                create_buffers() != 0 || g.asio->start(g.asio) != ASE_OK) {
+                create_buffers() != 0 || g.asio->vtable->start(g.asio) != ASE_OK) {
                 log_line("could not reopen the ASIO buffers; restart the program");
                 break;
             }
@@ -1027,7 +1027,7 @@ static int run(int argc, char **argv)
             else if (key == 'm' || key == 'M') InterlockedExchange(&g.mute, !g.mute);
             else if (key == '+' || key == '=') adjust_gain(1.0f);
             else if (key == '-' || key == '_') adjust_gain(-1.0f);
-            else if (key == 'p' || key == 'P') g.asio->controlPanel(g.asio);
+            else if (key == 'p' || key == 'P') g.asio->vtable->controlPanel(g.asio);
         }
 
         ULONGLONG now = GetTickCount64();
