@@ -23,7 +23,8 @@ In regards to comments in the code, a human will almost never look at the code a
 - Maximize efficiency wherever possible. 
 - Absolutely **do not add things to the code that the user did not ask for**. This is a cardinal sin.
 - It is a goal to limit line count wherever possible.
-- Unused or redundant variables, functions, etc. can and should be removed. This should be done as a matter of course. 
+- Unused or redundant variables, functions, etc. can and should be removed. This should be done as a matter of course.
+- The user does not use command line. The user will always want a command line-free way of operating things. Internally, if a `.bat` file needs to set a command line flag for an executable it's running, for example, that's fine as long as it's automatic from the user's perspective. 
 
 ## Git workflow: always use a pull request
 
