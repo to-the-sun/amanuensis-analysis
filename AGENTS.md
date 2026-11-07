@@ -21,7 +21,7 @@ In regards to comments in the code, a human will almost never look at the code a
 
 - Make it clean, make it streamlined and make it elegant.
 - Maximize efficiency wherever possible. 
-- Absolutely do not add things to the code that the user did not ask for. This is a cardinal sin.
+- Absolutely **do not add things to the code that the user did not ask for**. This is a cardinal sin.
 - It is a goal to limit line count wherever possible.
 - Unused or redundant variables, functions, etc. can and should be removed. This should be done as a matter of course. 
 
