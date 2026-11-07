@@ -2,12 +2,13 @@
 
 This repository contains a comprehensive suite of tools for audio signal processing, transient analysis, continuous pitch tracking, stem alignment, real-time Discord voice transcription, and additive sound synthesis.
 
-The project is organized into three primary subdirectories and root utility scripts:
+The project is organized into four primary subdirectories and root utility scripts:
 1. `analysis/` – Rhythmic energy tracking, spectral transient analysis, pitch stem separation, group stem pattern analysis, dominant pitch tracking, audio feature clustering, and Discord bot automation.
 2. `transcription/` – Real-time Discord voice-to-text transcription (Aqua Voice API), phonetic syllabification, custom IPA weak-vowel overrides, backward vowel histogram analysis, and AI-driven poem generation (TypeSafe Jev API).
 3. `additive_synthesis/` – Interactive additive sound synthesis engine, LaTeX/Sigma notation displays, preset management, psychoacoustic analysis test suite, and generative sound creation.
 4. `analysis/flux_separator.c` / `analysis/flux_separator.exe` – C-based Spectral Flux Pitch Separator writing each stem's modified flux WAV and recombining them into the flux WAV the later tools consume. `--debug` (double-click `flux_separator_debug.bat`) additionally writes the peak/trough markers and the interactive HTML flux reports. Supports single-file, multi-file drag-and-drop, and automatic directory scanning with multi-threaded concurrent CPU execution.
 5. `tune_stems.py` – Continuous interval-relative pitch alignment for song stems.
+6. `asio_monitor/` – Real-time ASIO monitor: plays selected audio-interface input channels on selected ASIO outputs with gain and level meters, and plays MIDI input through a built-in sine synth or forwards it to a MIDI output. Build and usage: `asio_monitor/README.md`.
 
 ---
 
