@@ -1,4 +1,4 @@
-# asio_monitor
+# restless_virtuoso
 
 Plays selected ASIO input channels on selected ASIO output channels, for monitoring
 an audio interface at ASIO latency. MIDI input can be played through a built-in sine
@@ -10,7 +10,7 @@ or WASAPI is involved and no non-ASIO device can be selected.
 ## Build
 
 ```bash
-make -C asio_monitor        # x86_64-w64-mingw32-gcc on PATH
+make -C restless_virtuoso   # x86_64-w64-mingw32-gcc on PATH
 ```
 
 Or build with the same source in Visual Studio / MSVC as a console project linked
@@ -19,10 +19,10 @@ against `winmm.lib`.
 ## Usage
 
 ```bash
-asio_monitor.exe --list
-asio_monitor.exe --driver "Focusrite USB ASIO" --in 1,2 --out 1,2 --gain -6
-asio_monitor.exe --in 1 --out 1,2 --buffer 128 --rate 48000
-asio_monitor.exe --in none --midi-in "Keystation" --midi-out 0
+restless_virtuoso.exe --list
+restless_virtuoso.exe --driver "Focusrite USB ASIO" --in 1,2 --out 1,2 --gain -6
+restless_virtuoso.exe --in 1 --out 1,2 --buffer 128 --rate 48000
+restless_virtuoso.exe --in none --midi-in "Keystation" --midi-out 0
 ```
 
 - `--in` / `--out` take 1-based channel numbers (`1,2`, `1-4`, `3,5-6`), default `1,2`.

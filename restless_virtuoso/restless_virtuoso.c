@@ -1,5 +1,5 @@
 #if !defined(_WIN64)
-#error "asio_monitor is a 64-bit Windows program"
+#error "restless_virtuoso is a 64-bit Windows program"
 #endif
 
 #define _WIN32_WINNT 0x0601
@@ -237,9 +237,9 @@ static HWND create_window(HINSTANCE instance)
     memset(&windowClass, 0, sizeof windowClass);
     windowClass.lpfnWndProc = wnd_proc;
     windowClass.hInstance = instance;
-    windowClass.lpszClassName = "AsioMonitorWindow";
+    windowClass.lpszClassName = "RestlessVirtuosoWindow";
     RegisterClassA(&windowClass);
-    return CreateWindowExA(0, windowClass.lpszClassName, "asio_monitor", 0, 0, 0, 0, 0,
+    return CreateWindowExA(0, windowClass.lpszClassName, "restless_virtuoso", 0, 0, 0, 0, 0,
                            NULL, NULL, instance, NULL);
 }
 
@@ -693,11 +693,11 @@ static void shutdown_monitor(void)
 static void usage(void)
 {
     printf(
-        "asio_monitor - play ASIO inputs on ASIO outputs\n"
+        "restless_virtuoso - play ASIO inputs on ASIO outputs\n"
         "\n"
         "Usage:\n"
-        "  asio_monitor --list\n"
-        "  asio_monitor [options]\n"
+        "  restless_virtuoso --list\n"
+        "  restless_virtuoso [options]\n"
         "\n"
         "Options:\n"
         "  -d, --driver NAME|INDEX  ASIO driver (default: first installed)\n"
@@ -792,7 +792,7 @@ int main(int argc, char **argv)
     callbacks.asioMessage = on_asio_message;
     callbacks.bufferSwitchTimeInfo = on_buffer_switch_time_info;
 
-    SetConsoleTitleA("asio_monitor");
+    SetConsoleTitleA("restless_virtuoso");
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
     HWND window = create_window(GetModuleHandleA(NULL));
