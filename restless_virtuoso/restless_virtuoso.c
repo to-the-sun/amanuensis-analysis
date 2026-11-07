@@ -61,6 +61,34 @@ typedef struct {
 static Monitor g;
 static ASIOCallbacks callbacks;
 
+static FILE *errorLog;
+
+static void open_error_log(void)
+{
+    char path[MAX_PATH + 8];
+    DWORD length = GetModuleFileNameA(NULL, path, MAX_PATH);
+    if (!length || length >= MAX_PATH) return;
+
+    strcpy(path + length, ".log");
+    errorLog = fopen(path, "a");
+}
+
+static void log_error(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
+
+    if (!errorLog) open_error_log();
+    if (errorLog) {
+        va_start(args, format);
+        vfprintf(errorLog, format, args);
+        va_end(args);
+        fflush(errorLog);
+    }
+}
+
 static volatile uint32_t midiHead, midiTail;
 static uint32_t midiQueue[MIDI_QUEUE];
 
@@ -315,13 +343,13 @@ static int open_driver(const char *name, HWND window)
 {
     CLSID clsid;
     if (driver_clsid(name, &clsid) != 0) {
-        fprintf(stderr, "ASIO driver '%s' is not registered.\n", name);
+        log_error("ASIO driver '%s' is not registered.\n", name);
         return -1;
     }
 
     HRESULT result = CoCreateInstance(&clsid, NULL, CLSCTX_INPROC_SERVER, &clsid, (void **)&g.asio);
     if (FAILED(result) || !g.asio) {
-        fprintf(stderr, "Could not create the ASIO driver object (0x%08lx).\n", (unsigned long)result);
+        log_error("Could not create the ASIO driver object (0x%08lx).\n", (unsigned long)result);
         g.asio = NULL;
         return -1;
     }
@@ -330,7 +358,7 @@ static int open_driver(const char *name, HWND window)
         char error[124] = {0};
         g.asio->getErrorMessage(g.asio, error);
         error[123] = 0;
-        fprintf(stderr, "ASIOInit failed: %s\n", error[0] ? error : "no error message from the driver");
+        log_error("ASIOInit failed: %s\n", error[0] ? error : "no error message from the driver");
         g.asio->Release(g.asio);
         g.asio = NULL;
         return -1;
@@ -340,7 +368,7 @@ static int open_driver(const char *name, HWND window)
     g.driverName[63] = 0;
 
     if (g.asio->getChannels(g.asio, &g.inCount, &g.outCount) != ASE_OK) {
-        fprintf(stderr, "ASIOGetChannels failed.\n");
+        log_error("ASIOGetChannels failed.\n");
         return -1;
     }
 
@@ -409,7 +437,7 @@ static int select_channels(const char *spec, int available, int *channels, int *
 
     int parsed = parse_channels(spec, available, channels, MAX_SELECTED);
     if (parsed < 0) {
-        fprintf(stderr, "Invalid %s channel list '%s' (the driver has %d).\n", what, spec, available);
+        log_error("Invalid %s channel list '%s' (the driver has %d).\n", what, spec, available);
         return -1;
     }
     *count = parsed;
@@ -420,12 +448,12 @@ static int setup_rate(int requested)
 {
     if (requested > 0) {
         if (g.asio->canSampleRate(g.asio, (ASIOSampleRate)requested) != ASE_OK) {
-            fprintf(stderr, "The driver does not support %d Hz.\n", requested);
+            log_error("The driver does not support %d Hz.\n", requested);
             return -1;
         }
         ASIOError error = g.asio->setSampleRate(g.asio, (ASIOSampleRate)requested);
         if (error != ASE_OK) {
-            fprintf(stderr, "ASIOSetSampleRate failed (%s).\n", asio_error_text(error));
+            log_error("ASIOSetSampleRate failed (%s).\n", asio_error_text(error));
             return -1;
         }
     }
@@ -443,7 +471,7 @@ static int setup_buffer(int requested)
     int32_t minimum = 0, maximum = 0, preferred = 0, granularity = 0;
     ASIOError error = g.asio->getBufferSize(g.asio, &minimum, &maximum, &preferred, &granularity);
     if (error != ASE_OK) {
-        fprintf(stderr, "ASIOGetBufferSize failed (%s).\n", asio_error_text(error));
+        log_error("ASIOGetBufferSize failed (%s).\n", asio_error_text(error));
         return -1;
     }
 
@@ -472,13 +500,13 @@ static SampleFormat channel_format(int channel, ASIOBool isInput)
     info.isInput = isInput;
 
     if (g.asio->getChannelInfo(g.asio, &info) != ASE_OK) {
-        fprintf(stderr, "ASIOGetChannelInfo failed for %s %d.\n", isInput ? "input" : "output", channel + 1);
+        log_error("ASIOGetChannelInfo failed for %s %d.\n", isInput ? "input" : "output", channel + 1);
         return SAMPLE_UNSUPPORTED;
     }
 
     SampleFormat format = sample_format_from_asio(info.type);
     if (format == SAMPLE_UNSUPPORTED)
-        fprintf(stderr, "%s %d uses an unsupported sample format (%s).\n",
+        log_error("%s %d uses an unsupported sample format (%s).\n",
                 isInput ? "Input" : "Output", channel + 1, sample_format_name(info.type));
     return format;
 }
@@ -508,7 +536,7 @@ static int create_buffers(void)
     g.synthFloats = malloc(frames * sizeof(float));
     g.mixFloats = malloc(frames * sizeof(float));
     if ((g.nIn && !g.inputFloats) || !g.synthFloats || !g.mixFloats) {
-        fprintf(stderr, "Out of memory for %d-frame buffers.\n", g.bufferSize);
+        log_error("Out of memory for %d-frame buffers.\n", g.bufferSize);
         free_buffers();
         return -1;
     }
@@ -526,7 +554,7 @@ static int create_buffers(void)
     ASIOError error = g.asio->createBuffers(g.asio, g.bufferInfo, g.nIn + g.nOut,
                                             g.bufferSize, &callbacks);
     if (error != ASE_OK) {
-        fprintf(stderr, "ASIOCreateBuffers failed (%s).\n", asio_error_text(error));
+        log_error("ASIOCreateBuffers failed (%s).\n", asio_error_text(error));
         free_buffers();
         return -1;
     }
@@ -573,11 +601,11 @@ static int open_midi_input(const char *spec)
 {
     int index = resolve_midi_in(spec);
     if (index < 0) {
-        fprintf(stderr, "MIDI input '%s' not found (use --list).\n", spec);
+        log_error("MIDI input '%s' not found (use --list).\n", spec);
         return -1;
     }
     if (midiInOpen(&g.midiIn, (UINT)index, (DWORD_PTR)midi_in_proc, 0, CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
-        fprintf(stderr, "Could not open MIDI input %d.\n", index);
+        log_error("Could not open MIDI input %d.\n", index);
         return -1;
     }
     g.midiInIndex = index;
@@ -589,11 +617,11 @@ static int open_midi_output(const char *spec)
 {
     int index = resolve_midi_out(spec);
     if (index < 0) {
-        fprintf(stderr, "MIDI output '%s' not found (use --list).\n", spec);
+        log_error("MIDI output '%s' not found (use --list).\n", spec);
         return -1;
     }
     if (midiOutOpen(&g.midiOut, (UINT)index, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        fprintf(stderr, "Could not open MIDI output %d.\n", index);
+        log_error("Could not open MIDI output %d.\n", index);
         return -1;
     }
     g.midiOutIndex = index;
@@ -750,18 +778,18 @@ static int parse_args(int argc, char **argv, Options *options)
             if (!hasValue) return 1;
             options->buffer = atoi(argv[++i]);
         } else {
-            fprintf(stderr, "Unknown option '%s'.\n\n", argument);
+            log_error("Unknown option '%s'.\n\n", argument);
             usage();
             return 1;
         }
     }
 
     if (options->gainDb < -60.0 || options->gainDb > 24.0) {
-        fprintf(stderr, "--gain must be between -60 and +24 dB.\n");
+        log_error("--gain must be between -60 and +24 dB.\n");
         return 1;
     }
     if (options->rate < 0 || options->buffer < 0) {
-        fprintf(stderr, "--rate and --buffer must not be negative.\n");
+        log_error("--rate and --buffer must not be negative.\n");
         return 1;
     }
     return 0;
@@ -807,13 +835,13 @@ static int run(int argc, char **argv)
 
     HWND window = create_window(GetModuleHandleA(NULL));
     if (!window) {
-        fprintf(stderr, "Could not create the ASIO message window.\n");
+        log_error("Could not create the ASIO message window.\n");
         return 1;
     }
 
     HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(com) && com != RPC_E_CHANGED_MODE) {
-        fprintf(stderr, "COM initialization failed (0x%08lx).\n", (unsigned long)com);
+        log_error("COM initialization failed (0x%08lx).\n", (unsigned long)com);
         DestroyWindow(window);
         return 1;
     }
@@ -823,10 +851,10 @@ static int run(int argc, char **argv)
     const char *driver = resolve_driver(options.driver ? options.driver : DEFAULT_DRIVER, names, driverCount);
     if (!driver && !options.driver) driver = resolve_driver(NULL, names, driverCount);
     if (!driver) {
-        if (!driverCount) fprintf(stderr, "No ASIO driver is installed.\n");
+        if (!driverCount) log_error("No ASIO driver is installed.\n");
         else {
-            fprintf(stderr, "ASIO driver '%s' not found. Installed drivers:\n", options.driver);
-            for (int i = 0; i < driverCount; i++) fprintf(stderr, "  %d  %s\n", i, names[i]);
+            log_error("ASIO driver '%s' not found. Installed drivers:\n", options.driver);
+            for (int i = 0; i < driverCount; i++) log_error("  %d  %s\n", i, names[i]);
         }
         shutdown_monitor();
         DestroyWindow(window);
@@ -847,11 +875,11 @@ static int run(int argc, char **argv)
     if (select_channels(options.out, g.outCount, g.outCh, &g.nOut, 2, "output") != 0) goto done;
 
     if (g.nOut == 0) {
-        fprintf(stderr, "At least one output channel is required.\n");
+        log_error("At least one output channel is required.\n");
         goto done;
     }
     if (g.nIn == 0 && !options.midiIn) {
-        fprintf(stderr, "No input channels and no MIDI input, so there is nothing to play.\n");
+        log_error("No input channels and no MIDI input, so there is nothing to play.\n");
         goto done;
     }
 
@@ -882,7 +910,7 @@ static int run(int argc, char **argv)
     }
 
     if (g.asio->start(g.asio) != ASE_OK) {
-        fprintf(stderr, "ASIOStart failed.\n");
+        log_error("ASIOStart failed.\n");
         goto done;
     }
     g.started = 1;
@@ -945,5 +973,6 @@ int main(int argc, char **argv)
 {
     int exitCode = run(argc, argv);
     pause_on_error(exitCode);
+    if (errorLog) fclose(errorLog);
     return exitCode;
 }

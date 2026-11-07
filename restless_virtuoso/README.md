@@ -49,3 +49,4 @@ While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit
   selected outputs; `--no-synth` leaves MIDI input to the MIDI thru path only.
 - Changing the sample rate or buffer size in the control panel reopens the buffers
   automatically.
+- Startup errors are appended to `restless_virtuoso.exe.log` next to the exe.
