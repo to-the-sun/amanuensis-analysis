@@ -767,7 +767,16 @@ static int parse_args(int argc, char **argv, Options *options)
     return 0;
 }
 
-int main(int argc, char **argv)
+static void pause_on_error(int exitCode)
+{
+    DWORD processes[2];
+    if (!exitCode || GetConsoleProcessList(processes, 2) > 1) return;
+    printf("\nPress Enter to close...");
+    fflush(stdout);
+    getchar();
+}
+
+static int run(int argc, char **argv)
 {
     Options options;
     memset(&options, 0, sizeof options);
@@ -929,5 +938,12 @@ done:
     DestroyWindow(window);
     if (SUCCEEDED(com)) CoUninitialize();
     printf("\n");
+    return exitCode;
+}
+
+int main(int argc, char **argv)
+{
+    int exitCode = run(argc, argv);
+    pause_on_error(exitCode);
     return exitCode;
 }
