@@ -14,7 +14,7 @@ make -C restless_virtuoso   # x86_64-w64-mingw32-gcc on PATH
 ```
 
 Or build with the same source in Visual Studio / MSVC as a console project linked
-against `winmm.lib`.
+against `winmm.lib` and `shell32.lib`.
 
 ## Usage
 
@@ -33,9 +33,9 @@ restless_virtuoso.exe --in none --midi-in "Keystation" --midi-out 0
 - `--midi-in` accepts a device index from `--list` or an exact device name.
 - `--midi-out` also accepts an index or name and forwards incoming MIDI unchanged.
 
-On startup the program prints every input and output channel of the selected ASIO
-driver and every MIDI input device, so the indices used by `--in`, `--out` and
-`--midi-in` are listed before monitoring starts.
+On startup the program prints every input channel of the selected ASIO driver and
+every MIDI input device, so the indices used by `--in` and `--midi-in` are listed
+before monitoring starts.
 
 While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit.
 
@@ -49,4 +49,5 @@ While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit
   selected outputs; `--no-synth` leaves MIDI input to the MIDI thru path only.
 - Changing the sample rate or buffer size in the control panel reopens the buffers
   automatically.
-- `restless_virtuoso.exe.log` next to the exe is created at startup and records startup stages and errors.
+- Every run writes a new `restless_virtuoso-YYYY-MM-DD_HH-MM-SS.log` next to the exe with startup stages and errors.
+- At startup, the program's logs older than 7 days are moved to the Recycle Bin.
