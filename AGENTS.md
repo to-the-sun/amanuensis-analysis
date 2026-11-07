@@ -17,6 +17,13 @@ These things apply to messages sent to the user, reports and even comments in th
 
 In regards to comments in the code, a human will almost never look at the code at all, so if you can just as easily understand the code by looking at it, there is no need to make a comment. Comments are for things that are not immediately obvious from just looking at the local code. This is one way to keep line count down which should be considered a goal. 
 
+## The Code Itself 
+
+- Make it clean, make it streamlined and make it elegant.
+- Absolutely do not add things to the code that the user did not ask for. This is a cardinal sin.
+- It is a goal to limit line count wherever possible.
+- Unused or redundant variables, functions, etc. can and should be removed. This should be done as a matter of course. 
+
 ## Git workflow: always use a pull request
 
 - Never commit directly to `main`.
