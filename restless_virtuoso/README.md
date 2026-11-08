@@ -23,7 +23,7 @@ restless_virtuoso.exe --list
 restless_virtuoso.exe --driver "Focusrite USB ASIO" --in 1,2 --out 1,2 --gain -6
 restless_virtuoso.exe --in 1 --out 1,2 --buffer 128 --rate 48000
 restless_virtuoso.exe --in none --midi-in "Keystation" --midi-out 0
-restless_virtuoso.exe focusrite_usb_asio_input_1.json
+restless_virtuoso.exe "Focusrite USB ASIO Input 1.json"
 ```
 
 - Without `--driver`, `Focusrite USB ASIO` is loaded when installed; otherwise the first installed driver is used.
@@ -48,7 +48,8 @@ to start from it:
 
 `device` is an ASIO driver or MIDI input name from `--list`. `input-channel` is the
 1-based ASIO input, or the MIDI channel for a MIDI device, whose messages are then
-streamed to the console. `focusrite_usb_asio_input_1.json` is a ready template.
+streamed to the console. `Focusrite USB ASIO Input 1.json` is a ready template;
+settings files are named after the input device, with its exact capitalization.
 
 On startup the program prints every input channel of the selected ASIO driver and
 every MIDI input device, so the indices used by `--in` and `--midi-in` are listed
