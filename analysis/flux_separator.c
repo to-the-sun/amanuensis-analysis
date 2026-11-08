@@ -64,8 +64,8 @@
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
 
-/* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
-double g_silence_threshold = 0.009;
+/* Pitch Dominance Ratio: 89% of the per-sample peak across all pitches */
+double g_pitch_dominance_ratio = 0.89;
 
 static pthread_mutex_t g_console_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -492,14 +492,6 @@ static int find_trough_right(const double *env, uint32_t n, int x) {
 }
 
 static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int *out_count);
-
-void apply_flux_noise_gate(double *env, uint32_t total_samples, double threshold) {
-    for (uint32_t i = 0; i < total_samples; i++) {
-        if (env[i] < threshold) {
-            env[i] = 0.0;
-        }
-    }
-}
 
 void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     if (total_samples < 3) return;
@@ -2288,10 +2280,13 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     clock_t flux_start_clock = clock();
 
+    float **stem_audio = (float**)calloc(NUM_MIDI_PITCHES, sizeof(float*));
+    float *inst_peak = (float*)calloc(total_samples, sizeof(float));
+
     for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
         if (p % 16 == 0 || p == NUM_MIDI_PITCHES - 1) {
             double elapsed = (double)(clock() - flux_start_clock) / CLOCKS_PER_SEC;
-            print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", p + 1, NUM_MIDI_PITCHES, elapsed);
+            print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", p + 1, 2 * NUM_MIDI_PITCHES, elapsed);
         }
 
         if (!pitch_active[p] || pitch_bin_count[p] == 0) continue;
@@ -2342,25 +2337,58 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         }
         free(stem_buf);
 
-        // Evaluate stem energy and active duration against noise floor threshold
-        double stem_max_peak = 0.0;
+        float *staged = (float*)malloc(total_channel_samples * sizeof(float));
+        if (!staged) {
+            free(unpadded_data);
+            continue;
+        }
+        for (uint32_t i = 0; i < total_samples; i++) {
+            float peak = 0.0f;
+            for (uint32_t c = 0; c < num_channels; c++) {
+                float val = (float)unpadded_data[i * num_channels + c];
+                staged[i * num_channels + c] = val;
+                if (fabsf(val) > peak) peak = fabsf(val);
+            }
+            if (peak > inst_peak[i]) inst_peak[i] = peak;
+        }
+        free(unpadded_data);
+        stem_audio[p] = staged;
+    }
+
+    for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+        if (!stem_audio[p]) continue;
+
+        if (p % 16 == 0 || p == NUM_MIDI_PITCHES - 1) {
+            double elapsed = (double)(clock() - flux_start_clock) / CLOCKS_PER_SEC;
+            print_multithreaded_progress(thread_slot, num_slots, basename, "Flux", NUM_MIDI_PITCHES + p + 1, 2 * NUM_MIDI_PITCHES, elapsed);
+        }
+
+        double *unpadded_data = (double*)malloc(total_channel_samples * sizeof(double));
+        if (!unpadded_data) {
+            free(stem_audio[p]);
+            stem_audio[p] = NULL;
+            continue;
+        }
+        for (size_t k = 0; k < total_channel_samples; k++) {
+            unpadded_data[k] = (double)stem_audio[p][k];
+        }
+        free(stem_audio[p]);
+        stem_audio[p] = NULL;
+
         double stem_sum_sq = 0.0;
         uint32_t active_frames = 0;
 
         for (uint32_t i = 0; i < total_samples; i++) {
-            int frame_above_threshold = 0;
+            double amp = 0.0;
             for (uint32_t c = 0; c < num_channels; c++) {
                 double val = unpadded_data[i * num_channels + c];
-                double abs_val = fabs(val);
-                if (abs_val > stem_max_peak) stem_max_peak = abs_val;
                 stem_sum_sq += val * val;
 
-                if (abs_val >= noise_floor_threshold) {
-                    frame_above_threshold = 1;
-                }
+                double abs_val = fabs(val);
+                if (abs_val > amp) amp = abs_val;
             }
 
-            if (frame_above_threshold) {
+            if (amp >= noise_floor_threshold && amp > (double)inst_peak[i] * g_pitch_dominance_ratio) {
                 active_frames++;
             }
         }
@@ -2497,6 +2525,9 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         free(raw_flux_buf);
         raw_flux_buf = NULL;
     }
+
+    free(stem_audio);
+    free(inst_peak);
 
     if (recombined_mod_flux) {
         if (audible_count > 0) {
