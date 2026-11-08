@@ -58,6 +58,9 @@
 #define MAX_CHANNELS 2
 #define NUM_MIDI_PITCHES 128
 
+/* Bins below this frequency are inaudible and discarded before pitch separation */
+#define MIN_AUDIBLE_HZ 20.0
+
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
 
@@ -2192,6 +2195,10 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
 
     for (int k = 0; k <= FFT_SIZE / 2; k++) {
         double freq = (double)k * sample_rate / FFT_SIZE;
+        if (freq < MIN_AUDIBLE_HZ) {
+            bin_pitch[k] = -1;
+            continue;
+        }
         int p = freq_to_midi_pitch(freq);
         bin_pitch[k] = p;
         pitch_bins[p][pitch_bin_count[p]++] = k;
@@ -2251,6 +2258,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
                 double mag_sq = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
                 if (mag_sq > 1e-18) {
                     int p = bin_pitch[k];
+                    if (p < 0) continue;
                     pitch_active[p] = 1;
                     frame_pitch_active[frame_p_base + p] = 1;
                 }
