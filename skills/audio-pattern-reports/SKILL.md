@@ -284,9 +284,7 @@ This run produced `artifacts/palette_pattern_reports/` and
 - ACF peaks are not segment boundaries. A strong peak can be a harmonic or a
   half-time layer. Cross-check with the other bands and the novelty/SSM.
 - The reports use a uniform grid. Do not describe the grid as measured
-  per-segment timing. If the user asks "totally uniform?", answer: every full
-  segment has the same nominal length; the last segment is partial/starred;
-  the underlying audio is not proven sample-exact.
+  per-segment timing. 
 - Do not change repository source, commit, or open a PR for artifact-only work
   unless the user explicitly asks. Keep generated files under `artifacts/`.
 - The report server must support Range; otherwise WAV seeking and playhead
