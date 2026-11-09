@@ -1,0 +1,27 @@
+{
+  "title": "Audio Pattern Reports",
+  "description": "Full waveforms with detected pattern regions, loop segments, zooming, playback and playhead jumping.",
+  "reports": [
+    {
+      "file": "example.wav",
+      "patterns": [
+        {
+          "start": 4.10,
+          "end": 92.60,
+          "length": 4.271,
+          "bars": 2,
+          "name": "Pattern 1",
+          "color": "#4dabf7"
+        },
+        {
+          "start": 101.20,
+          "end": 173.50,
+          "length": 2.134,
+          "bars": 1,
+          "name": "Pattern 2",
+          "color": "#ffa94d"
+        }
+      ]
+    }
+  ]
+}
