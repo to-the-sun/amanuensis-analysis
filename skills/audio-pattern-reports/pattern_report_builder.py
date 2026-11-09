@@ -45,7 +45,7 @@ def write_level(pcm, step, data_dir, level_idx):
     inter, nb = minmax_bins(pcm, step)
     nchunks = max(1, (nb + CHUNK_BINS - 1) // CHUNK_BINS)
     for c in range(nchunks):
-        chunk = inter[c * CHUNK_BINS:(c + 1) * CHUNK_BINS]
+        chunk = inter[c * CHUNK_BINS * 2:(c + 1) * CHUNK_BINS * 2]
         with open(os.path.join(data_dir, f'l{step}_{c}.js'), 'w') as f:
             f.write('window.__patternChunkArrive("%d_%d",["%s"]);\n' % (level_idx, c, b64_i16(chunk)))
     return nb, nchunks
