@@ -64,7 +64,7 @@
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
 
-/* Pitch Dominance Ratio: 89% of the per-frame max bin across all pitches */
+/* Pitch Dominance Ratio: 89% of the per-frame max pitch flux */
 double g_pitch_dominance_ratio = 0.89;
 
 static pthread_mutex_t g_console_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -2224,6 +2224,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     clock_t stft_start_clock = clock();
 
     for (uint32_t c = 0; c < num_channels; c++) {
+        double prev_energy[FFT_SIZE / 2 + 1] = {0};
+
         for (uint32_t m = 0; m < num_frames; m++) {
             uint32_t offset = m * HOP_SIZE;
 
@@ -2243,8 +2245,7 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
             size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
 
-            double pitch_max_sq[NUM_MIDI_PITCHES] = {0};
-            double frame_max_sq = 0.0;
+            double pitch_flux[NUM_MIDI_PITCHES] = {0};
 
             for (int k = 0; k <= FFT_SIZE / 2; k++) {
                 stft_data[frame_base + k].r = (float)fft_frame[k].r;
@@ -2253,14 +2254,20 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
                 int p = bin_pitch[k];
                 if (p < 0) continue;
 
-                double mag_sq = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
-                if (mag_sq > pitch_max_sq[p]) pitch_max_sq[p] = mag_sq;
-                if (mag_sq > frame_max_sq) frame_max_sq = mag_sq;
+                double energy = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
+                double diff = energy - prev_energy[k];
+                if (diff > 0.0) pitch_flux[p] += diff;
+                prev_energy[k] = energy;
             }
 
-            double dominance_floor_sq = frame_max_sq * g_pitch_dominance_ratio * g_pitch_dominance_ratio;
+            double frame_max_flux = 0.0;
             for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
-                if (pitch_max_sq[p] > 1e-18 && pitch_max_sq[p] > dominance_floor_sq) {
+                if (pitch_flux[p] > frame_max_flux) frame_max_flux = pitch_flux[p];
+            }
+
+            double dominance_floor = frame_max_flux * g_pitch_dominance_ratio * g_pitch_dominance_ratio;
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                if (pitch_flux[p] > 1e-18 && pitch_flux[p] > dominance_floor) {
                     frame_pitch_active[frame_p_base + p] = 1;
                     pitch_active[p] = 1;
                 }
