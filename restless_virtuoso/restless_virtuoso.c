@@ -113,6 +113,22 @@ static void recycle_old_logs(const char *folder, const char *stem)
     FindClose(find);
 }
 
+static int module_folder(char *folder, size_t size)
+{
+    char module[MAX_PATH];
+    DWORD length = GetModuleFileNameA(NULL, module, MAX_PATH);
+    if (!length || length >= MAX_PATH) return -1;
+
+    char *slash = strrchr(module, '\\');
+    if (!slash) return -1;
+
+    size_t folderLength = (size_t)(slash - module) + 1;
+    if (folderLength >= size) return -1;
+    memcpy(folder, module, folderLength);
+    folder[folderLength] = 0;
+    return 0;
+}
+
 static void open_error_log(void)
 {
     char module[MAX_PATH];
@@ -124,10 +140,11 @@ static void open_error_log(void)
     char *dot = strrchr(stem, '.');
     if (dot) *dot = 0;
 
-    int folderLength = (int)(stem - module);
-    char folder[MAX_PATH];
-    memcpy(folder, module, (size_t)folderLength);
-    folder[folderLength] = 0;
+    char folder[MAX_PATH + 8];
+    char base[MAX_PATH];
+    if (module_folder(base, sizeof base) != 0) return;
+    snprintf(folder, sizeof folder, "%s[logs]\\", base);
+    CreateDirectoryA(folder, NULL);
 
     HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     recycle_old_logs(folder, stem);
@@ -139,8 +156,8 @@ static void open_error_log(void)
     for (int attempt = 1; attempt < 100; attempt++) {
         char suffix[8] = "";
         if (attempt > 1) snprintf(suffix, sizeof suffix, "-%d", attempt);
-        snprintf(logPath, sizeof logPath, "%.*s%s-%04d-%02d-%02d_%02d-%02d-%02d%s.log",
-                 folderLength, module, stem, now.wYear, now.wMonth, now.wDay,
+        snprintf(logPath, sizeof logPath, "%s%s-%04d-%02d-%02d_%02d-%02d-%02d%s.log",
+                 folder, stem, now.wYear, now.wMonth, now.wDay,
                  now.wHour, now.wMinute, now.wSecond, suffix);
         if (GetFileAttributesA(logPath) == INVALID_FILE_ATTRIBUTES) break;
     }
@@ -491,6 +508,274 @@ static float track_sample(const Track *track, int output)
     return *a + (*b - *a) * (float)track->fraction;
 }
 
+/* Loop cues travel through one shared section: the stems instance stamps the
+   performance counter and bumps the sequence, every other instance polls it. */
+
+typedef struct {
+    volatile LONG seq;
+    volatile LONGLONG qpc;
+    volatile LONG elapsed;
+    DWORD pid;
+    wchar_t folder[1024];
+} LoopCue;
+
+static HANDLE cueMapping;
+static LoopCue *cue;
+static ULONGLONG playStart;
+
+typedef struct TakeChunk {
+    struct TakeChunk *next;
+    size_t frames;
+    float *samples;
+} TakeChunk;
+
+typedef struct {
+    int active, wavOpen;
+    unsigned rate;
+    TakeChunk *first, *cursor;
+    TakeChunk *volatile last;
+    drwav wav;
+    drwav_int16 *block;
+    wchar_t passesPath[1100];
+    drwav_uint64 frames;
+    ULONGLONG origin;
+    SYSTEMTIME at;
+    wchar_t folder[1024];
+    HANDLE palette;
+    LONG seen;
+    double *passMs;
+    int passCount, passCapacity;
+} Take;
+
+static Take take;
+
+static void open_cue(void)
+{
+    if (cueMapping) return;
+    cueMapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(LoopCue),
+                                    "Local\\RestlessVirtuosoLoopCue");
+    cue = cueMapping ? MapViewOfFile(cueMapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(LoopCue)) : NULL;
+    if (cue) take.seen = InterlockedCompareExchange(&cue->seq, 0, 0);
+}
+
+static void send_loop_start(void)
+{
+    open_cue();
+    if (!cue) return;
+
+    LARGE_INTEGER now, frequency;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    cue->qpc = now.QuadPart;
+    cue->elapsed = (LONG)((now.QuadPart - (LONGLONG)playStart) * 1000 / frequency.QuadPart);
+    take.seen = InterlockedIncrement(&cue->seq);
+}
+
+static void publish_palette(const wchar_t *stems)
+{
+    open_cue();
+    if (!cue) return;
+
+    size_t length = wcslen(stems);
+    while (length > 3 && (stems[length - 1] == L'\\' || stems[length - 1] == L'/')) length--;
+    while (length > 3 && stems[length - 1] != L'\\') length--;
+    if (stems[length - 1] != L'\\' || length + 12 > sizeof cue->folder / sizeof *cue->folder) return;
+
+    wmemcpy(cue->folder, stems, length);
+    wcscpy(cue->folder + length, L"[palettes]\\");
+    cue->elapsed = 0;
+    cue->pid = GetCurrentProcessId();
+}
+
+static void add_pass(double milliseconds)
+{
+    if (take.passCount == take.passCapacity) {
+        int capacity = take.passCapacity ? take.passCapacity * 2 : 64;
+        double *grown = realloc(take.passMs, (size_t)capacity * sizeof *grown);
+        if (!grown) return;
+        take.passMs = grown;
+        take.passCapacity = capacity;
+    }
+    take.passMs[take.passCount++] = milliseconds;
+}
+
+static void check_loop_cue(void)
+{
+    open_cue();
+    if (!cue) return;
+
+    LONG seen = InterlockedCompareExchange(&cue->seq, 0, 0);
+    if (seen == take.seen) return;
+
+    LONGLONG qpc = cue->qpc;
+    if (InterlockedCompareExchange(&cue->seq, 0, 0) != seen) return;
+
+    take.seen = seen;
+    if (!take.passCount) {
+        take.origin = (ULONGLONG)qpc;
+        take.rate = (unsigned)g.rate;
+        GetLocalTime(&take.at);
+        wcsncpy(take.folder, cue->folder, 1023);
+        take.folder[1023] = 0;
+        if (take.palette) CloseHandle(take.palette);
+        take.palette = cue->pid ? OpenProcess(SYNCHRONIZE, FALSE, cue->pid) : NULL;
+    }
+
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    double ms = (double)(LONGLONG)((ULONGLONG)qpc - take.origin) * 1000.0 / (double)frequency.QuadPart;
+    add_pass(take.passCount ? ms : -(double)cue->elapsed);
+    take.active = take.rate > 0;
+}
+
+static void take_join(void)
+{
+    if (playlistMode || take.active || !cue || !cue->pid || !cue->folder[0]) return;
+
+    HANDLE palette = OpenProcess(SYNCHRONIZE, FALSE, cue->pid);
+    if (palette && WaitForSingleObject(palette, 0) == WAIT_OBJECT_0) {
+        CloseHandle(palette);
+        return;
+    }
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    take.active = 1;
+    take.rate = (unsigned)g.rate;
+    take.palette = palette;
+    take.origin = (ULONGLONG)now.QuadPart;
+    GetLocalTime(&take.at);
+    wcsncpy(take.folder, cue->folder, 1023);
+    take.folder[1023] = 0;
+    add_pass(-(double)cue->elapsed);
+}
+
+#define TAKE_CHUNK (1u << 20)
+
+static void take_buffer(int frames)
+{
+    if (!take.active) return;
+    if (take.last && take.last->frames + (size_t)frames <= TAKE_CHUNK) return;
+
+    TakeChunk *chunk = malloc(sizeof *chunk);
+    float *samples = malloc((size_t)TAKE_CHUNK * sizeof *samples);
+    if (!chunk || !samples) {
+        free(chunk);
+        free(samples);
+        take.active = 0;
+        return;
+    }
+
+    chunk->next = NULL;
+    chunk->frames = 0;
+    chunk->samples = samples;
+    if (take.last) take.last->next = chunk;
+    else take.first = chunk;
+    take.last = chunk;
+}
+
+static void take_mix(const float *samples, int frames)
+{
+    float *chunk = take.last->samples;
+    for (int i = 0; i < frames; i++)
+        chunk[take.last->frames + (size_t)i] += samples[i] / (float)g.nOut;
+}
+
+/* The take is streamed to the file from the main loop, which only ever writes
+   chunks the ASIO thread has finished filling, so closing stays quick. */
+
+static void take_open(void)
+{
+    if (!take.active || take.wavOpen || !take.frames || !take.folder[0]) return;
+
+    CreateDirectoryW(take.folder, NULL);
+
+    SYSTEMTIME at = take.at;
+    wchar_t stamp[40], suffix[8] = L"", wavPath[1100];
+    swprintf(stamp, 40, L"%04d-%02d-%02d-%02d-%02d-%02d",
+             at.wYear, at.wMonth, at.wDay, at.wHour, at.wMinute, at.wSecond);
+    for (int attempt = 1; attempt < 100; attempt++) {
+        if (attempt > 1) swprintf(suffix, 8, L"-%d", attempt);
+        swprintf(wavPath, 1100, L"%lspalette_%ls%ls.wav", take.folder, stamp, suffix);
+        if (GetFileAttributesW(wavPath) == INVALID_FILE_ATTRIBUTES) break;
+    }
+    swprintf(take.passesPath, 1100, L"%lspasses_%ls%ls.txt", take.folder, stamp, suffix);
+
+    drwav_data_format format;
+    memset(&format, 0, sizeof format);
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_PCM;
+    format.channels = 1;
+    format.sampleRate = take.rate;
+    format.bitsPerSample = 16;
+
+    take.block = malloc((size_t)TAKE_CHUNK * sizeof *take.block);
+    if (!take.block) {
+        log_error("Out of memory for the take buffer.\n");
+        take.active = 0;
+        return;
+    }
+    if (!drwav_init_file_write_w(&take.wav, wavPath, &format, NULL)) {
+        log_error("Could not write '%ls'.\n", wavPath);
+        take.active = 0;
+        return;
+    }
+
+    take.cursor = take.first;
+    take.wavOpen = 1;
+    log_trace("recording to %ls\n", wavPath);
+}
+
+static void take_flush(void)
+{
+    if (!take.wavOpen) return;
+    while (take.cursor != take.last) {
+        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames);
+        drwav_write_pcm_frames(&take.wav, take.cursor->frames, take.block);
+        take.cursor = take.cursor->next;
+    }
+}
+
+static void take_finish(void)
+{
+    if (take.wavOpen) {
+        take_flush();
+        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames);
+        drwav_write_pcm_frames(&take.wav, take.cursor->frames, take.block);
+        drwav_uninit(&take.wav);
+
+        FILE *file = _wfopen(take.passesPath, L"w");
+        if (!file) log_error("Could not write '%ls'.\n", take.passesPath);
+        else {
+            for (int i = 0; i < take.passCount; i++)
+                fprintf(file, "%d, %.6f 1.;\n", i, take.passMs[i]);
+            fclose(file);
+            log_trace("wrote %ls\n", take.passesPath);
+        }
+    }
+
+    free(take.block);
+    take.block = NULL;
+    for (TakeChunk *chunk = take.first; chunk;) {
+        TakeChunk *next = chunk->next;
+        free(chunk->samples);
+        free(chunk);
+        chunk = next;
+    }
+    free(take.passMs);
+    take.passMs = NULL;
+    take.first = take.last = take.cursor = NULL;
+    take.frames = 0;
+    take.passCount = 0;
+    take.rate = 0;
+    take.wavOpen = 0;
+    take.active = 0;
+    take.folder[0] = 0;
+    if (take.palette) CloseHandle(take.palette);
+    take.palette = NULL;
+}
+
 static void advance_tracks(void)
 {
     int finished = 1;
@@ -510,6 +795,7 @@ static void advance_tracks(void)
         stems[i].position = 0;
         stems[i].fraction = 0;
     }
+    send_loop_start();
 }
 
 static void render_playlist(float *dst, int outputs, int frames)
@@ -964,6 +1250,9 @@ static void process_buffer(int32_t index)
     const int frames = (int)g.bufferSize;
     const float volume = g.volume;
 
+    check_loop_cue();
+    take_buffer(frames);
+
     for (int c = 0; c < g.nIn; c++) {
         float *samples = g.inputFloats + (size_t)c * frames;
         sample_to_float(g.bufferInfo[c].buffers[index], g.inFormat[c], samples, frames);
@@ -997,6 +1286,12 @@ static void process_buffer(int32_t index)
             g.mixFloats[i] = value > 1.0f ? 1.0f : value < -1.0f ? -1.0f : value;
         }
         sample_from_float(g.mixFloats, output, g.outFormat[j], frames);
+        if (take.active) take_mix(g.mixFloats, frames);
+    }
+
+    if (take.active) {
+        take.last->frames += (size_t)frames;
+        take.frames += (drwav_uint64)frames;
     }
 }
 
@@ -1069,10 +1364,13 @@ static void CALLBACK midi_in_proc(HMIDIIN handle, UINT message, DWORD_PTR instan
     midi_push(data);
 }
 
+static HANDLE quitEvent;
+
 static BOOL WINAPI ctrl_handler(DWORD type)
 {
-    (void)type;
     InterlockedExchange(&g.quit, 1);
+    if (quitEvent && (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT))
+        WaitForSingleObject(quitEvent, 4000);
     return TRUE;
 }
 
@@ -1651,6 +1949,7 @@ static void shutdown_monitor(void)
         g.asio->vtable->Release(g.asio);
         g.asio = NULL;
     }
+    take_finish();
     if (deviceEnumerator) {
         (*(EnumeratorVtbl **)deviceEnumerator)->Release(deviceEnumerator);
         deviceEnumerator = NULL;
@@ -1663,6 +1962,7 @@ static void shutdown_monitor(void)
     close_vst();
     if (consoleModeSet) SetConsoleMode(consoleInput, consoleMode);
     consoleModeSet = 0;
+    if (quitEvent) SetEvent(quitEvent);
 }
 
 static int stream_midi(const char *device, int channel)
@@ -1864,6 +2164,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     callbacks.bufferSwitchTimeInfo = on_buffer_switch_time_info;
 
     SetConsoleTitleA("restless_virtuoso");
+    quitEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
     char names[64][128];
@@ -2004,11 +2305,20 @@ static int run(int argc, char **argv, const wchar_t *folder)
             printf("  MIDI thru -> %d (%s)\n", g.midiOutIndex, caps.szPname);
     }
 
+    if (playlistMode) publish_palette(playlistFolder);
+    open_cue();
+    take_join();
     if (g.asio->vtable->start(g.asio) != ASE_OK) {
         log_error("ASIOStart failed.\n");
         goto done;
     }
     g.started = 1;
+    if (playlistMode) {
+        LARGE_INTEGER start;
+        QueryPerformanceCounter(&start);
+        playStart = (ULONGLONG)start.QuadPart;
+        send_loop_start();
+    }
     log_trace("started\n");
 
     init_console_input();
@@ -2017,6 +2327,13 @@ static int run(int argc, char **argv, const wchar_t *folder)
     ULONGLONG lastDraw = 0;
     while (!g.quit) {
         pump_messages();
+
+        if (playlistMode && cue) {
+            LARGE_INTEGER at, frequency;
+            QueryPerformanceCounter(&at);
+            QueryPerformanceFrequency(&frequency);
+            cue->elapsed = (LONG)((at.QuadPart - (LONGLONG)playStart) * 1000 / frequency.QuadPart);
+        }
 
         if (InterlockedExchange(&g.reset, 0)) {
             log_line("driver settings changed, reconfiguring");
@@ -2040,6 +2357,18 @@ static int run(int argc, char **argv, const wchar_t *folder)
             g.started = 1;
             lastDraw = 0;
         }
+
+        if (take.active && take.palette && WaitForSingleObject(take.palette, 0) == WAIT_OBJECT_0) {
+            if (g.started) {
+                g.asio->vtable->stop(g.asio);
+                g.started = 0;
+            }
+            take_finish();
+            if (g.asio->vtable->start(g.asio) == ASE_OK) g.started = 1;
+            lastDraw = 0;
+        }
+        take_open();
+        take_flush();
 
         read_console_input();
 
@@ -2085,6 +2414,7 @@ int main(int argc, char **argv)
     srand((unsigned)GetTickCount64());
     wchar_t *folder = dropped_folder();
     int exitCode = run(argc - (folder ? 1 : 0), argv + (folder ? 1 : 0), folder);
+    if (quitEvent) SetEvent(quitEvent);
     pause_on_error(exitCode);
     if (errorLog) fclose(errorLog);
     return exitCode;

@@ -88,6 +88,21 @@ A folder is mixed onto the selected outputs with no ASIO input monitoring unless
 are more outputs than file channels, and each file's sample rate is converted to the
 driver's rate.
 
+## Loop recordings
+
+The instance playing a folder sends a loop start cue to every other running instance
+when its stems start and each time they loop. An instance started while a stems
+instance is already playing records at once, and its first pass holds the negative of
+the milliseconds that stems instance has been playing; every later pass is the
+milliseconds since the recording instance started. An instance started before the stems
+instance begins at the palette's first cue instead, its first pass at zero. The take, a
+mono mix of the outputs, streams into the `[palettes]` folder beside the stems folder as
+`palette_YYYY-MM-DD-HH-MM-SS.wav`, 16-bit PCM, and
+`passes_YYYY-MM-DD-HH-MM-SS.txt` with one `index, milliseconds 1.;` line per pass. The
+take ends, and its files are completed, when the stems instance exits or the recording
+instance is closed. Closing with the console's own close button is handled too, since
+the program waits for the files before it lets Windows end it.
+
 On startup the program lists every installed ASIO driver, then every MIDI input
 device.
 
@@ -107,5 +122,5 @@ from `samples_path` or `vsts_path` by `samples_ratio`.
 - The master output is scaled by the Windows master volume, re-read while running.
 - A MIDI input that fails to open is retried, then reported with the Windows error code,
   its device name and driver version, and whether it opens without a callback.
-- Every run writes a new `restless_virtuoso-YYYY-MM-DD_HH-MM-SS.log` next to the exe with startup stages and errors.
+- Every run writes a new `restless_virtuoso-YYYY-MM-DD_HH-MM-SS.log` into the `[logs]` folder next to the exe with startup stages and errors.
 - At startup, the program's logs older than 7 days are moved to the Recycle Bin.
