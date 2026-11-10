@@ -1329,7 +1329,7 @@ static const char *midi_error_hint(MMRESULT result)
     case MMSYSERR_NOTENABLED: return "the driver is disabled in Device Manager";
     case MMSYSERR_BADDEVICEID: return "the device index is out of date; the device list changed";
     case MMSYSERR_INVALPARAM: return "the device vanished after it was listed; reconnect it";
-    case MMSYSERR_NOMEM: return "out of memory";
+    case MMSYSERR_NOMEM: return "the port could not be allocated; another program may hold it, or the device is stuck";
     case MMSYSERR_NOTSUPPORTED: return "the driver rejects this open mode";
     default: return "the code above is the only detail Windows reports";
     }
