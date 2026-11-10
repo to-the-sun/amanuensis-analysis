@@ -65,7 +65,8 @@ When `instrument` is a MIDI input, two more keys add instruments to it:
   "instrument": "Keystation",
   "input-channel": 1,
   "samples_path": "C:\\samples",
-  "vsts_path": "C:\\VSTs"
+  "vsts_path": "C:\\VSTs",
+  "samples_ratio": 50
 }
 ```
 
@@ -75,8 +76,11 @@ When `instrument` is a MIDI input, two more keys add instruments to it:
 - `vsts_path` loads every 64-bit VST 2 `.dll` under the folder and its subfolders,
   then picks one at random and sets a random factory preset on it. Plugins without
   factory presets keep their default.
+- `samples_ratio` is the percentage chance, 0 to 100 (default 50), that a new sound
+  comes from `samples_path` instead of `vsts_path` when both are loaded. Only one of
+  them plays.
 
-The sine synth stays off in this mode; the loaded instruments are the sound sources.
+The sine synth stays off in this mode; the loaded instrument is the sound source.
 A key that is not an existing folder is logged and ignored.
 
 A folder is mixed onto the selected outputs with no ASIO input monitoring unless
