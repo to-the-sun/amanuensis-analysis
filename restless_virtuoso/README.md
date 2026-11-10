@@ -100,5 +100,7 @@ While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit
 - Changing the sample rate or buffer size in the control panel reopens the buffers
   automatically.
 - The master output is scaled by the Windows master volume, re-read while running.
+- A MIDI input that fails to open is retried, then reported with the Windows error code,
+  its device name and driver version, and whether it opens without a callback.
 - Every run writes a new `restless_virtuoso-YYYY-MM-DD_HH-MM-SS.log` next to the exe with startup stages and errors.
 - At startup, the program's logs older than 7 days are moved to the Recycle Bin.
