@@ -21,7 +21,7 @@ against `winmm.lib` and `shell32.lib`.
 
 ```bash
 restless_virtuoso.exe --list
-restless_virtuoso.exe --driver "Focusrite USB ASIO" --in 1,2 --out 1,2 --gain -6
+restless_virtuoso.exe --driver "Focusrite USB ASIO" --in 1,2 --out 1,2
 restless_virtuoso.exe --in 1 --out 1,2 --buffer 128 --rate 48000
 restless_virtuoso.exe --in none --midi-in "Keystation" --midi-out 0
 restless_virtuoso.exe "Focusrite USB ASIO Input 1.json"
