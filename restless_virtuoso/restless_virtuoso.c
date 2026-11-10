@@ -684,45 +684,6 @@ static int open_driver(const char *name, HWND window)
     return 0;
 }
 
-static void print_channels(const char *label, ASIOBool isInput, int count)
-{
-    printf("%s:\n", label);
-    if (!count) {
-        printf("  (none)\n");
-        return;
-    }
-
-    for (int channel = 0; channel < count; channel++) {
-        ASIOChannelInfo info;
-        memset(&info, 0, sizeof info);
-        info.channel = channel;
-        info.isInput = isInput;
-
-        char name[33] = "(unnamed)";
-        if (g.asio->vtable->getChannelInfo(g.asio, &info) == ASE_OK) {
-            memcpy(name, info.name, 32);
-            name[32] = 0;
-        }
-        printf("  %2d  %s\n", channel + 1, name);
-    }
-}
-
-static void print_midi_inputs(void)
-{
-    UINT count = midiInGetNumDevs();
-    printf("MIDI inputs:\n");
-    if (!count) {
-        printf("  (none)\n");
-        return;
-    }
-
-    for (UINT i = 0; i < count; i++) {
-        MIDIINCAPS caps;
-        if (midiInGetDevCaps(i, &caps, sizeof caps) != MMSYSERR_NOERROR) continue;
-        printf("  %2u  %s\n", i, caps.szPname);
-    }
-}
-
 static void print_selection(const int *channels, int count)
 {
     for (int i = 0; i < count; i++) printf("%s%d", i ? "," : "", channels[i] + 1);
@@ -1288,10 +1249,9 @@ static int run(int argc, char **argv)
     log_trace("driver opened\n");
 
     printf("%s\n\n", g.driverName);
-    print_channels("Audio inputs", ASIOTrue, g.inCount);
-    print_midi_inputs();
+    list_devices();
     printf("\n");
-    log_trace("channels listed\n");
+    log_trace("devices listed\n");
 
     if (playlistMode) {
         if (select_channels(options.in, g.inCount, g.inCh, &g.nIn, 0, "input") != 0) goto done;

@@ -58,9 +58,8 @@ A folder is played on the selected outputs with no ASIO input monitoring unless
 are more outputs than file channels, and a file's sample rate is converted to the
 driver's rate.
 
-On startup the program prints every input channel of the selected ASIO driver and
-every MIDI input device, so the indices used by `--in` and `--midi-in` are listed
-before monitoring starts.
+On startup the program lists every installed ASIO driver, then every MIDI input
+and output device.
 
 While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit.
 
