@@ -2,7 +2,8 @@
 
 Plays selected ASIO input channels, or the WAV files in a folder, on selected ASIO
 output channels, for monitoring an audio interface at ASIO latency. MIDI input can
-be played through a built-in sine synth and/or forwarded to a MIDI output.
+be played through a built-in sine synth, drum samples or a VST instrument and/or
+forwarded to a MIDI output.
 
 The driver's own ASIO interface is used directly, so no ASIO SDK download, PortAudio
 or WASAPI is involved and no non-ASIO device can be selected.
@@ -56,6 +57,27 @@ one ends. `input-channel` is the 1-based ASIO input, or the MIDI channel for a M
 device, whose messages are then streamed to the console.
 `Focusrite USB ASIO Input 1.json` is a ready template; settings files are named after
 the input device, with its exact capitalization.
+
+When `instrument` is a MIDI input, two more keys add instruments to it:
+
+```json
+{
+  "instrument": "Keystation",
+  "input-channel": 1,
+  "samples_path": "C:\\samples",
+  "vsts_path": "C:\\VSTs"
+}
+```
+
+- `samples_path` loads every `.wav` under the folder and its subfolders as drum
+  samples. Each of the 128 MIDI notes gets a different one at random, and a note-on
+  plays it.
+- `vsts_path` loads every 64-bit VST 2 `.dll` under the folder and its subfolders,
+  then picks one at random and sets a random factory preset on it. Plugins without
+  factory presets keep their default.
+
+The sine synth stays off in this mode; the loaded instruments are the sound sources.
+A key that is not an existing folder is logged and ignored.
 
 A folder is mixed onto the selected outputs with no ASIO input monitoring unless
 `--in` is given. Files of any channel count play on all outputs, wrapping when there
