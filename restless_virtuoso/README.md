@@ -116,5 +116,5 @@ from `samples_path` or `vsts_path` by `samples_ratio`.
 - The master output is scaled by the Windows master volume, re-read while running.
 - A MIDI input that fails to open is retried, then reported with the Windows error code,
   its device name and driver version, and whether it opens without a callback.
-- Every run writes a new `restless_virtuoso-YYYY-MM-DD_HH-MM-SS.log` next to the exe with startup stages and errors.
+- Every run writes a new `restless_virtuoso-YYYY-MM-DD_HH-MM-SS.log` into the `[logs]` folder next to the exe with startup stages and errors.
 - At startup, the program's logs older than 7 days are moved to the Recycle Bin.

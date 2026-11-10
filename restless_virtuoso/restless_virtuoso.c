@@ -113,6 +113,22 @@ static void recycle_old_logs(const char *folder, const char *stem)
     FindClose(find);
 }
 
+static int module_folder(char *folder, size_t size)
+{
+    char module[MAX_PATH];
+    DWORD length = GetModuleFileNameA(NULL, module, MAX_PATH);
+    if (!length || length >= MAX_PATH) return -1;
+
+    char *slash = strrchr(module, '\\');
+    if (!slash) return -1;
+
+    size_t folderLength = (size_t)(slash - module) + 1;
+    if (folderLength >= size) return -1;
+    memcpy(folder, module, folderLength);
+    folder[folderLength] = 0;
+    return 0;
+}
+
 static void open_error_log(void)
 {
     char module[MAX_PATH];
@@ -124,10 +140,11 @@ static void open_error_log(void)
     char *dot = strrchr(stem, '.');
     if (dot) *dot = 0;
 
-    int folderLength = (int)(stem - module);
-    char folder[MAX_PATH];
-    memcpy(folder, module, (size_t)folderLength);
-    folder[folderLength] = 0;
+    char folder[MAX_PATH + 8];
+    char base[MAX_PATH];
+    if (module_folder(base, sizeof base) != 0) return;
+    snprintf(folder, sizeof folder, "%s[logs]\\", base);
+    CreateDirectoryA(folder, NULL);
 
     HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     recycle_old_logs(folder, stem);
@@ -139,8 +156,8 @@ static void open_error_log(void)
     for (int attempt = 1; attempt < 100; attempt++) {
         char suffix[8] = "";
         if (attempt > 1) snprintf(suffix, sizeof suffix, "-%d", attempt);
-        snprintf(logPath, sizeof logPath, "%.*s%s-%04d-%02d-%02d_%02d-%02d-%02d%s.log",
-                 folderLength, module, stem, now.wYear, now.wMonth, now.wDay,
+        snprintf(logPath, sizeof logPath, "%s%s-%04d-%02d-%02d_%02d-%02d-%02d%s.log",
+                 folder, stem, now.wYear, now.wMonth, now.wDay,
                  now.wHour, now.wMinute, now.wSecond, suffix);
         if (GetFileAttributesA(logPath) == INVALID_FILE_ATTRIBUTES) break;
     }
@@ -608,22 +625,6 @@ static void take_channel(const float *samples, int channel, int frames)
     float *chunk = take.last->samples;
     for (int i = 0; i < frames; i++)
         chunk[(take.last->frames + (size_t)i) * (size_t)take.channels + (size_t)channel] = samples[i];
-}
-
-static int module_folder(char *folder, size_t size)
-{
-    char module[MAX_PATH];
-    DWORD length = GetModuleFileNameA(NULL, module, MAX_PATH);
-    if (!length || length >= MAX_PATH) return -1;
-
-    char *slash = strrchr(module, '\\');
-    if (!slash) return -1;
-
-    size_t folderLength = (size_t)(slash - module) + 1;
-    if (folderLength >= size) return -1;
-    memcpy(folder, module, folderLength);
-    folder[folderLength] = 0;
-    return 0;
 }
 
 static void write_take(void)
