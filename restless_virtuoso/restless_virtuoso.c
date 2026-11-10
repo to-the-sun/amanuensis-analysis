@@ -33,7 +33,6 @@
 typedef struct {
     const char *driver, *in, *out, *midiIn, *midiOut;
     char instrument[MAX_PATH], samplesPath[MAX_PATH], vstsPath[MAX_PATH];
-    double gainDb;
     int rate, buffer, synth, list, inputChannel, samplesRatio;
 } Options;
 
@@ -60,7 +59,7 @@ typedef struct {
     int buffersCreated, started;
 
     volatile LONG quit, reset;
-    volatile float gain, volume, peak[MAX_SELECTED];
+    volatile float volume, peak[MAX_SELECTED];
     int lineWidth;
 } Monitor;
 
@@ -963,7 +962,6 @@ static float read_master_volume(void)
 static void process_buffer(int32_t index)
 {
     const int frames = (int)g.bufferSize;
-    const float gain = g.gain;
     const float volume = g.volume;
 
     for (int c = 0; c < g.nIn; c++) {
@@ -993,7 +991,7 @@ static void process_buffer(int32_t index)
         void *output = g.bufferInfo[g.nIn + j].buffers[index];
 
         for (int i = 0; i < frames; i++) {
-            float value = (input ? input[i] * gain : 0.0f) + g.synthFloats[i];
+            float value = (input ? input[i] : 0.0f) + g.synthFloats[i];
             if (music) value += music[i];
             value *= volume;
             g.mixFloats[i] = value > 1.0f ? 1.0f : value < -1.0f ? -1.0f : value;
@@ -1699,7 +1697,6 @@ static void usage(void)
         "  -d, --driver NAME|INDEX  ASIO driver (default: " DEFAULT_DRIVER ", else first installed)\n"
         "  -i, --in LIST            input channels, 1-based: 1,2 or 1-4 (default 1,2; \"none\" for MIDI only)\n"
         "  -o, --out LIST           output channels (default 1,2)\n"
-        "  -g, --gain DB            input gain (default 0)\n"
         "      --rate HZ            sample rate (default: the driver's current rate)\n"
         "      --buffer FRAMES      ASIO buffer size (default: the driver's preferred size)\n"
         "      --midi-in DEVICE     MIDI input by index or name\n"
@@ -1807,9 +1804,6 @@ static int parse_args(int argc, char **argv, Options *options)
         } else if (!strcmp(argument, "--midi-out")) {
             if (!hasValue) return 1;
             options->midiOut = argv[++i];
-        } else if (!strcmp(argument, "--gain") || !strcmp(argument, "-g")) {
-            if (!hasValue) return 1;
-            options->gainDb = strtod(argv[++i], NULL);
         } else if (!strcmp(argument, "--rate")) {
             if (!hasValue) return 1;
             options->rate = atoi(argv[++i]);
@@ -1823,10 +1817,6 @@ static int parse_args(int argc, char **argv, Options *options)
         }
     }
 
-    if (options->gainDb < -60.0 || options->gainDb > 24.0) {
-        log_error("--gain must be between -60 and +24 dB.\n");
-        return 1;
-    }
     if (options->rate < 0 || options->buffer < 0) {
         log_error("--rate and --buffer must not be negative.\n");
         return 1;
@@ -1862,7 +1852,6 @@ static int run(int argc, char **argv, const wchar_t *folder)
     }
 
     memset(&g, 0, sizeof g);
-    g.gain = (float)pow(10.0, options.gainDb / 20.0);
     g.volume = 1.0f;
     g.synthEnabled = options.synth;
     g.samplesRatio = options.samplesRatio;
