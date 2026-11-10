@@ -61,7 +61,7 @@ typedef struct {
     int buffersCreated, started;
 
     volatile LONG quit, mute, reset;
-    volatile float gain, peak[MAX_SELECTED];
+    volatile float gain, volume, peak[MAX_SELECTED];
     float gainDb;
     int lineWidth;
 } Monitor;
@@ -843,11 +843,68 @@ static void close_vst(void)
     vstLibraryCount = 0;
 }
 
+/* The Windows master volume, through Core Audio's endpoint volume. The SDK headers are
+   C++ only, so only the vtable slots up to GetMasterVolumeLevelScalar are declared. */
+
+static const GUID enumeratorClass = {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
+static const GUID enumeratorInterface = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
+static const GUID endpointVolumeInterface = {0x5CDF2C82, 0x841E, 0x4546, {0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A}};
+
+typedef struct {
+    void *queryInterface, *addRef;
+    ULONG (STDMETHODCALLTYPE *Release)(void *);
+    void *enumAudioEndpoints;
+    HRESULT (STDMETHODCALLTYPE *GetDefaultAudioEndpoint)(void *, int, int, void **);
+} EnumeratorVtbl;
+
+typedef struct {
+    void *queryInterface, *addRef;
+    ULONG (STDMETHODCALLTYPE *Release)(void *);
+    HRESULT (STDMETHODCALLTYPE *Activate)(void *, const GUID *, DWORD, void *, void **);
+} DeviceVtbl;
+
+typedef struct {
+    void *queryInterface, *addRef;
+    ULONG (STDMETHODCALLTYPE *Release)(void *);
+    void *registerControlChangeNotify, *unregisterControlChangeNotify, *getChannelCount,
+         *setMasterVolumeLevel, *setMasterVolumeLevelScalar, *getMasterVolumeLevel;
+    HRESULT (STDMETHODCALLTYPE *GetMasterVolumeLevelScalar)(void *, float *);
+} EndpointVolumeVtbl;
+
+static void *deviceEnumerator;
+
+static void open_master_volume(void)
+{
+    if (FAILED(CoCreateInstance(&enumeratorClass, NULL, CLSCTX_ALL, &enumeratorInterface, &deviceEnumerator)))
+        deviceEnumerator = NULL;
+}
+
+static float read_master_volume(void)
+{
+    if (!deviceEnumerator) return 1.0f;
+
+    void *device = NULL, *endpoint = NULL;
+    float volume = 1.0f;
+    EnumeratorVtbl *enumerator = *(EnumeratorVtbl **)deviceEnumerator;
+
+    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(deviceEnumerator, 0 /* eRender */, 1 /* eMultimedia */, &device)) && device) {
+        DeviceVtbl *deviceVtable = *(DeviceVtbl **)device;
+        if (SUCCEEDED(deviceVtable->Activate(device, &endpointVolumeInterface, CLSCTX_ALL, NULL, &endpoint)) && endpoint) {
+            EndpointVolumeVtbl *volumeVtable = *(EndpointVolumeVtbl **)endpoint;
+            if (FAILED(volumeVtable->GetMasterVolumeLevelScalar(endpoint, &volume))) volume = 1.0f;
+            volumeVtable->Release(endpoint);
+        }
+        deviceVtable->Release(device);
+    }
+    return volume;
+}
+
 static void process_buffer(int32_t index)
 {
     const int frames = (int)g.bufferSize;
     const float gain = g.mute ? 0.0f : g.gain;
     const float synthGain = g.mute ? 0.0f : 1.0f;
+    const float volume = g.volume;
 
     for (int c = 0; c < g.nIn; c++) {
         float *samples = g.inputFloats + (size_t)c * frames;
@@ -878,6 +935,7 @@ static void process_buffer(int32_t index)
         for (int i = 0; i < frames; i++) {
             float value = (input ? input[i] * gain : 0.0f) + g.synthFloats[i] * synthGain;
             if (music) value += music[i];
+            value *= volume;
             g.mixFloats[i] = value > 1.0f ? 1.0f : value < -1.0f ? -1.0f : value;
         }
         sample_from_float(g.mixFloats, output, g.outFormat[j], frames);
@@ -1389,6 +1447,10 @@ static void shutdown_monitor(void)
         g.asio->vtable->Release(g.asio);
         g.asio = NULL;
     }
+    if (deviceEnumerator) {
+        (*(EnumeratorVtbl **)deviceEnumerator)->Release(deviceEnumerator);
+        deviceEnumerator = NULL;
+    }
     free_buffers();
     for (int i = 0; i < stemCount; i++) drwav_free(stems[i].samples, NULL);
     free(stems);
@@ -1600,6 +1662,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     memset(&g, 0, sizeof g);
     g.gain = (float)pow(10.0, options.gainDb / 20.0);
     g.gainDb = (float)options.gainDb;
+    g.volume = 1.0f;
     g.synthEnabled = options.synth;
     g.midiInIndex = -1;
     g.midiOutIndex = -1;
@@ -1660,6 +1723,8 @@ static int run(int argc, char **argv, const wchar_t *folder)
         return 1;
     }
     log_trace("com 0x%08lx\n", (unsigned long)com);
+    open_master_volume();
+    g.volume = read_master_volume();
 
     const char *driver = resolve_driver(options.driver ? options.driver : DEFAULT_DRIVER, names, driverCount);
     if (!driver && !options.driver) driver = resolve_driver(NULL, names, driverCount);
@@ -1804,6 +1869,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
 
         ULONGLONG now = GetTickCount64();
         if (now - lastDraw >= 100) {
+            g.volume = read_master_volume();
             draw_meters();
             lastDraw = now;
         }
