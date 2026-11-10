@@ -1049,6 +1049,12 @@ static int is_json_path(const char *path)
     return dot && !_stricmp(dot, ".json");
 }
 
+static int is_folder(const char *path)
+{
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 static const char *json_value(const char *text, const char *key)
 {
     size_t length = strlen(key);
@@ -1165,10 +1171,17 @@ static int run(int argc, char **argv)
     memset(&options, 0, sizeof options);
     options.synth = 1;
 
-    const char *settings = argc > 1 && is_json_path(argv[1]) ? argv[1] : NULL;
-    if (settings && load_settings(settings, &options) != 0) return 1;
+    const char *path = argc > 1 ? argv[1] : NULL;
+    int folder = path && is_folder(path);
+    int settings = !folder && path && is_json_path(path);
+    if (settings && load_settings(path, &options) != 0) return 1;
+    if (folder && strlen(path) >= sizeof options.instrument) {
+        log_error("Folder path '%s' is too long.\n", path);
+        return 1;
+    }
+    if (folder) strcpy(options.instrument, path);
 
-    int parsed = parse_args(argc - (settings ? 1 : 0), argv + (settings ? 1 : 0), &options);
+    int parsed = parse_args(argc - (settings || folder), argv + (settings || folder), &options);
     if (parsed == 2) return 0;
     if (parsed != 0) return 1;
     log_trace("arguments parsed\n");
@@ -1196,8 +1209,7 @@ static int run(int argc, char **argv)
     int driverCount = list_drivers(names, 64);
 
     if (options.instrument[0]) {
-        DWORD attributes = GetFileAttributesA(options.instrument);
-        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        if (is_folder(options.instrument)) {
             playlistMode = 1;
             if (start_playlist(options.instrument) != 0) return 1;
         } else if (resolve_driver(options.instrument, names, driverCount)) {

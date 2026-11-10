@@ -46,6 +46,9 @@ to start from it:
 }
 ```
 
+A folder dropped onto `restless_virtuoso.exe` (or passed as the first argument) is
+played directly, as if it were the `instrument` key.
+
 `instrument` is an ASIO driver or MIDI input name from `--list`, or the absolute path
 of a folder. A folder plays every `.wav` file in it, in name order, back to back, and
 the first file follows the last one immediately. `input-channel` is the 1-based ASIO
