@@ -57,7 +57,7 @@ typedef struct {
     HMIDIOUT midiOut;
     int midiInIndex, midiOutIndex;
     int midiChannel, midiStream;
-    int synthEnabled, samplesSound;
+    int synthEnabled, samplesSound, samplesRatio;
     int buffersCreated, started;
 
     volatile LONG quit, mute, reset;
@@ -609,12 +609,8 @@ static void load_drums(const char *folder)
         return;
     }
 
-    int *pool = malloc((size_t)drumSampleCount * sizeof *pool);
-    if (!pool) return;
-    for (int i = 0; i < drumSampleCount; i++) pool[i] = i;
-    shuffle(pool, drumSampleCount);
-    for (int note = 0; note < 128; note++) drumNoteSample[note] = pool[note % drumSampleCount];
-    free(pool);
+    for (int note = 0; note < 128; note++) drumNoteSample[note] = note % drumSampleCount;
+    shuffle(drumNoteSample, 128);
 }
 
 static void trigger_drum(int note)
@@ -644,7 +640,7 @@ static void render_drums(float *dst, int outputs, int frames)
 }
 
 static HMODULE vstLibraries[VST_MAX_PLUGINS];
-static int vstLibraryCount, vstOutputCount, vstProgram;
+static int vstLibraryCount, vstActiveLibrary = -1, vstOutputCount, vstProgram;
 static float *vstZeros, *vstOutputMemory;
 static float **vstInputs, **vstOutputs;
 
@@ -732,9 +728,9 @@ static void vst_stop(void)
     vst_free_buffers();
 }
 
-static int start_vst(HMODULE library)
+static int start_vst(int library)
 {
-    AEffect *effect = create_effect(library);
+    AEffect *effect = create_effect(vstLibraries[library]);
     if (!effect) return -1;
 
     if (!effect->dispatcher || (!(effect->flags & effFlagsIsSynth) && effect->numInputs > 0) ||
@@ -746,6 +742,7 @@ static int start_vst(HMODULE library)
 
     effect->dispatcher(effect, effOpen, 0, 0, NULL, 0);
     vstEffect = effect;
+    vstActiveLibrary = library;
     vstOutputCount = effect->numOutputs;
     vstProgram = effect->numPrograms > 1 ? rand() % effect->numPrograms : 0;
     if (effect->numPrograms > 1)
@@ -755,6 +752,7 @@ static int start_vst(HMODULE library)
         vst_stop();
         effect->dispatcher(effect, effClose, 0, 0, NULL, 0);
         vstEffect = NULL;
+        vstActiveLibrary = -1;
         return -1;
     }
     return 0;
@@ -799,7 +797,7 @@ static void load_vsts(const char *folder)
     shuffle(order, vstLibraryCount);
 
     for (int i = 0; i < vstLibraryCount; i++)
-        if (start_vst(vstLibraries[order[i]]) == 0) return;
+        if (start_vst(order[i]) == 0) return;
 
     log_error("%d plugins under vsts_path '%s', but none could be started.\n",
               vstLibraryCount, folder);
@@ -837,13 +835,73 @@ static void render_instruments(float *dst, int outputs, int frames)
     else render_vst(dst, outputs, frames);
 }
 
-static void close_vst(void)
+static void close_vst_effect(void)
 {
     vst_stop();
     if (vstEffect) {
         vstEffect->dispatcher(vstEffect, effClose, 0, 0, NULL, 0);
         vstEffect = NULL;
     }
+    vstActiveLibrary = -1;
+}
+
+static void new_vst_sound(void)
+{
+    if (!vstLibraryCount) return;
+
+    if (g.started) {
+        g.asio->vtable->stop(g.asio);
+        g.started = 0;
+    }
+
+    int previous = vstActiveLibrary;
+    close_vst_effect();
+
+    int order[VST_MAX_PLUGINS], count = 0;
+    for (int i = 0; i < vstLibraryCount; i++)
+        if (i != previous) order[count++] = i;
+    shuffle(order, count);
+
+    for (int i = 0; i < count; i++)
+        if (start_vst(order[i]) == 0) break;
+    if (!vstEffect && previous >= 0) start_vst(previous);
+
+    if (g.asio->vtable->start(g.asio) != ASE_OK) {
+        log_error("ASIOStart failed after changing the VST.\n");
+        InterlockedExchange(&g.quit, 1);
+    } else g.started = 1;
+}
+
+static void print_sound(const char *prefix)
+{
+    if (g.samplesSound) printf("  %s%d drum samples\n", prefix, drumSampleCount);
+    else if (vstEffect) {
+        char name[64] = "";
+        vstEffect->dispatcher(vstEffect, effGetEffectName, 0, 0, name, 0);
+        name[63] = 0;
+        if (vstEffect->numPrograms > 0)
+            printf("  %sVST %s, preset %d/%d\n", prefix, name[0] ? name : "plugin", vstProgram + 1,
+                   vstEffect->numPrograms);
+        else
+            printf("  %sVST %s, default preset\n", prefix, name[0] ? name : "plugin");
+    }
+    fflush(stdout);
+}
+
+static void new_sound(void)
+{
+    choose_sound(g.samplesRatio);
+    if (g.samplesSound) shuffle(drumNoteSample, 128);
+    else new_vst_sound();
+
+    printf("\n");
+    print_sound("new sound: ");
+    g.lineWidth = 0;
+}
+
+static void close_vst(void)
+{
+    close_vst_effect();
     for (int i = 0; i < vstLibraryCount; i++) FreeLibrary(vstLibraries[i]);
     vstLibraryCount = 0;
 }
@@ -1500,6 +1558,68 @@ static void adjust_gain(float delta)
     g.gain = powf(10.0f, g.gainDb / 20.0f);
 }
 
+static HANDLE consoleInput;
+static DWORD consoleMode;
+static int consoleModeSet;
+static COORD soundButton;
+
+static void init_console_input(void)
+{
+    consoleInput = GetStdHandle(STD_INPUT_HANDLE);
+    if (consoleInput == INVALID_HANDLE_VALUE || !GetConsoleMode(consoleInput, &consoleMode)) {
+        consoleInput = NULL;
+        return;
+    }
+    consoleModeSet = SetConsoleMode(consoleInput,
+        ENABLE_EXTENDED_FLAGS | ENABLE_MOUSE_INPUT | ENABLE_PROCESSED_INPUT);
+}
+
+static void draw_sound_button(void)
+{
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    fflush(stdout);
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info))
+        soundButton = info.dwCursorPosition;
+
+    printf("+-----------+\n"
+           "| new sound |\n"
+           "+-----------+\n");
+    fflush(stdout);
+}
+
+static void read_console_input(void)
+{
+    if (!consoleInput) return;
+
+    DWORD available = 0;
+    while (GetNumberOfConsoleInputEvents(consoleInput, &available) && available) {
+        INPUT_RECORD records[8];
+        DWORD read = 0, wanted = available < 8 ? available : 8;
+        if (!ReadConsoleInputA(consoleInput, records, wanted, &read) || !read) return;
+
+        for (DWORD i = 0; i < read; i++) {
+            INPUT_RECORD *record = &records[i];
+            if (record->EventType == KEY_EVENT) {
+                KEY_EVENT_RECORD *key = &record->Event.KeyEvent;
+                if (!key->bKeyDown) continue;
+                int character = key->uChar.AsciiChar;
+                if (character == 'q' || character == 'Q' || character == 27) InterlockedExchange(&g.quit, 1);
+                else if (character == 'm' || character == 'M') InterlockedExchange(&g.mute, !g.mute);
+                else if (character == '+' || character == '=') adjust_gain(1.0f);
+                else if (character == '-' || character == '_') adjust_gain(-1.0f);
+                else if (character == 'p' || character == 'P') g.asio->vtable->controlPanel(g.asio);
+            } else if (record->EventType == MOUSE_EVENT && instrumentMode) {
+                MOUSE_EVENT_RECORD *mouse = &record->Event.MouseEvent;
+                if (mouse->dwEventFlags || !(mouse->dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED)) continue;
+                if (mouse->dwMousePosition.X < soundButton.X || mouse->dwMousePosition.X > soundButton.X + 12 ||
+                    mouse->dwMousePosition.Y < soundButton.Y || mouse->dwMousePosition.Y > soundButton.Y + 2)
+                    continue;
+                new_sound();
+            }
+        }
+    }
+}
+
 static void draw_meters(void)
 {
     char line[512];
@@ -1564,6 +1684,8 @@ static void shutdown_monitor(void)
     for (int i = 0; i < drumSampleCount; i++) drwav_free(drumSamples[i].samples, NULL);
     free(drumSamples);
     close_vst();
+    if (consoleModeSet) SetConsoleMode(consoleInput, consoleMode);
+    consoleModeSet = 0;
 }
 
 static int stream_midi(const char *device, int channel)
@@ -1773,6 +1895,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     g.gainDb = (float)options.gainDb;
     g.volume = 1.0f;
     g.synthEnabled = options.synth;
+    g.samplesRatio = options.samplesRatio;
     g.midiInIndex = -1;
     g.midiOutIndex = -1;
 
@@ -1909,17 +2032,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
         print_wide_path(playlistFolder);
         printf("\n");
     }
-    if (g.samplesSound) printf("  %d drum samples\n", drumSampleCount);
-    else if (vstEffect) {
-        char name[64] = "";
-        vstEffect->dispatcher(vstEffect, effGetEffectName, 0, 0, name, 0);
-        name[63] = 0;
-        if (vstEffect->numPrograms > 0)
-            printf("  VST %s, preset %d/%d\n", name[0] ? name : "plugin", vstProgram + 1,
-                   vstEffect->numPrograms);
-        else
-            printf("  VST %s, default preset\n", name[0] ? name : "plugin");
-    }
+    print_sound("");
 
     if (g.midiInIndex >= 0) {
         MIDIINCAPS caps;
@@ -1939,6 +2052,8 @@ static int run(int argc, char **argv, const wchar_t *folder)
     g.started = 1;
     log_trace("started\n");
 
+    init_console_input();
+    if (instrumentMode) draw_sound_button();
     printf("m mute  +/- gain  p control panel  q quit\n");
 
     ULONGLONG lastDraw = 0;
@@ -1968,14 +2083,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
             lastDraw = 0;
         }
 
-        while (_kbhit()) {
-            int key = _getch();
-            if (key == 'q' || key == 'Q' || key == 27) InterlockedExchange(&g.quit, 1);
-            else if (key == 'm' || key == 'M') InterlockedExchange(&g.mute, !g.mute);
-            else if (key == '+' || key == '=') adjust_gain(1.0f);
-            else if (key == '-' || key == '_') adjust_gain(-1.0f);
-            else if (key == 'p' || key == 'P') g.asio->vtable->controlPanel(g.asio);
-        }
+        read_console_input();
 
         ULONGLONG now = GetTickCount64();
         if (now - lastDraw >= 100) {
