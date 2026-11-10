@@ -63,7 +63,7 @@ are more outputs than file channels, and each file's sample rate is converted to
 driver's rate.
 
 On startup the program lists every installed ASIO driver, then every MIDI input
-and output device.
+device.
 
 While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit.
 

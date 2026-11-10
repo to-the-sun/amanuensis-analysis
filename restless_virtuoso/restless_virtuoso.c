@@ -973,14 +973,6 @@ static void list_devices(void)
         if (midiInGetDevCaps(i, &caps, sizeof caps) == MMSYSERR_NOERROR) printf("  %u  %s\n", i, caps.szPname);
     }
     if (!inputs) printf("  (none)\n");
-
-    printf("MIDI outputs:\n");
-    UINT outputs = midiOutGetNumDevs();
-    for (UINT i = 0; i < outputs; i++) {
-        MIDIOUTCAPS caps;
-        if (midiOutGetDevCaps(i, &caps, sizeof caps) == MMSYSERR_NOERROR) printf("  %u  %s\n", i, caps.szPname);
-    }
-    if (!outputs) printf("  (none)\n");
 }
 
 static void adjust_gain(float delta)
