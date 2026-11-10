@@ -514,6 +514,7 @@ static float track_sample(const Track *track, int output)
 typedef struct {
     volatile LONG seq;
     volatile LONGLONG qpc;
+    DWORD pid;
     wchar_t folder[1024];
 } LoopCue;
 
@@ -527,13 +528,18 @@ typedef struct TakeChunk {
 } TakeChunk;
 
 typedef struct {
-    int active, channels;
+    int active, channels, wavOpen;
     unsigned rate;
-    TakeChunk *first, *last;
+    TakeChunk *first, *cursor;
+    TakeChunk *volatile last;
+    drwav wav;
+    drwav_int16 *block;
+    wchar_t passesPath[1100];
     drwav_uint64 frames;
     ULONGLONG origin;
     SYSTEMTIME at;
     wchar_t folder[1024];
+    HANDLE palette;
     LONG seen;
     double *passMs;
     int passCount, passCapacity;
@@ -573,6 +579,7 @@ static void publish_palette(const wchar_t *stems)
 
     wmemcpy(cue->folder, stems, length);
     wcscpy(cue->folder + length, L"[palettes]\\");
+    cue->pid = GetCurrentProcessId();
 }
 
 static void add_pass(double milliseconds)
@@ -606,6 +613,8 @@ static void check_loop_cue(void)
         GetLocalTime(&take.at);
         wcsncpy(take.folder, cue->folder, 1023);
         take.folder[1023] = 0;
+        if (take.palette) CloseHandle(take.palette);
+        take.palette = cue->pid ? OpenProcess(SYNCHRONIZE, FALSE, cue->pid) : NULL;
     }
 
     LARGE_INTEGER frequency;
@@ -645,15 +654,17 @@ static void take_channel(const float *samples, int channel, int frames)
         chunk[(take.last->frames + (size_t)i) * (size_t)take.channels + (size_t)channel] = samples[i];
 }
 
-static void write_take(void)
+/* The take is streamed to the file from the main loop, which only ever writes
+   chunks the ASIO thread has finished filling, so closing stays quick. */
+
+static void take_open(void)
 {
-    if (!take.frames || !take.folder[0]) return;
+    if (!take.active || take.wavOpen || !take.frames || !take.folder[0]) return;
 
     CreateDirectoryW(take.folder, NULL);
 
     SYSTEMTIME at = take.at;
-
-    wchar_t stamp[40], suffix[8] = L"", wavPath[1100], passesPath[1100];
+    wchar_t stamp[40], suffix[8] = L"", wavPath[1100];
     swprintf(stamp, 40, L"%04d-%02d-%02d-%02d-%02d-%02d",
              at.wYear, at.wMonth, at.wDay, at.wHour, at.wMinute, at.wSecond);
     for (int attempt = 1; attempt < 100; attempt++) {
@@ -661,7 +672,7 @@ static void write_take(void)
         swprintf(wavPath, 1100, L"%lspalette_%ls%ls.wav", take.folder, stamp, suffix);
         if (GetFileAttributesW(wavPath) == INVALID_FILE_ATTRIBUTES) break;
     }
-    swprintf(passesPath, 1100, L"%lspasses_%ls%ls.txt", take.folder, stamp, suffix);
+    swprintf(take.passesPath, 1100, L"%lspasses_%ls%ls.txt", take.folder, stamp, suffix);
 
     drwav_data_format format;
     memset(&format, 0, sizeof format);
@@ -671,30 +682,53 @@ static void write_take(void)
     format.sampleRate = take.rate;
     format.bitsPerSample = 16;
 
-    drwav wav;
-    if (!drwav_init_file_write_w(&wav, wavPath, &format, NULL)) {
+    take.block = malloc((size_t)TAKE_CHUNK * (size_t)take.channels * sizeof *take.block);
+    if (!take.block) {
+        log_error("Out of memory for the take buffer.\n");
+        take.active = 0;
+        return;
+    }
+    if (!drwav_init_file_write_w(&take.wav, wavPath, &format, NULL)) {
         log_error("Could not write '%ls'.\n", wavPath);
+        take.active = 0;
         return;
     }
 
-    drwav_int16 *block = malloc((size_t)TAKE_CHUNK * (size_t)take.channels * sizeof *block);
-    for (TakeChunk *chunk = take.first; block && chunk; chunk = chunk->next) {
-        drwav_f32_to_s16(block, chunk->samples, chunk->frames * (size_t)take.channels);
-        drwav_write_pcm_frames(&wav, chunk->frames, block);
-    }
-    free(block);
-    drwav_uninit(&wav);
+    take.cursor = take.first;
+    take.wavOpen = 1;
+    log_trace("recording to %ls\n", wavPath);
+}
 
-    FILE *file = _wfopen(passesPath, L"w");
-    if (!file) {
-        log_error("Could not write '%ls'.\n", passesPath);
-        return;
+static void take_flush(void)
+{
+    if (!take.wavOpen) return;
+    while (take.cursor != take.last) {
+        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames * (size_t)take.channels);
+        drwav_write_pcm_frames(&take.wav, take.cursor->frames, take.block);
+        take.cursor = take.cursor->next;
     }
-    for (int i = 0; i < take.passCount; i++)
-        fprintf(file, "%d, %.6f 1.;\n", i, take.passMs[i]);
-    fclose(file);
-    log_trace("wrote %ls and %ls\n", wavPath, passesPath);
+}
 
+static void take_finish(void)
+{
+    if (take.wavOpen) {
+        take_flush();
+        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames * (size_t)take.channels);
+        drwav_write_pcm_frames(&take.wav, take.cursor->frames, take.block);
+        drwav_uninit(&take.wav);
+
+        FILE *file = _wfopen(take.passesPath, L"w");
+        if (!file) log_error("Could not write '%ls'.\n", take.passesPath);
+        else {
+            for (int i = 0; i < take.passCount; i++)
+                fprintf(file, "%d, %.6f 1.;\n", i, take.passMs[i]);
+            fclose(file);
+            log_trace("wrote %ls\n", take.passesPath);
+        }
+    }
+
+    free(take.block);
+    take.block = NULL;
     for (TakeChunk *chunk = take.first; chunk;) {
         TakeChunk *next = chunk->next;
         free(chunk->samples);
@@ -702,9 +736,17 @@ static void write_take(void)
         chunk = next;
     }
     free(take.passMs);
-    take.first = take.last = NULL;
     take.passMs = NULL;
+    take.first = take.last = take.cursor = NULL;
+    take.frames = 0;
     take.passCount = 0;
+    take.channels = 0;
+    take.rate = 0;
+    take.wavOpen = 0;
+    take.active = 0;
+    take.folder[0] = 0;
+    if (take.palette) CloseHandle(take.palette);
+    take.palette = NULL;
 }
 
 static void advance_tracks(void)
@@ -1295,10 +1337,13 @@ static void CALLBACK midi_in_proc(HMIDIIN handle, UINT message, DWORD_PTR instan
     midi_push(data);
 }
 
+static HANDLE quitEvent;
+
 static BOOL WINAPI ctrl_handler(DWORD type)
 {
-    (void)type;
     InterlockedExchange(&g.quit, 1);
+    if (quitEvent && (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT))
+        WaitForSingleObject(quitEvent, 4000);
     return TRUE;
 }
 
@@ -1877,7 +1922,7 @@ static void shutdown_monitor(void)
         g.asio->vtable->Release(g.asio);
         g.asio = NULL;
     }
-    write_take();
+    take_finish();
     if (deviceEnumerator) {
         (*(EnumeratorVtbl **)deviceEnumerator)->Release(deviceEnumerator);
         deviceEnumerator = NULL;
@@ -1890,6 +1935,7 @@ static void shutdown_monitor(void)
     close_vst();
     if (consoleModeSet) SetConsoleMode(consoleInput, consoleMode);
     consoleModeSet = 0;
+    if (quitEvent) SetEvent(quitEvent);
 }
 
 static int stream_midi(const char *device, int channel)
@@ -2091,6 +2137,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     callbacks.bufferSwitchTimeInfo = on_buffer_switch_time_info;
 
     SetConsoleTitleA("restless_virtuoso");
+    quitEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
     char names[64][128];
@@ -2270,6 +2317,18 @@ static int run(int argc, char **argv, const wchar_t *folder)
             lastDraw = 0;
         }
 
+        if (take.active && take.palette && WaitForSingleObject(take.palette, 0) == WAIT_OBJECT_0) {
+            if (g.started) {
+                g.asio->vtable->stop(g.asio);
+                g.started = 0;
+            }
+            take_finish();
+            if (g.asio->vtable->start(g.asio) == ASE_OK) g.started = 1;
+            lastDraw = 0;
+        }
+        take_open();
+        take_flush();
+
         read_console_input();
 
         ULONGLONG now = GetTickCount64();
@@ -2314,6 +2373,7 @@ int main(int argc, char **argv)
     srand((unsigned)GetTickCount64());
     wchar_t *folder = dropped_folder();
     int exitCode = run(argc - (folder ? 1 : 0), argv + (folder ? 1 : 0), folder);
+    if (quitEvent) SetEvent(quitEvent);
     pause_on_error(exitCode);
     if (errorLog) fclose(errorLog);
     return exitCode;
