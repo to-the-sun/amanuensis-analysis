@@ -20,15 +20,18 @@
 
 #include "asio_abi.h"
 #include "dsp.h"
+#define DR_WAV_IMPLEMENTATION
+#include "../analysis/dr_wav.h"
 
 #define MAX_SELECTED 32
+#define QUEUE_FILES 1024
 #define MAX_METERS 4
 #define MIDI_QUEUE 1024
 #define DEFAULT_DRIVER "Focusrite USB ASIO"
 
 typedef struct {
     const char *driver, *in, *out, *midiIn, *midiOut;
-    char device[128];
+    char instrument[MAX_PATH];
     double gainDb;
     int rate, buffer, synth, list, inputChannel;
 } Options;
@@ -46,7 +49,7 @@ typedef struct {
     int inCh[MAX_SELECTED], outCh[MAX_SELECTED];
     SampleFormat inFormat[MAX_SELECTED], outFormat[MAX_SELECTED];
     ASIOBufferInfo bufferInfo[MAX_SELECTED * 2];
-    float *inputFloats, *synthFloats, *mixFloats;
+    float *inputFloats, *fileFloats, *synthFloats, *mixFloats;
 
     HMIDIIN midiIn;
     HMIDIOUT midiOut;
@@ -280,6 +283,156 @@ static void drain_midi(void)
     }
 }
 
+typedef struct {
+    float *samples;
+    drwav_uint64 frames, position;
+    unsigned channels, rate;
+    double fraction;
+} Track;
+
+static Track playing, queued;
+static CRITICAL_SECTION queueLock;
+static int playlistMode, queueReady, queueStalled;
+static char audioFiles[QUEUE_FILES][MAX_PATH];
+static int audioFileCount, audioFileNext;
+
+static int compare_names(const void *a, const void *b)
+{
+    return _stricmp(a, b);
+}
+
+static int scan_audio_files(const char *folder)
+{
+    char pattern[MAX_PATH + 4];
+    snprintf(pattern, sizeof pattern, "%s\\*", folder);
+
+    WIN32_FIND_DATAA entry;
+    HANDLE find = FindFirstFileA(pattern, &entry);
+    if (find == INVALID_HANDLE_VALUE) return -1;
+
+    do {
+        const char *extension = strrchr(entry.cFileName, '.');
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !extension) continue;
+        if (_stricmp(extension, ".wav") || audioFileCount == QUEUE_FILES) continue;
+        snprintf(audioFiles[audioFileCount++], MAX_PATH, "%s\\%s", folder, entry.cFileName);
+    } while (FindNextFileA(find, &entry));
+    FindClose(find);
+
+    qsort(audioFiles, (size_t)audioFileCount, MAX_PATH, compare_names);
+    return audioFileCount;
+}
+
+static int decode_track(Track *track, const char *path)
+{
+    unsigned channels = 0, rate = 0;
+    drwav_uint64 frames = 0;
+    float *samples = drwav_open_file_and_read_pcm_frames_f32(path, &channels, &rate, &frames, NULL);
+    if (!samples || !channels || !rate || !frames) {
+        drwav_free(samples, NULL);
+        log_error("Could not decode '%s'.\n", path);
+        return -1;
+    }
+
+    memset(track, 0, sizeof *track);
+    track->samples = samples;
+    track->frames = frames;
+    track->channels = channels;
+    track->rate = rate;
+    return 0;
+}
+
+/* Decodes the next queued file on the main thread; the ASIO callback only ever
+   picks up a track that is already decoded. */
+static void queue_next_track(void)
+{
+    if (queueStalled || !audioFileCount) return;
+
+    EnterCriticalSection(&queueLock);
+    int needed = !queueReady;
+    LeaveCriticalSection(&queueLock);
+    if (!needed) return;
+
+    for (int remaining = audioFileCount; remaining > 0; remaining--) {
+        Track track;
+        int loaded = decode_track(&track, audioFiles[audioFileNext]);
+        audioFileNext = (audioFileNext + 1) % audioFileCount;
+        if (loaded != 0) {
+            if (remaining == 1) {
+                log_error("Every audio file in the queue failed to decode.\n");
+                queueStalled = 1;
+            }
+            continue;
+        }
+
+        EnterCriticalSection(&queueLock);
+        queued = track;
+        queueReady = 1;
+        LeaveCriticalSection(&queueLock);
+        return;
+    }
+}
+
+static int start_playlist(const char *folder)
+{
+    if (scan_audio_files(folder) <= 0) {
+        log_error("Could not find any .wav files in '%s'.\n", folder);
+        return -1;
+    }
+
+    InitializeCriticalSection(&queueLock);
+    queue_next_track();
+    if (!queueReady) return -1;
+
+    playing = queued;
+    queueReady = 0;
+    return 0;
+}
+
+static void take_queued_track(void)
+{
+    if (!TryEnterCriticalSection(&queueLock)) return;
+    if (queueReady) {
+        playing = queued;
+        queueReady = 0;
+    }
+    LeaveCriticalSection(&queueLock);
+}
+
+static float track_sample(int output)
+{
+    if (!playing.samples) return 0.0f;
+
+    size_t channel = (size_t)output % playing.channels;
+    drwav_uint64 next = playing.position + 1 < playing.frames ? playing.position + 1 : playing.position;
+    const float *a = playing.samples + (size_t)playing.position * playing.channels + channel;
+    const float *b = playing.samples + (size_t)next * playing.channels + channel;
+    return *a + (*b - *a) * (float)playing.fraction;
+}
+
+static void advance_track(void)
+{
+    if (playing.samples) {
+        playing.fraction += (double)playing.rate / g.rate;
+        drwav_uint64 whole = (drwav_uint64)playing.fraction;
+        playing.fraction -= (double)whole;
+        playing.position += whole;
+        if (playing.position < playing.frames) return;
+
+        drwav_free(playing.samples, NULL);
+        memset(&playing, 0, sizeof playing);
+    }
+    take_queued_track();
+}
+
+static void render_playlist(float *dst, int outputs, int frames)
+{
+    for (int i = 0; i < frames; i++) {
+        for (int j = 0; j < outputs; j++)
+            dst[(size_t)j * frames + i] = track_sample(j);
+        advance_track();
+    }
+}
+
 static void process_buffer(int32_t index)
 {
     const int frames = (int)g.bufferSize;
@@ -305,13 +458,17 @@ static void process_buffer(int32_t index)
         synth_render(g.synthFloats, frames);
     }
 
+    if (g.fileFloats) render_playlist(g.fileFloats, g.nOut, frames);
+
     for (int j = 0; j < g.nOut; j++) {
         int source = g.nIn ? j % g.nIn : -1;
         const float *input = source >= 0 ? g.inputFloats + (size_t)source * frames : NULL;
+        const float *music = g.fileFloats ? g.fileFloats + (size_t)j * frames : NULL;
         void *output = g.bufferInfo[g.nIn + j].buffers[index];
 
         for (int i = 0; i < frames; i++) {
             float value = (input ? input[i] * gain : 0.0f) + g.synthFloats[i] * synthGain;
+            if (music) value += music[i];
             g.mixFloats[i] = value > 1.0f ? 1.0f : value < -1.0f ? -1.0f : value;
         }
         sample_from_float(g.mixFloats, output, g.outFormat[j], frames);
@@ -665,9 +822,10 @@ static SampleFormat channel_format(int channel, ASIOBool isInput)
 static void free_buffers(void)
 {
     free(g.inputFloats);
+    free(g.fileFloats);
     free(g.synthFloats);
     free(g.mixFloats);
-    g.inputFloats = g.synthFloats = g.mixFloats = NULL;
+    g.inputFloats = g.fileFloats = g.synthFloats = g.mixFloats = NULL;
 }
 
 static int create_buffers(void)
@@ -684,9 +842,11 @@ static int create_buffers(void)
     size_t frames = (size_t)g.bufferSize;
     free_buffers();
     g.inputFloats = g.nIn ? malloc(frames * g.nIn * sizeof(float)) : NULL;
+    g.fileFloats = playlistMode ? malloc(frames * g.nOut * sizeof(float)) : NULL;
     g.synthFloats = malloc(frames * sizeof(float));
     g.mixFloats = malloc(frames * sizeof(float));
-    if ((g.nIn && !g.inputFloats) || !g.synthFloats || !g.mixFloats) {
+    if ((g.nIn && !g.inputFloats) || (playlistMode && !g.fileFloats) ||
+        !g.synthFloats || !g.mixFloats) {
         log_error("Out of memory for %d-frame buffers.\n", g.bufferSize);
         free_buffers();
         return -1;
@@ -868,6 +1028,8 @@ static void shutdown_monitor(void)
         g.asio = NULL;
     }
     free_buffers();
+    drwav_free(playing.samples, NULL);
+    drwav_free(queued.samples, NULL);
 }
 
 static int stream_midi(const char *device, int channel)
@@ -954,16 +1116,16 @@ static int load_settings(const char *path, Options *options)
     fclose(file);
     text[length] = 0;
 
-    const char *device = json_value(text, "device");
-    const char *end = device && *device == '"' ? strchr(device + 1, '"') : NULL;
-    if (!end || end == device + 1 || (size_t)(end - device - 1) >= sizeof options->device) {
-        log_error("Settings '%s' need a \"device\" string.\n", path);
+    const char *instrument = json_value(text, "instrument");
+    const char *end = instrument && *instrument == '"' ? strchr(instrument + 1, '"') : NULL;
+    if (!end || end == instrument + 1 || (size_t)(end - instrument - 1) >= sizeof options->instrument) {
+        log_error("Settings '%s' need an \"instrument\" string.\n", path);
         return -1;
     }
 
-    size_t deviceLength = (size_t)(end - device - 1);
-    memcpy(options->device, device + 1, deviceLength);
-    options->device[deviceLength] = 0;
+    size_t instrumentLength = (size_t)(end - instrument - 1);
+    memcpy(options->instrument, instrument + 1, instrumentLength);
+    options->instrument[instrumentLength] = 0;
 
     const char *channel = json_value(text, "input-channel");
     char *stop = NULL;
@@ -1072,16 +1234,20 @@ static int run(int argc, char **argv)
     char names[64][128];
     int driverCount = list_drivers(names, 64);
 
-    if (options.device[0]) {
-        if (resolve_driver(options.device, names, driverCount)) {
-            if (!options.driver) options.driver = options.device;
-        } else if (resolve_midi_in(options.device) >= 0) {
-            int result = stream_midi(options.device, options.inputChannel);
+    if (options.instrument[0]) {
+        DWORD attributes = GetFileAttributesA(options.instrument);
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            playlistMode = 1;
+            if (start_playlist(options.instrument) != 0) return 1;
+        } else if (resolve_driver(options.instrument, names, driverCount)) {
+            if (!options.driver) options.driver = options.instrument;
+        } else if (resolve_midi_in(options.instrument) >= 0) {
+            int result = stream_midi(options.instrument, options.inputChannel);
             printf("\n");
             return result;
         } else {
-            log_error("Device '%s' is neither an installed ASIO driver nor a MIDI input.\n",
-                      options.device);
+            log_error("Instrument '%s' is neither a folder of wav files, an installed ASIO driver "
+                      "nor a MIDI input.\n", options.instrument);
             list_devices();
             return 1;
         }
@@ -1127,7 +1293,9 @@ static int run(int argc, char **argv)
     printf("\n");
     log_trace("channels listed\n");
 
-    if (options.inputChannel > 0 && !options.in) {
+    if (playlistMode) {
+        if (select_channels(options.in, g.inCount, g.inCh, &g.nIn, 0, "input") != 0) goto done;
+    } else if (options.inputChannel > 0 && !options.in) {
         if (options.inputChannel > g.inCount) {
             log_error("input-channel %d is out of range (the driver has %d inputs).\n",
                       options.inputChannel, g.inCount);
@@ -1144,7 +1312,7 @@ static int run(int argc, char **argv)
         log_error("At least one output channel is required.\n");
         goto done;
     }
-    if (g.nIn == 0 && !options.midiIn) {
+    if (g.nIn == 0 && !options.midiIn && !playlistMode) {
         log_error("No input channels and no MIDI input, so there is nothing to play.\n");
         goto done;
     }
@@ -1165,6 +1333,7 @@ static int run(int argc, char **argv)
     printf(" -> out ");
     print_selection(g.outCh, g.nOut);
     printf(", gain %+.1f dB\n", g.gainDb);
+    if (playlistMode) printf("  %d wav files queued from %s\n", audioFileCount, options.instrument);
 
     if (g.midiInIndex >= 0) {
         MIDIINCAPS caps;
@@ -1189,6 +1358,7 @@ static int run(int argc, char **argv)
     ULONGLONG lastDraw = 0;
     while (!g.quit) {
         pump_messages();
+        queue_next_track();
 
         if (InterlockedExchange(&g.reset, 0)) {
             log_line("driver settings changed, reconfiguring");
