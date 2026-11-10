@@ -491,6 +491,204 @@ static float track_sample(const Track *track, int output)
     return *a + (*b - *a) * (float)track->fraction;
 }
 
+/* Loop cues travel through one shared section: the stems instance stamps the
+   performance counter and bumps the sequence, every other instance polls it. */
+
+typedef struct {
+    volatile LONG seq;
+    volatile LONGLONG qpc;
+} LoopCue;
+
+static HANDLE cueMapping;
+static LoopCue *cue;
+
+typedef struct TakeChunk {
+    struct TakeChunk *next;
+    size_t frames;
+    float *samples;
+} TakeChunk;
+
+typedef struct {
+    int active, channels;
+    unsigned rate;
+    TakeChunk *first, *last;
+    drwav_uint64 frames;
+    ULONGLONG origin;
+    SYSTEMTIME at;
+    LONG seen;
+    double *passMs;
+    int passCount, passCapacity;
+} Take;
+
+static Take take;
+
+static void open_cue(void)
+{
+    if (cueMapping) return;
+    cueMapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(LoopCue),
+                                    "Local\\RestlessVirtuosoLoopCue");
+    cue = cueMapping ? MapViewOfFile(cueMapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(LoopCue)) : NULL;
+    if (cue) take.seen = InterlockedCompareExchange(&cue->seq, 0, 0);
+}
+
+static void send_loop_start(void)
+{
+    open_cue();
+    if (!cue) return;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    cue->qpc = now.QuadPart;
+    take.seen = InterlockedIncrement(&cue->seq);
+}
+
+static void add_pass(double milliseconds)
+{
+    if (take.passCount == take.passCapacity) {
+        int capacity = take.passCapacity ? take.passCapacity * 2 : 64;
+        double *grown = realloc(take.passMs, (size_t)capacity * sizeof *grown);
+        if (!grown) return;
+        take.passMs = grown;
+        take.passCapacity = capacity;
+    }
+    take.passMs[take.passCount++] = milliseconds;
+}
+
+static void check_loop_cue(void)
+{
+    open_cue();
+    if (!cue) return;
+
+    LONG seen = InterlockedCompareExchange(&cue->seq, 0, 0);
+    if (seen == take.seen) return;
+
+    LONGLONG qpc = cue->qpc;
+    if (InterlockedCompareExchange(&cue->seq, 0, 0) != seen) return;
+
+    take.seen = seen;
+    if (!take.passCount) {
+        take.origin = (ULONGLONG)qpc;
+        take.channels = g.nOut;
+        take.rate = (unsigned)g.rate;
+        GetLocalTime(&take.at);
+    }
+
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    add_pass((double)(LONGLONG)((ULONGLONG)qpc - take.origin) * 1000.0 / (double)frequency.QuadPart);
+    take.active = take.channels > 0 && take.rate > 0;
+}
+
+#define TAKE_CHUNK (1u << 20)
+
+static void take_buffer(int frames)
+{
+    if (!take.active) return;
+    if (take.last && take.last->frames + (size_t)frames <= TAKE_CHUNK) return;
+
+    TakeChunk *chunk = malloc(sizeof *chunk);
+    float *samples = malloc((size_t)TAKE_CHUNK * (size_t)take.channels * sizeof *samples);
+    if (!chunk || !samples) {
+        free(chunk);
+        free(samples);
+        take.active = 0;
+        return;
+    }
+
+    chunk->next = NULL;
+    chunk->frames = 0;
+    chunk->samples = samples;
+    if (take.last) take.last->next = chunk;
+    else take.first = chunk;
+    take.last = chunk;
+}
+
+static void take_channel(const float *samples, int channel, int frames)
+{
+    float *chunk = take.last->samples;
+    for (int i = 0; i < frames; i++)
+        chunk[(take.last->frames + (size_t)i) * (size_t)take.channels + (size_t)channel] = samples[i];
+}
+
+static int module_folder(char *folder, size_t size)
+{
+    char module[MAX_PATH];
+    DWORD length = GetModuleFileNameA(NULL, module, MAX_PATH);
+    if (!length || length >= MAX_PATH) return -1;
+
+    char *slash = strrchr(module, '\\');
+    if (!slash) return -1;
+
+    size_t folderLength = (size_t)(slash - module) + 1;
+    if (folderLength >= size) return -1;
+    memcpy(folder, module, folderLength);
+    folder[folderLength] = 0;
+    return 0;
+}
+
+static void write_take(void)
+{
+    if (!take.frames) return;
+
+    char folder[MAX_PATH];
+    if (module_folder(folder, sizeof folder) != 0) return;
+
+    SYSTEMTIME at = take.at;
+
+    char stamp[40], suffix[8] = "", wavPath[MAX_PATH + 64], passesPath[MAX_PATH + 64];
+    snprintf(stamp, sizeof stamp, "%04d-%02d-%02d-%02d-%02d-%02d",
+             at.wYear, at.wMonth, at.wDay, at.wHour, at.wMinute, at.wSecond);
+    for (int attempt = 1; attempt < 100; attempt++) {
+        if (attempt > 1) snprintf(suffix, sizeof suffix, "-%d", attempt);
+        snprintf(wavPath, sizeof wavPath, "%spalette_%s%s.wav", folder, stamp, suffix);
+        if (GetFileAttributesA(wavPath) == INVALID_FILE_ATTRIBUTES) break;
+    }
+    snprintf(passesPath, sizeof passesPath, "%spasses_%s%s.txt", folder, stamp, suffix);
+
+    drwav_data_format format;
+    memset(&format, 0, sizeof format);
+    format.container = drwav_container_riff;
+    format.format = DR_WAVE_FORMAT_PCM;
+    format.channels = (drwav_uint32)take.channels;
+    format.sampleRate = take.rate;
+    format.bitsPerSample = 16;
+
+    drwav wav;
+    if (!drwav_init_file_write(&wav, wavPath, &format, NULL)) {
+        log_error("Could not write '%s'.\n", wavPath);
+        return;
+    }
+
+    drwav_int16 *block = malloc((size_t)TAKE_CHUNK * (size_t)take.channels * sizeof *block);
+    for (TakeChunk *chunk = take.first; block && chunk; chunk = chunk->next) {
+        drwav_f32_to_s16(block, chunk->samples, chunk->frames * (size_t)take.channels);
+        drwav_write_pcm_frames(&wav, chunk->frames, block);
+    }
+    free(block);
+    drwav_uninit(&wav);
+
+    FILE *file = fopen(passesPath, "w");
+    if (!file) {
+        log_error("Could not write '%s'.\n", passesPath);
+        return;
+    }
+    for (int i = 0; i < take.passCount; i++)
+        fprintf(file, "%d, %.6f 1.;\n", i, take.passMs[i]);
+    fclose(file);
+    log_trace("wrote %s and %s\n", wavPath, passesPath);
+
+    for (TakeChunk *chunk = take.first; chunk;) {
+        TakeChunk *next = chunk->next;
+        free(chunk->samples);
+        free(chunk);
+        chunk = next;
+    }
+    free(take.passMs);
+    take.first = take.last = NULL;
+    take.passMs = NULL;
+    take.passCount = 0;
+}
+
 static void advance_tracks(void)
 {
     int finished = 1;
@@ -510,6 +708,7 @@ static void advance_tracks(void)
         stems[i].position = 0;
         stems[i].fraction = 0;
     }
+    send_loop_start();
 }
 
 static void render_playlist(float *dst, int outputs, int frames)
@@ -964,6 +1163,9 @@ static void process_buffer(int32_t index)
     const int frames = (int)g.bufferSize;
     const float volume = g.volume;
 
+    check_loop_cue();
+    take_buffer(frames);
+
     for (int c = 0; c < g.nIn; c++) {
         float *samples = g.inputFloats + (size_t)c * frames;
         sample_to_float(g.bufferInfo[c].buffers[index], g.inFormat[c], samples, frames);
@@ -997,6 +1199,12 @@ static void process_buffer(int32_t index)
             g.mixFloats[i] = value > 1.0f ? 1.0f : value < -1.0f ? -1.0f : value;
         }
         sample_from_float(g.mixFloats, output, g.outFormat[j], frames);
+        if (take.active) take_channel(g.mixFloats, j, frames);
+    }
+
+    if (take.active) {
+        take.last->frames += (size_t)frames;
+        take.frames += (drwav_uint64)frames;
     }
 }
 
@@ -1651,6 +1859,7 @@ static void shutdown_monitor(void)
         g.asio->vtable->Release(g.asio);
         g.asio = NULL;
     }
+    write_take();
     if (deviceEnumerator) {
         (*(EnumeratorVtbl **)deviceEnumerator)->Release(deviceEnumerator);
         deviceEnumerator = NULL;
@@ -2004,6 +2213,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
             printf("  MIDI thru -> %d (%s)\n", g.midiOutIndex, caps.szPname);
     }
 
+    open_cue();
     if (g.asio->vtable->start(g.asio) != ASE_OK) {
         log_error("ASIOStart failed.\n");
         goto done;
