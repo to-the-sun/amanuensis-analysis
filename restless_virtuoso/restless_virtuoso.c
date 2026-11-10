@@ -1306,6 +1306,74 @@ static int create_buffers(void)
     return 0;
 }
 
+static const char *midi_error_text(MMRESULT result)
+{
+    static char text[256];
+    if (midiInGetErrorTextA(result, text, sizeof text) == MMSYSERR_NOERROR) return text;
+
+    switch (result) {
+    case MMSYSERR_ALLOCATED: return "the device is already in use";
+    case MMSYSERR_BADDEVICEID: return "invalid device index";
+    case MMSYSERR_NODRIVER: return "the device driver is not installed";
+    case MMSYSERR_NOTENABLED: return "the device driver is disabled";
+    case MMSYSERR_INVALPARAM: return "invalid parameter";
+    default: return "unknown MIDI error";
+    }
+}
+
+static const char *midi_error_hint(MMRESULT result)
+{
+    switch (result) {
+    case MMSYSERR_ALLOCATED: return "another program is using the device; close it and retry";
+    case MMSYSERR_NODRIVER: return "the driver failed to load; reconnect the device or restart Windows";
+    case MMSYSERR_NOTENABLED: return "the driver is disabled in Device Manager";
+    case MMSYSERR_BADDEVICEID: return "the device index is out of date; the device list changed";
+    case MMSYSERR_INVALPARAM: return "the device vanished after it was listed; reconnect it";
+    case MMSYSERR_NOMEM: return "the port could not be allocated; another program may hold it, or the device is stuck";
+    case MMSYSERR_NOTSUPPORTED: return "the driver rejects this open mode";
+    default: return "the code above is the only detail Windows reports";
+    }
+}
+
+static const char *midi_in_label(int index, char *label, size_t size)
+{
+    MIDIINCAPS caps;
+    label[0] = 0;
+    if (midiInGetDevCaps((UINT)index, &caps, sizeof caps) == MMSYSERR_NOERROR)
+        snprintf(label, size, " (%s)", caps.szPname);
+    return label;
+}
+
+static void diagnose_midi_input(int index, MMRESULT failure)
+{
+    UINT count = midiInGetNumDevs();
+    log_error("  %u MIDI inputs are listed now\n", count);
+
+    if ((UINT)index >= count)
+        log_error("  input %d is no longer listed; it was removed after the device list was read\n", index);
+    else {
+        MIDIINCAPS caps;
+        if (midiInGetDevCaps((UINT)index, &caps, sizeof caps) != MMSYSERR_NOERROR)
+            log_error("  input %d no longer reports any details\n", index);
+        else
+            log_error("  input %d is '%s', driver %u.%u, manufacturer 0x%04x, product 0x%04x\n",
+                      index, caps.szPname, (unsigned)(caps.vDriverVersion >> 8),
+                      (unsigned)(caps.vDriverVersion & 0xff), (unsigned)caps.wMid, (unsigned)caps.wPid);
+    }
+
+    if (failure == MMSYSERR_NODRIVER || failure == MMSYSERR_NOTENABLED) return;
+    if ((UINT)index >= count) return;
+
+    HMIDIIN probe = NULL;
+    MMRESULT result = midiInOpen(&probe, (UINT)index, 0, 0, CALLBACK_NULL);
+    if (result == MMSYSERR_NOERROR) {
+        midiInClose(probe);
+        log_error("  it opens without a callback, so the driver is rejecting callback mode\n");
+    } else
+        log_error("  it also fails to open without a callback: %s (error %u)\n",
+                  midi_error_text(result), (unsigned)result);
+}
+
 static int resolve_midi_in(const char *argument)
 {
     UINT count = midiInGetNumDevs();
@@ -1343,12 +1411,35 @@ static int open_midi_input(const char *spec)
         log_error("MIDI input '%s' not found (use --list).\n", spec);
         return -1;
     }
-    if (midiInOpen(&g.midiIn, (UINT)index, (DWORD_PTR)midi_in_proc, 0, CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
-        log_error("Could not open MIDI input %d.\n", index);
+
+    char label[128];
+    midi_in_label(index, label, sizeof label);
+
+    MMRESULT result = MMSYSERR_NOERROR;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        g.midiIn = NULL;
+        result = midiInOpen(&g.midiIn, (UINT)index, (DWORD_PTR)midi_in_proc, 0, CALLBACK_FUNCTION);
+        if (result == MMSYSERR_NOERROR) break;
+        log_error("MIDI input %d%s failed to open on attempt %d: %s (error %u).\n",
+                  index, label, attempt, midi_error_text(result), (unsigned)result);
+        Sleep(250);
+    }
+    if (result != MMSYSERR_NOERROR) {
+        log_error("  likely cause: %s\n", midi_error_hint(result));
+        diagnose_midi_input(index, result);
+        return -1;
+    }
+
+    result = midiInStart(g.midiIn);
+    if (result != MMSYSERR_NOERROR) {
+        log_error("MIDI input %d%s opened but failed to start: %s (error %u).\n",
+                  index, label, midi_error_text(result), (unsigned)result);
+        log_error("  likely cause: %s\n", midi_error_hint(result));
+        midiInClose(g.midiIn);
+        g.midiIn = NULL;
         return -1;
     }
     g.midiInIndex = index;
-    midiInStart(g.midiIn);
     return 0;
 }
 
@@ -1359,8 +1450,17 @@ static int open_midi_output(const char *spec)
         log_error("MIDI output '%s' not found (use --list).\n", spec);
         return -1;
     }
-    if (midiOutOpen(&g.midiOut, (UINT)index, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        log_error("Could not open MIDI output %d.\n", index);
+
+    MIDIOUTCAPS caps;
+    char label[128] = "";
+    if (midiOutGetDevCaps((UINT)index, &caps, sizeof caps) == MMSYSERR_NOERROR)
+        snprintf(label, sizeof label, " (%s)", caps.szPname);
+
+    MMRESULT result = midiOutOpen(&g.midiOut, (UINT)index, 0, 0, CALLBACK_NULL);
+    if (result != MMSYSERR_NOERROR) {
+        log_error("Could not open MIDI output %d%s: %s (error %u).\n",
+                  index, label, midi_error_text(result), (unsigned)result);
+        log_error("  likely cause: %s\n", midi_error_hint(result));
         return -1;
     }
     g.midiOutIndex = index;
@@ -1380,7 +1480,9 @@ static void list_devices(void)
     UINT inputs = midiInGetNumDevs();
     for (UINT i = 0; i < inputs; i++) {
         MIDIINCAPS caps;
-        if (midiInGetDevCaps(i, &caps, sizeof caps) == MMSYSERR_NOERROR) printf("  %u  %s\n", i, caps.szPname);
+        MMRESULT result = midiInGetDevCaps(i, &caps, sizeof caps);
+        if (result == MMSYSERR_NOERROR) printf("  %u  %s\n", i, caps.szPname);
+        else printf("  %u  (no details: %s)\n", i, midi_error_text(result));
     }
     if (!inputs) printf("  (none)\n");
 }
