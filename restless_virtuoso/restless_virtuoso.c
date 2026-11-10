@@ -35,7 +35,7 @@ typedef struct {
     const char *driver, *in, *out, *midiIn, *midiOut;
     char instrument[MAX_PATH], samplesPath[MAX_PATH], vstsPath[MAX_PATH];
     double gainDb;
-    int rate, buffer, synth, list, inputChannel;
+    int rate, buffer, synth, list, inputChannel, samplesRatio;
 } Options;
 
 typedef struct {
@@ -57,7 +57,7 @@ typedef struct {
     HMIDIOUT midiOut;
     int midiInIndex, midiOutIndex;
     int midiChannel, midiStream;
-    int synthEnabled;
+    int synthEnabled, samplesSound;
     int buffersCreated, started;
 
     volatile LONG quit, mute, reset;
@@ -825,11 +825,16 @@ static void render_vst(float *dst, int outputs, int frames)
     }
 }
 
+static void choose_sound(int samplesRatio)
+{
+    g.samplesSound = drumSampleCount && (!vstEffect || rand() % 100 < samplesRatio);
+}
+
 static void render_instruments(float *dst, int outputs, int frames)
 {
     memset(dst, 0, (size_t)outputs * frames * sizeof *dst);
-    render_drums(dst, outputs, frames);
-    render_vst(dst, outputs, frames);
+    if (g.samplesSound) render_drums(dst, outputs, frames);
+    else render_vst(dst, outputs, frames);
 }
 
 static void close_vst(void)
@@ -1671,6 +1676,8 @@ static int load_settings(const char *path, Options *options)
     }
     json_string(text, "samples_path", options->samplesPath, sizeof options->samplesPath);
     json_string(text, "vsts_path", options->vstsPath, sizeof options->vstsPath);
+    const char *ratio = json_value(text, "samples_ratio");
+    options->samplesRatio = ratio ? atoi(ratio) : 50;
 
     const char *channel = json_value(text, "input-channel");
     char *stop = NULL;
@@ -1884,6 +1891,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     if (instrumentMode) {
         if (options.samplesPath[0]) load_drums(options.samplesPath);
         if (options.vstsPath[0]) load_vsts(options.vstsPath);
+        choose_sound(options.samplesRatio);
     }
     log_trace("rate and buffer set\n");
     if (create_buffers() != 0) goto done;
@@ -1901,8 +1909,8 @@ static int run(int argc, char **argv, const wchar_t *folder)
         print_wide_path(playlistFolder);
         printf("\n");
     }
-    if (drumSampleCount) printf("  %d drum samples\n", drumSampleCount);
-    if (vstEffect) {
+    if (g.samplesSound) printf("  %d drum samples\n", drumSampleCount);
+    else if (vstEffect) {
         char name[64] = "";
         vstEffect->dispatcher(vstEffect, effGetEffectName, 0, 0, name, 0);
         name[63] = 0;
