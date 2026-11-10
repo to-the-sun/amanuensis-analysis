@@ -9,7 +9,6 @@
 #include <mmsystem.h>
 #include <objbase.h>
 #include <shellapi.h>
-#include <conio.h>
 
 #include <math.h>
 #include <stdarg.h>
@@ -60,9 +59,8 @@ typedef struct {
     int synthEnabled, samplesSound, samplesRatio;
     int buffersCreated, started;
 
-    volatile LONG quit, mute, reset;
+    volatile LONG quit, reset;
     volatile float gain, volume, peak[MAX_SELECTED];
-    float gainDb;
     int lineWidth;
 } Monitor;
 
@@ -965,8 +963,7 @@ static float read_master_volume(void)
 static void process_buffer(int32_t index)
 {
     const int frames = (int)g.bufferSize;
-    const float gain = g.mute ? 0.0f : g.gain;
-    const float synthGain = g.mute ? 0.0f : 1.0f;
+    const float gain = g.gain;
     const float volume = g.volume;
 
     for (int c = 0; c < g.nIn; c++) {
@@ -996,7 +993,7 @@ static void process_buffer(int32_t index)
         void *output = g.bufferInfo[g.nIn + j].buffers[index];
 
         for (int i = 0; i < frames; i++) {
-            float value = (input ? input[i] * gain : 0.0f) + g.synthFloats[i] * synthGain;
+            float value = (input ? input[i] * gain : 0.0f) + g.synthFloats[i];
             if (music) value += music[i];
             value *= volume;
             g.mixFloats[i] = value > 1.0f ? 1.0f : value < -1.0f ? -1.0f : value;
@@ -1550,14 +1547,6 @@ static void list_devices(void)
     if (!inputs) printf("  (none)\n");
 }
 
-static void adjust_gain(float delta)
-{
-    g.gainDb += delta;
-    if (g.gainDb < -60.0f) g.gainDb = -60.0f;
-    if (g.gainDb > 24.0f) g.gainDb = 24.0f;
-    g.gain = powf(10.0f, g.gainDb / 20.0f);
-}
-
 static HANDLE consoleInput;
 static DWORD consoleMode;
 static int consoleModeSet;
@@ -1598,24 +1587,13 @@ static void read_console_input(void)
         if (!ReadConsoleInputA(consoleInput, records, wanted, &read) || !read) return;
 
         for (DWORD i = 0; i < read; i++) {
-            INPUT_RECORD *record = &records[i];
-            if (record->EventType == KEY_EVENT) {
-                KEY_EVENT_RECORD *key = &record->Event.KeyEvent;
-                if (!key->bKeyDown) continue;
-                int character = key->uChar.AsciiChar;
-                if (character == 'q' || character == 'Q' || character == 27) InterlockedExchange(&g.quit, 1);
-                else if (character == 'm' || character == 'M') InterlockedExchange(&g.mute, !g.mute);
-                else if (character == '+' || character == '=') adjust_gain(1.0f);
-                else if (character == '-' || character == '_') adjust_gain(-1.0f);
-                else if (character == 'p' || character == 'P') g.asio->vtable->controlPanel(g.asio);
-            } else if (record->EventType == MOUSE_EVENT && instrumentMode) {
-                MOUSE_EVENT_RECORD *mouse = &record->Event.MouseEvent;
-                if (mouse->dwEventFlags || !(mouse->dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED)) continue;
-                if (mouse->dwMousePosition.X < soundButton.X || mouse->dwMousePosition.X > soundButton.X + 12 ||
-                    mouse->dwMousePosition.Y < soundButton.Y || mouse->dwMousePosition.Y > soundButton.Y + 2)
-                    continue;
-                new_sound();
-            }
+            if (records[i].EventType != MOUSE_EVENT || !instrumentMode) continue;
+            MOUSE_EVENT_RECORD *mouse = &records[i].Event.MouseEvent;
+            if (mouse->dwEventFlags || !(mouse->dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED)) continue;
+            if (mouse->dwMousePosition.X < soundButton.X || mouse->dwMousePosition.X > soundButton.X + 12 ||
+                mouse->dwMousePosition.Y < soundButton.Y || mouse->dwMousePosition.Y > soundButton.Y + 2)
+                continue;
+            new_sound();
         }
     }
 }
@@ -1623,7 +1601,8 @@ static void read_console_input(void)
 static void draw_meters(void)
 {
     char line[512];
-    int length = snprintf(line, sizeof line, "%s", g.mute ? "MUTED  " : "");
+    int length = 0;
+    line[0] = 0;
     int shown = g.nIn < MAX_METERS ? g.nIn : MAX_METERS;
 
     for (int c = 0; c < shown; c++) {
@@ -1701,13 +1680,7 @@ static int stream_midi(const char *device, int channel)
     if (channel) printf("streaming MIDI input '%s', channel %d\n", device, channel);
     else printf("streaming MIDI input '%s', all channels\n", device);
 
-    while (!g.quit) {
-        while (_kbhit()) {
-            int key = _getch();
-            if (key == 'q' || key == 'Q' || key == 27) InterlockedExchange(&g.quit, 1);
-        }
-        Sleep(5);
-    }
+    while (!g.quit) Sleep(5);
 
     shutdown_monitor();
     return 0;
@@ -1733,9 +1706,7 @@ static void usage(void)
         "      --midi-out DEVICE    forward MIDI input to this MIDI output\n"
         "      --no-synth           disable the built-in sine synth for MIDI input\n"
         "  -l, --list               list ASIO drivers and MIDI devices\n"
-        "  -h, --help               show this help\n"
-        "\n"
-        "While running: m mute, +/- gain, p ASIO control panel, q quit.\n");
+        "  -h, --help               show this help\n");
 }
 
 static int is_json_path(const char *path)
@@ -1892,7 +1863,6 @@ static int run(int argc, char **argv, const wchar_t *folder)
 
     memset(&g, 0, sizeof g);
     g.gain = (float)pow(10.0, options.gainDb / 20.0);
-    g.gainDb = (float)options.gainDb;
     g.volume = 1.0f;
     g.synthEnabled = options.synth;
     g.samplesRatio = options.samplesRatio;
@@ -2054,7 +2024,6 @@ static int run(int argc, char **argv, const wchar_t *folder)
 
     init_console_input();
     if (instrumentMode) draw_sound_button();
-    printf("m mute  +/- gain  p control panel  q quit\n");
 
     ULONGLONG lastDraw = 0;
     while (!g.quit) {
