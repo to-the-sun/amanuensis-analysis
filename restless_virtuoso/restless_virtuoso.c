@@ -583,6 +583,7 @@ static void publish_palette(const wchar_t *stems)
 
     wmemcpy(cue->folder, stems, length);
     wcscpy(cue->folder + length, L"[palettes]\\");
+    cue->elapsed = 0;
     cue->pid = GetCurrentProcessId();
 }
 
@@ -625,6 +626,29 @@ static void check_loop_cue(void)
     double ms = (double)(LONGLONG)((ULONGLONG)qpc - take.origin) * 1000.0 / (double)frequency.QuadPart;
     add_pass(take.passCount ? ms : -(double)cue->elapsed);
     take.active = take.rate > 0;
+}
+
+static void take_join(void)
+{
+    if (playlistMode || take.active || !cue || !cue->pid || !cue->folder[0]) return;
+
+    HANDLE palette = OpenProcess(SYNCHRONIZE, FALSE, cue->pid);
+    if (palette && WaitForSingleObject(palette, 0) == WAIT_OBJECT_0) {
+        CloseHandle(palette);
+        return;
+    }
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    take.active = 1;
+    take.rate = (unsigned)g.rate;
+    take.palette = palette;
+    take.origin = (ULONGLONG)now.QuadPart;
+    GetLocalTime(&take.at);
+    wcsncpy(take.folder, cue->folder, 1023);
+    take.folder[1023] = 0;
+    add_pass(-(double)cue->elapsed);
 }
 
 #define TAKE_CHUNK (1u << 20)
@@ -2283,6 +2307,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
 
     if (playlistMode) publish_palette(playlistFolder);
     open_cue();
+    take_join();
     if (g.asio->vtable->start(g.asio) != ASE_OK) {
         log_error("ASIOStart failed.\n");
         goto done;
@@ -2302,6 +2327,13 @@ static int run(int argc, char **argv, const wchar_t *folder)
     ULONGLONG lastDraw = 0;
     while (!g.quit) {
         pump_messages();
+
+        if (playlistMode && cue) {
+            LARGE_INTEGER at, frequency;
+            QueryPerformanceCounter(&at);
+            QueryPerformanceFrequency(&frequency);
+            cue->elapsed = (LONG)((at.QuadPart - (LONGLONG)playStart) * 1000 / frequency.QuadPart);
+        }
 
         if (InterlockedExchange(&g.reset, 0)) {
             log_line("driver settings changed, reconfiguring");
