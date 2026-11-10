@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "asio_abi.h"
 #include "dsp.h"
@@ -290,46 +291,108 @@ typedef struct {
     double fraction;
 } Track;
 
+static wchar_t *long_path(const wchar_t *path)
+{
+    if (!wcsncmp(path, L"\\\\?\\", 4)) {
+        size_t size = (wcslen(path) + 1) * sizeof(wchar_t);
+        wchar_t *copy = malloc(size);
+        if (copy) memcpy(copy, path, size);
+        return copy;
+    }
+
+    wchar_t full[32768];
+    size_t length = wcslen(path);
+    int drive = length >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/');
+    int unc = length >= 2 && path[0] == L'\\' && path[1] == L'\\';
+    const wchar_t *source = path;
+
+    if (!drive && !unc) {
+        DWORD result = GetFullPathNameW(path, 32768, full, NULL);
+        if (!result || result >= 32768) return NULL;
+        source = full;
+        unc = full[0] == L'\\' && full[1] == L'\\';
+    }
+
+    length = wcslen(source);
+    wchar_t *result = malloc((length + (unc ? 7 : 5)) * sizeof(wchar_t));
+    if (!result) return NULL;
+    if (unc) swprintf(result, length + 7, L"\\\\?\\UNC\\%ls", source + 2);
+    else swprintf(result, length + 5, L"\\\\?\\%ls", source);
+    for (wchar_t *character = result; *character; character++)
+        if (*character == L'/') *character = L'\\';
+    return result;
+}
+
+static wchar_t *widen(const char *text)
+{
+    int length = MultiByteToWideChar(CP_ACP, 0, text, -1, NULL, 0);
+    if (length <= 0) return NULL;
+    wchar_t *wide = malloc((size_t)length * sizeof(wchar_t));
+    if (wide) MultiByteToWideChar(CP_ACP, 0, text, -1, wide, length);
+    return wide;
+}
+
+static int is_folder_w(const wchar_t *path)
+{
+    DWORD attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static void print_wide_path(const wchar_t *path)
+{
+    if (!wcsncmp(path, L"\\\\?\\UNC\\", 8)) printf("\\\\%ls", path + 8);
+    else printf("%ls", path + (wcsncmp(path, L"\\\\?\\", 4) ? 0 : 4));
+}
+
 static Track playing, queued;
 static CRITICAL_SECTION queueLock;
 static int playlistMode, queueReady, queueStalled;
-static char audioFiles[QUEUE_FILES][MAX_PATH];
+static wchar_t *audioFiles[QUEUE_FILES];
 static int audioFileCount, audioFileNext;
+static const wchar_t *playlistFolder;
 
 static int compare_names(const void *a, const void *b)
 {
-    return _stricmp(a, b);
+    return _wcsicmp(*(const wchar_t *const *)a, *(const wchar_t *const *)b);
 }
 
-static int scan_audio_files(const char *folder)
+static int scan_audio_files(const wchar_t *folder)
 {
-    char pattern[MAX_PATH + 4];
-    snprintf(pattern, sizeof pattern, "%s\\*", folder);
+    size_t folderLength = wcslen(folder);
+    wchar_t *pattern = malloc((folderLength + 3) * sizeof(wchar_t));
+    if (!pattern) return -1;
+    swprintf(pattern, folderLength + 3, L"%ls\\*", folder);
 
-    WIN32_FIND_DATAA entry;
-    HANDLE find = FindFirstFileA(pattern, &entry);
+    WIN32_FIND_DATAW entry;
+    HANDLE find = FindFirstFileW(pattern, &entry);
+    free(pattern);
     if (find == INVALID_HANDLE_VALUE) return -1;
 
     do {
-        const char *extension = strrchr(entry.cFileName, '.');
+        const wchar_t *extension = wcsrchr(entry.cFileName, L'.');
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !extension) continue;
-        if (_stricmp(extension, ".wav") || audioFileCount == QUEUE_FILES) continue;
-        snprintf(audioFiles[audioFileCount++], MAX_PATH, "%s\\%s", folder, entry.cFileName);
-    } while (FindNextFileA(find, &entry));
+        if (_wcsicmp(extension, L".wav") || audioFileCount == QUEUE_FILES) continue;
+
+        size_t nameLength = wcslen(entry.cFileName);
+        wchar_t *file = malloc((folderLength + nameLength + 2) * sizeof(wchar_t));
+        if (!file) continue;
+        swprintf(file, folderLength + nameLength + 2, L"%ls\\%ls", folder, entry.cFileName);
+        audioFiles[audioFileCount++] = file;
+    } while (FindNextFileW(find, &entry));
     FindClose(find);
 
-    qsort(audioFiles, (size_t)audioFileCount, MAX_PATH, compare_names);
+    qsort(audioFiles, (size_t)audioFileCount, sizeof audioFiles[0], compare_names);
     return audioFileCount;
 }
 
-static int decode_track(Track *track, const char *path)
+static int decode_track(Track *track, const wchar_t *path)
 {
     unsigned channels = 0, rate = 0;
     drwav_uint64 frames = 0;
-    float *samples = drwav_open_file_and_read_pcm_frames_f32(path, &channels, &rate, &frames, NULL);
+    float *samples = drwav_open_file_and_read_pcm_frames_f32_w(path, &channels, &rate, &frames, NULL);
     if (!samples || !channels || !rate || !frames) {
         drwav_free(samples, NULL);
-        log_error("Could not decode '%s'.\n", path);
+        log_error("Could not decode '%ls'.\n", path);
         return -1;
     }
 
@@ -372,12 +435,19 @@ static void queue_next_track(void)
     }
 }
 
-static int start_playlist(const char *folder)
+static int start_playlist_w(const wchar_t *folder)
 {
-    if (scan_audio_files(folder) <= 0) {
-        log_error("Could not find any .wav files in '%s'.\n", folder);
+    wchar_t *path = long_path(folder);
+    if (!path) {
+        log_error("Could not resolve the folder path.\n");
         return -1;
     }
+    if (scan_audio_files(path) <= 0) {
+        log_error("Could not find any .wav files in '%ls'.\n", path);
+        free(path);
+        return -1;
+    }
+    playlistFolder = path;
 
     InitializeCriticalSection(&queueLock);
     queue_next_track();
@@ -386,6 +456,18 @@ static int start_playlist(const char *folder)
     playing = queued;
     queueReady = 0;
     return 0;
+}
+
+static int start_playlist(const char *folder)
+{
+    wchar_t *path = widen(folder);
+    if (!path) {
+        log_error("Could not convert the folder path.\n");
+        return -1;
+    }
+    int result = start_playlist_w(path);
+    free(path);
+    return result;
 }
 
 static void take_queued_track(void)
@@ -1164,24 +1246,17 @@ static void pause_on_error(int exitCode)
     getchar();
 }
 
-static int run(int argc, char **argv)
+static int run(int argc, char **argv, const wchar_t *folder)
 {
     log_trace("run start\n");
     Options options;
     memset(&options, 0, sizeof options);
     options.synth = 1;
 
-    const char *path = argc > 1 ? argv[1] : NULL;
-    int folder = path && is_folder(path);
-    int settings = !folder && path && is_json_path(path);
-    if (settings && load_settings(path, &options) != 0) return 1;
-    if (folder && strlen(path) >= sizeof options.instrument) {
-        log_error("Folder path '%s' is too long.\n", path);
-        return 1;
-    }
-    if (folder) strcpy(options.instrument, path);
+    const char *settings = !folder && argc > 1 && is_json_path(argv[1]) ? argv[1] : NULL;
+    if (settings && load_settings(settings, &options) != 0) return 1;
 
-    int parsed = parse_args(argc - (settings || folder), argv + (settings || folder), &options);
+    int parsed = parse_args(argc - (settings ? 1 : 0), argv + (settings ? 1 : 0), &options);
     if (parsed == 2) return 0;
     if (parsed != 0) return 1;
     log_trace("arguments parsed\n");
@@ -1208,7 +1283,10 @@ static int run(int argc, char **argv)
     char names[64][128];
     int driverCount = list_drivers(names, 64);
 
-    if (options.instrument[0]) {
+    if (folder) {
+        playlistMode = 1;
+        if (start_playlist_w(folder) != 0) return 1;
+    } else if (options.instrument[0]) {
         if (is_folder(options.instrument)) {
             playlistMode = 1;
             if (start_playlist(options.instrument) != 0) return 1;
@@ -1305,7 +1383,11 @@ static int run(int argc, char **argv)
     printf(" -> out ");
     print_selection(g.outCh, g.nOut);
     printf(", gain %+.1f dB\n", g.gainDb);
-    if (playlistMode) printf("  %d wav files queued from %s\n", audioFileCount, options.instrument);
+    if (playlistMode) {
+        printf("  %d wav files queued from ", audioFileCount);
+        print_wide_path(playlistFolder);
+        printf("\n");
+    }
 
     if (g.midiInIndex >= 0) {
         MIDIINCAPS caps;
@@ -1380,11 +1462,28 @@ done:
     return exitCode;
 }
 
+static wchar_t *dropped_folder(void)
+{
+    int count = 0;
+    LPWSTR *arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!arguments) return NULL;
+
+    wchar_t *folder = NULL;
+    if (count > 1) {
+        wchar_t *path = long_path(arguments[1]);
+        if (path && is_folder_w(path)) folder = path;
+        else free(path);
+    }
+    LocalFree(arguments);
+    return folder;
+}
+
 int main(int argc, char **argv)
 {
     SetUnhandledExceptionFilter(crash_handler);
     open_error_log();
-    int exitCode = run(argc, argv);
+    wchar_t *folder = dropped_folder();
+    int exitCode = run(argc - (folder ? 1 : 0), argv + (folder ? 1 : 0), folder);
     pause_on_error(exitCode);
     if (errorLog) fclose(errorLog);
     return exitCode;

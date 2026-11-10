@@ -47,7 +47,8 @@ to start from it:
 ```
 
 A folder dropped onto `restless_virtuoso.exe` (or passed as the first argument) is
-played directly, as if it were the `instrument` key.
+played directly, as if it were the `instrument` key, and may be longer than
+`MAX_PATH`.
 
 `instrument` is an ASIO driver or MIDI input name from `--list`, or the absolute path
 of a folder. A folder plays every `.wav` file in it, in name order, back to back, and
