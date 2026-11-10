@@ -93,9 +93,9 @@ driver's rate.
 The instance playing a folder sends a loop start cue to every other running instance
 each time its stems loop. Every other instance starts recording what it plays at the
 first cue it receives and marks a pass for that cue and for each later one. On exit it
-writes the take next to the exe as `palette_YYYY-MM-DD-HH-MM-SS.wav`, 16-bit PCM, and
-`passes_YYYY-MM-DD-HH-MM-SS.txt` with one `index, milliseconds 1.;` line per pass,
-measured from the first cue.
+writes the take into the `[palettes]` folder beside the stems folder as
+`palette_YYYY-MM-DD-HH-MM-SS.wav`, 16-bit PCM, and `passes_YYYY-MM-DD-HH-MM-SS.txt`
+with one `index, milliseconds 1.;` line per pass, measured from the first cue.
 
 On startup the program lists every installed ASIO driver, then every MIDI input
 device.

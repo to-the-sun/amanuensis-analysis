@@ -514,6 +514,7 @@ static float track_sample(const Track *track, int output)
 typedef struct {
     volatile LONG seq;
     volatile LONGLONG qpc;
+    wchar_t folder[1024];
 } LoopCue;
 
 static HANDLE cueMapping;
@@ -532,6 +533,7 @@ typedef struct {
     drwav_uint64 frames;
     ULONGLONG origin;
     SYSTEMTIME at;
+    wchar_t folder[1024];
     LONG seen;
     double *passMs;
     int passCount, passCapacity;
@@ -557,6 +559,20 @@ static void send_loop_start(void)
     QueryPerformanceCounter(&now);
     cue->qpc = now.QuadPart;
     take.seen = InterlockedIncrement(&cue->seq);
+}
+
+static void publish_palette(const wchar_t *stems)
+{
+    open_cue();
+    if (!cue) return;
+
+    size_t length = wcslen(stems);
+    while (length > 3 && (stems[length - 1] == L'\\' || stems[length - 1] == L'/')) length--;
+    while (length > 3 && stems[length - 1] != L'\\') length--;
+    if (stems[length - 1] != L'\\' || length + 12 > sizeof cue->folder / sizeof *cue->folder) return;
+
+    wmemcpy(cue->folder, stems, length);
+    wcscpy(cue->folder + length, L"[palettes]\\");
 }
 
 static void add_pass(double milliseconds)
@@ -588,6 +604,8 @@ static void check_loop_cue(void)
         take.channels = g.nOut;
         take.rate = (unsigned)g.rate;
         GetLocalTime(&take.at);
+        wcsncpy(take.folder, cue->folder, 1023);
+        take.folder[1023] = 0;
     }
 
     LARGE_INTEGER frequency;
@@ -629,22 +647,21 @@ static void take_channel(const float *samples, int channel, int frames)
 
 static void write_take(void)
 {
-    if (!take.frames) return;
+    if (!take.frames || !take.folder[0]) return;
 
-    char folder[MAX_PATH];
-    if (module_folder(folder, sizeof folder) != 0) return;
+    CreateDirectoryW(take.folder, NULL);
 
     SYSTEMTIME at = take.at;
 
-    char stamp[40], suffix[8] = "", wavPath[MAX_PATH + 64], passesPath[MAX_PATH + 64];
-    snprintf(stamp, sizeof stamp, "%04d-%02d-%02d-%02d-%02d-%02d",
+    wchar_t stamp[40], suffix[8] = L"", wavPath[1100], passesPath[1100];
+    swprintf(stamp, 40, L"%04d-%02d-%02d-%02d-%02d-%02d",
              at.wYear, at.wMonth, at.wDay, at.wHour, at.wMinute, at.wSecond);
     for (int attempt = 1; attempt < 100; attempt++) {
-        if (attempt > 1) snprintf(suffix, sizeof suffix, "-%d", attempt);
-        snprintf(wavPath, sizeof wavPath, "%spalette_%s%s.wav", folder, stamp, suffix);
-        if (GetFileAttributesA(wavPath) == INVALID_FILE_ATTRIBUTES) break;
+        if (attempt > 1) swprintf(suffix, 8, L"-%d", attempt);
+        swprintf(wavPath, 1100, L"%lspalette_%ls%ls.wav", take.folder, stamp, suffix);
+        if (GetFileAttributesW(wavPath) == INVALID_FILE_ATTRIBUTES) break;
     }
-    snprintf(passesPath, sizeof passesPath, "%spasses_%s%s.txt", folder, stamp, suffix);
+    swprintf(passesPath, 1100, L"%lspasses_%ls%ls.txt", take.folder, stamp, suffix);
 
     drwav_data_format format;
     memset(&format, 0, sizeof format);
@@ -655,8 +672,8 @@ static void write_take(void)
     format.bitsPerSample = 16;
 
     drwav wav;
-    if (!drwav_init_file_write(&wav, wavPath, &format, NULL)) {
-        log_error("Could not write '%s'.\n", wavPath);
+    if (!drwav_init_file_write_w(&wav, wavPath, &format, NULL)) {
+        log_error("Could not write '%ls'.\n", wavPath);
         return;
     }
 
@@ -668,15 +685,15 @@ static void write_take(void)
     free(block);
     drwav_uninit(&wav);
 
-    FILE *file = fopen(passesPath, "w");
+    FILE *file = _wfopen(passesPath, L"w");
     if (!file) {
-        log_error("Could not write '%s'.\n", passesPath);
+        log_error("Could not write '%ls'.\n", passesPath);
         return;
     }
     for (int i = 0; i < take.passCount; i++)
         fprintf(file, "%d, %.6f 1.;\n", i, take.passMs[i]);
     fclose(file);
-    log_trace("wrote %s and %s\n", wavPath, passesPath);
+    log_trace("wrote %ls and %ls\n", wavPath, passesPath);
 
     for (TakeChunk *chunk = take.first; chunk;) {
         TakeChunk *next = chunk->next;
@@ -2214,6 +2231,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
             printf("  MIDI thru -> %d (%s)\n", g.midiOutIndex, caps.szPname);
     }
 
+    if (playlistMode) publish_palette(playlistFolder);
     open_cue();
     if (g.asio->vtable->start(g.asio) != ASE_OK) {
         log_error("ASIOStart failed.\n");
