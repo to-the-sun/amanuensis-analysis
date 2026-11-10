@@ -99,5 +99,6 @@ While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit
   selected outputs; `--no-synth` leaves MIDI input to the MIDI thru path only.
 - Changing the sample rate or buffer size in the control panel reopens the buffers
   automatically.
+- The master output is scaled by the Windows master volume, re-read while running.
 - Every run writes a new `restless_virtuoso-YYYY-MM-DD_HH-MM-SS.log` next to the exe with startup stages and errors.
 - At startup, the program's logs older than 7 days are moved to the Recycle Bin.
