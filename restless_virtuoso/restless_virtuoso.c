@@ -528,7 +528,7 @@ typedef struct TakeChunk {
 } TakeChunk;
 
 typedef struct {
-    int active, channels, wavOpen;
+    int active, wavOpen;
     unsigned rate;
     TakeChunk *first, *cursor;
     TakeChunk *volatile last;
@@ -608,7 +608,6 @@ static void check_loop_cue(void)
     take.seen = seen;
     if (!take.passCount) {
         take.origin = (ULONGLONG)qpc;
-        take.channels = g.nOut;
         take.rate = (unsigned)g.rate;
         GetLocalTime(&take.at);
         wcsncpy(take.folder, cue->folder, 1023);
@@ -620,7 +619,7 @@ static void check_loop_cue(void)
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
     add_pass((double)(LONGLONG)((ULONGLONG)qpc - take.origin) * 1000.0 / (double)frequency.QuadPart);
-    take.active = take.channels > 0 && take.rate > 0;
+    take.active = take.rate > 0;
 }
 
 #define TAKE_CHUNK (1u << 20)
@@ -631,7 +630,7 @@ static void take_buffer(int frames)
     if (take.last && take.last->frames + (size_t)frames <= TAKE_CHUNK) return;
 
     TakeChunk *chunk = malloc(sizeof *chunk);
-    float *samples = malloc((size_t)TAKE_CHUNK * (size_t)take.channels * sizeof *samples);
+    float *samples = malloc((size_t)TAKE_CHUNK * sizeof *samples);
     if (!chunk || !samples) {
         free(chunk);
         free(samples);
@@ -647,11 +646,11 @@ static void take_buffer(int frames)
     take.last = chunk;
 }
 
-static void take_channel(const float *samples, int channel, int frames)
+static void take_mix(const float *samples, int frames)
 {
     float *chunk = take.last->samples;
     for (int i = 0; i < frames; i++)
-        chunk[(take.last->frames + (size_t)i) * (size_t)take.channels + (size_t)channel] = samples[i];
+        chunk[take.last->frames + (size_t)i] += samples[i] / (float)g.nOut;
 }
 
 /* The take is streamed to the file from the main loop, which only ever writes
@@ -678,11 +677,11 @@ static void take_open(void)
     memset(&format, 0, sizeof format);
     format.container = drwav_container_riff;
     format.format = DR_WAVE_FORMAT_PCM;
-    format.channels = (drwav_uint32)take.channels;
+    format.channels = 1;
     format.sampleRate = take.rate;
     format.bitsPerSample = 16;
 
-    take.block = malloc((size_t)TAKE_CHUNK * (size_t)take.channels * sizeof *take.block);
+    take.block = malloc((size_t)TAKE_CHUNK * sizeof *take.block);
     if (!take.block) {
         log_error("Out of memory for the take buffer.\n");
         take.active = 0;
@@ -703,7 +702,7 @@ static void take_flush(void)
 {
     if (!take.wavOpen) return;
     while (take.cursor != take.last) {
-        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames * (size_t)take.channels);
+        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames);
         drwav_write_pcm_frames(&take.wav, take.cursor->frames, take.block);
         take.cursor = take.cursor->next;
     }
@@ -713,7 +712,7 @@ static void take_finish(void)
 {
     if (take.wavOpen) {
         take_flush();
-        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames * (size_t)take.channels);
+        drwav_f32_to_s16(take.block, take.cursor->samples, take.cursor->frames);
         drwav_write_pcm_frames(&take.wav, take.cursor->frames, take.block);
         drwav_uninit(&take.wav);
 
@@ -740,7 +739,6 @@ static void take_finish(void)
     take.first = take.last = take.cursor = NULL;
     take.frames = 0;
     take.passCount = 0;
-    take.channels = 0;
     take.rate = 0;
     take.wavOpen = 0;
     take.active = 0;
@@ -1259,7 +1257,7 @@ static void process_buffer(int32_t index)
             g.mixFloats[i] = value > 1.0f ? 1.0f : value < -1.0f ? -1.0f : value;
         }
         sample_from_float(g.mixFloats, output, g.outFormat[j], frames);
-        if (take.active) take_channel(g.mixFloats, j, frames);
+        if (take.active) take_mix(g.mixFloats, frames);
     }
 
     if (take.active) {
@@ -2285,6 +2283,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
         goto done;
     }
     g.started = 1;
+    if (playlistMode) send_loop_start();
     log_trace("started\n");
 
     init_console_input();

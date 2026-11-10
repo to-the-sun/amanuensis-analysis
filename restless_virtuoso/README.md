@@ -91,10 +91,11 @@ driver's rate.
 ## Loop recordings
 
 The instance playing a folder sends a loop start cue to every other running instance
-each time its stems loop. Every other instance starts recording what it plays at the
-first cue it receives and marks a pass for that cue and for each later one. It streams
-the take into the `[palettes]` folder beside the stems folder as
-`palette_YYYY-MM-DD-HH-MM-SS.wav`, 16-bit PCM, and `passes_YYYY-MM-DD-HH-MM-SS.txt`
+when its stems start and each time they loop. Every other instance starts recording
+what it plays at the first cue it receives and marks a pass for that cue and for each
+later one. It streams the take, a mono mix of its outputs, into the `[palettes]` folder
+beside the stems folder as `palette_YYYY-MM-DD-HH-MM-SS.wav`, 16-bit PCM, and
+`passes_YYYY-MM-DD-HH-MM-SS.txt`
 with one `index, milliseconds 1.;` line per pass, measured from the first cue. The take
 ends, and its files are completed, when the stems instance exits or the recording
 instance is closed. Closing with the console's own close button is handled too, since
