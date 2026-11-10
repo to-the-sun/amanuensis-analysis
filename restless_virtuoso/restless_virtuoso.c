@@ -1623,7 +1623,7 @@ static void read_console_input(void)
 static void draw_meters(void)
 {
     char line[512];
-    int length = snprintf(line, sizeof line, "%s %+.1f dB  ", g.mute ? "MUTED" : "gain", g.gainDb);
+    int length = snprintf(line, sizeof line, "%s", g.mute ? "MUTED  " : "");
     int shown = g.nIn < MAX_METERS ? g.nIn : MAX_METERS;
 
     for (int c = 0; c < shown; c++) {
@@ -2026,7 +2026,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     print_selection(g.inCh, g.nIn);
     printf(" -> out ");
     print_selection(g.outCh, g.nOut);
-    printf(", gain %+.1f dB\n", g.gainDb);
+    printf("\n");
     if (playlistMode) {
         printf("  %d wav files mixed from ", stemCount);
         print_wide_path(playlistFolder);
