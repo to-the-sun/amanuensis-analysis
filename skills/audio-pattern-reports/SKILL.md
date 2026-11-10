@@ -18,14 +18,14 @@ measured, what is estimated, and where the uncertainty is.
   repetition, normally an integer number of bars.
 - **Segment** in the generated reports: one full loop repetition. This is not
   the same as a bar. A 2-bar pattern has two equal bars inside each segment.
-- **Partial segment**: the final segment of a pattern when the pattern region
-  ends before the next full loop. It is shorter and marked `*` in the report.
+- **Pattern region**: ends at the last complete loop. A shorter tail is
+  excluded rather than reported, so every segment has the full loop length.
 
-All full segments in a pattern have the same nominal length because the report
+All segments in a pattern have the same nominal length because the report
 imposes a uniform grid. The report does not independently detect every segment
 boundary. Say this explicitly if the user asks whether the lengths are
-"totally uniform": full segments are uniform by construction; the final
-segment is partial; the audio is not proven sample-exact.
+"totally uniform": segments are uniform by construction; the audio is not
+proven sample-exact.
 
 ## 0. Inputs and preparation
 
@@ -78,8 +78,9 @@ them with the following checks:
    example, Pattern 4's low band has a ~4.1 s half-period but the full pattern
    is ~8.24 s.
 4. **Cycle count.** Check that `(end - start) / loop_length` is close to an
-   integer. A remainder is normal at the end; it becomes the partial segment.
-   If the remainder is almost a whole loop, revisit the start/end.
+   integer. A remainder is normal at the end and is excluded: the pattern ends
+   at the last full loop. If the remainder is almost a whole loop, revisit the
+   start/end.
 5. **Bar multiple.** Estimate the base bar and express the loop as an integer
    number of bars. Typical bar lengths here are about 2.0–2.14 s, but measure
    rather than assuming. Across patterns the base can drift slightly.
@@ -89,9 +90,9 @@ them with the following checks:
 
 Write down a table before building anything:
 
-| File | Pattern | Start (s) | End (s) | Loop (s) | Bars | Full segments | Partial tail |
-|---|---|---:|---:|---:|---:|---:|---:|
-| example.wav | 1 | 4.10 | 92.60 | 4.271 | 2 | 20 | ~3.08 s |
+| File | Pattern | Start (s) | End (s) | Loop (s) | Bars | Segments (all full) |
+|---|---|---:|---:|---:|---:|---:|
+| example.wav | 1 | 4.10 | 92.60 | 4.271 | 2 | 20 |
 
 ## 2. Build the report specification
 
@@ -120,8 +121,9 @@ Create a JSON spec. Paths in `file` are relative to `--src` unless absolute.
 ```
 
 `start`, `end` and `length` are seconds. `bars` is informational for the card.
-`name` and `color` are optional. The builder clamps `end` to the file duration
-and marks the final segment partial when it is shorter than `length`.
+`name` and `color` are optional. Treat `end` as a search bound: the builder
+clamps it to the file duration and truncates the pattern to the last complete
+`length`-sized segment, dropping any shorter tail.
 
 Build:
 
@@ -178,7 +180,7 @@ usable with only `summary.js`.
 The report must provide:
 
 - full-file waveform and a colored band for each pattern;
-- a row per pattern with one cell per segment, numbered, with `*` for partial;
+- a row per pattern with one numbered cell per full segment;
 - clickable segment chips that jump to the segment start and play;
 - drag horizontally to zoom into a time range;
 - right-click to zoom out one level; a Reset Zoom button;
@@ -215,7 +217,8 @@ Builder-level:
 - [ ] Coarse min/max matches the WAV at sampled bins (the builder asserts a
       few bins).
 - [ ] `l8_0.js` exists and its first bins match the PCM.
-- [ ] The last segment of every pattern is marked partial when appropriate.
+- [ ] Every pattern's segments are exactly `length` long; no partial tail
+      segment exists.
 
 Browser-level, when a browser is available:
 
@@ -250,15 +253,15 @@ not contain itself. Report the final size and entry count.
 
 Three mono 44.1 kHz palette WAVs, analyzed independently:
 
-| File | Duration | Pattern | Start–End (s) | Loop (s) | Bars | Report segments |
+| File | Duration | Pattern | Start–End (s) | Loop (s) | Bars | Segments |
 |---|---:|---|---:|---:|---:|---:|
-| palette_2026-11-05 | 580.648 s | 1 | 4.10–92.60 | 4.271 | 2 | 21 (20 full + ~3.08) |
-| palette_2026-11-05 | 580.648 s | 2 | 101.20–173.50 | 2.134 | 1 | 34 (33 full + ~1.88) |
-| palette_2026-11-05 | 580.648 s | 3 | 217.30–368.30 | 4.129 | 2 | 37 (36 full + ~2.36) |
-| palette_2026-11-05 | 580.648 s | 4 | 372.90–580.60 | 8.239 | 4 | 26 (25 full + ~1.72) |
-| palette_2026-11-07 | 228.158 s | 1 | 0.50–50.00 | 4.010 | 2 | 13 (12 full + ~1.38) |
-| palette_2026-11-07 | 228.158 s | 2 | 55.00–227.70 | 8.022 | 4 | 22 (21 full + ~4.24) |
-| palette_2026-11-08 | 371.367 s | 1 | 5.00–363.90 | 8.223 | 4 | 44 (43 full + ~5.31) |
+| palette_2026-11-05 | 580.648 s | 1 | 4.10–89.52 | 4.271 | 2 | 20 |
+| palette_2026-11-05 | 580.648 s | 2 | 101.20–171.62 | 2.134 | 1 | 33 |
+| palette_2026-11-05 | 580.648 s | 3 | 217.30–365.94 | 4.129 | 2 | 36 |
+| palette_2026-11-05 | 580.648 s | 4 | 372.90–578.88 | 8.239 | 4 | 25 |
+| palette_2026-11-07 | 228.158 s | 1 | 0.50–48.62 | 4.010 | 2 | 12 |
+| palette_2026-11-07 | 228.158 s | 2 | 55.00–223.46 | 8.022 | 4 | 21 |
+| palette_2026-11-08 | 371.367 s | 1 | 5.00–358.59 | 8.223 | 4 | 43 |
 
 Observed structure:
 
@@ -266,8 +269,8 @@ Observed structure:
 - Pattern 4 of the first file has a strong ~4.1 s low-band half-period but the
   full high-level loop is ~8.24 s. Do not mistake the half-period for the
   pattern length.
-- The final segment is partial in every pattern because the region boundaries
-  are not exact loop multiples.
+- Pattern regions end at the last full loop; shorter tails are excluded, so
+  every reported segment is full length.
 
 This run produced `artifacts/palette_pattern_reports/` and
 `artifacts/palette-pattern-reports.zip` (about 99.4 MiB, 128 entries).
@@ -289,6 +292,10 @@ This run produced `artifacts/palette_pattern_reports/` and
   unless the user explicitly asks. Keep generated files under `artifacts/`.
 - The report server must support Range; otherwise WAV seeking and playhead
   jumps can fail even though the page loads.
+- A chunk file holds `CHUNK_BINS` bins, which is `2 * CHUNK_BINS` interleaved
+  int16 values. Slice the interleaved min/max array by `2 * CHUNK_BINS`, not
+  `CHUNK_BINS`; otherwise chunk indices point at the wrong audio, the second
+  half of every chunk is dropped, and tail chunks are never written.
 - If a preview host rejects plain curl with 403, that may be the preview's
   authentication layer, not a broken app. Check the app on loopback and open
   the preview through the provided browser panel.

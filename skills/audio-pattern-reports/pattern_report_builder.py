@@ -16,24 +16,24 @@ def fmt_precise(t):
 
 
 def build_segments(start, end, length):
-    segs = []
-    t = start
-    while t < end - 0.01:
-        e = min(end, t + length)
-        segs.append({'start': round(t, 3), 'end': round(e, 3), 'partial': (e - t) < length - 0.001})
-        t = e
-    return segs
+    n = int((end - start) / length + 1e-9)
+    segs = [{'start': round(start + i * length, 3), 'end': round(start + (i + 1) * length, 3)}
+            for i in range(n)]
+    return segs, round(start + n * length, 3)
 
 
 def minmax_bins(pcm, step):
     n = len(pcm)
     nb = (n + step - 1) // step
-    pad = nb * step - n
-    xp = np.pad(pcm, (0, pad), constant_values=0) if pad else pcm
-    xb = xp.reshape(nb, step)
+    full = n // step
+    xb = pcm[:full * step].reshape(full, step)
     out = np.empty(nb * 2, dtype='<i2')
-    out[0::2] = xb.min(axis=1)
-    out[1::2] = xb.max(axis=1)
+    out[0:full * 2:2] = xb.min(axis=1)
+    out[1:full * 2:2] = xb.max(axis=1)
+    if full < nb:
+        tail = pcm[full * step:]
+        out[full * 2] = tail.min()
+        out[full * 2 + 1] = tail.max()
     return out, nb
 
 
@@ -45,7 +45,7 @@ def write_level(pcm, step, data_dir, level_idx):
     inter, nb = minmax_bins(pcm, step)
     nchunks = max(1, (nb + CHUNK_BINS - 1) // CHUNK_BINS)
     for c in range(nchunks):
-        chunk = inter[c * CHUNK_BINS:(c + 1) * CHUNK_BINS]
+        chunk = inter[c * CHUNK_BINS * 2:(c + 1) * CHUNK_BINS * 2]
         with open(os.path.join(data_dir, f'l{step}_{c}.js'), 'w') as f:
             f.write('window.__patternChunkArrive("%d_%d",["%s"]);\n' % (level_idx, c, b64_i16(chunk)))
     return nb, nchunks
@@ -63,10 +63,8 @@ def pattern_cards(patterns):
         for j, s in enumerate(segs):
             dur = s['end'] - s['start']
             title = (f"Segment {j+1} &middot; {fmt_precise(s['start'])} &ndash; {fmt_precise(s['end'])} "
-                     f"&middot; {dur:.3f} s" + (" &middot; partial" if s['partial'] else ""))
-            label = str(j + 1) + ('*' if s['partial'] else '')
-            cls = 'seg partial' if s['partial'] else 'seg'
-            chips.append(f'<button class="{cls}" onclick="playSegment({i},{j})" title="{title}">{label}</button>')
+                     f"&middot; {dur:.3f} s")
+            chips.append(f'<button class="seg" onclick="playSegment({i},{j})" title="{title}">{j+1}</button>')
         out.append(
             f'<div class="pcard" style="--c:{color}">'
             f'<div class="phead"><span class="pdot"></span><span class="pname">{html.escape(p["name"])}</span>'
@@ -418,7 +416,7 @@ function draw() {
         ctx.fillStyle = 'rgba(255,255,255,0.87)';
         ctx.font = '9px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(String(k + 1) + (seg.partial ? '*' : ''), (ax + bx) / 2, y + 23);
+        ctx.fillText(String(k + 1), (ax + bx) / 2, y + 23);
       }
     }
     const bx1 = Math.max(0, x1);
@@ -645,6 +643,8 @@ function attach() {
 }
 
 function init() {
+  const rowsH = PATTERNS.length ? PATTERNS.length * LAYOUT.rowH + (PATTERNS.length - 1) * LAYOUT.rowGap : 0;
+  document.getElementById('canvasWrap').style.height = Math.max(380, 294 + rowsH) + 'px';
   COARSE.arr = base64ToI16(window.PATTERN_COARSE);
   attach();
   updateViewInfo();
@@ -693,7 +693,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .segrow { display:flex; flex-wrap:wrap; gap:4px; margin-top:8px; }
   .seg { min-width:27px; height:24px; padding:0 5px; border-radius:4px; border:1px solid var(--c); background:rgba(255,255,255,0.04); color:var(--text); font-family:monospace; font-size:0.72rem; cursor:pointer; }
   .seg:hover { background:var(--c); color:#0d0d11; }
-  .seg.partial { border-style:dashed; opacity:0.75; }
   .legend { display:flex; gap:16px; flex-wrap:wrap; font-size:0.78rem; color:var(--muted); margin-top:8px; }
   .legend span { display:flex; align-items:center; gap:5px; }
   .swatch { width:20px; height:10px; border-radius:2px; }
@@ -823,15 +822,19 @@ def build_report(spec, out_dir, src_dir):
         name = str(p.get('name', 'Pattern %d' % (i + 1)))
         color = p.get('color', COLORS[i % len(COLORS)])
         bars = int(p.get('bars', 1))
+        segments, end = build_segments(start, end, length)
+        if not segments:
+            raise ValueError('Pattern %d has no full %.3f s segment in %.3f-%.3f'
+                             % (i + 1, length, start, end))
         patterns.append({
             'id': i,
             'name': name,
             'color': color,
             'start': round(start, 3),
-            'end': round(end, 3),
+            'end': end,
             'length': length,
             'bars': bars,
-            'segments': build_segments(start, end, length),
+            'segments': segments,
         })
 
     if not patterns:
@@ -893,16 +896,20 @@ def validate(pcm, inter_coarse, coarse_bins, data_dir):
         seg = pcm[a:e]
         assert arr[b * 2] == seg.min(), (b, arr[b * 2], seg.min())
         assert arr[b * 2 + 1] == seg.max(), (b, arr[b * 2 + 1], seg.max())
-    with open(os.path.join(data_dir, 'l8_0.js')) as f:
-        m = re.search(r'\["([^"]+)"\]', f.read())
-    assert m, 'chunk base64 not found'
-    chunk = np.frombuffer(base64.b64decode(m.group(1)), dtype='<i2')
-    for b in [0, 1, 7, 100]:
-        a = b * 8
-        e = min(len(pcm), a + 8)
-        seg = pcm[a:e]
-        assert chunk[b * 2] == seg.min(), (b, chunk[b * 2], seg.min())
-        assert chunk[b * 2 + 1] == seg.max(), (b, chunk[b * 2 + 1], seg.max())
+    for li, (step, _) in enumerate(LEVELS):
+        nb = (len(pcm) + step - 1) // step
+        for c in range((nb + CHUNK_BINS - 1) // CHUNK_BINS):
+            with open(os.path.join(data_dir, 'l%d_%d.js' % (step, c))) as f:
+                m = re.search(r'\["([^"]+)"\]', f.read())
+            assert m, 'chunk base64 not found: l%d_%d' % (step, c)
+            chunk = np.frombuffer(base64.b64decode(m.group(1)), dtype='<i2')
+            bins = min(CHUNK_BINS, nb - c * CHUNK_BINS)
+            assert chunk.size == bins * 2, (step, c, chunk.size, bins * 2)
+            for k in (0, bins - 1):
+                b = c * CHUNK_BINS + k
+                seg = pcm[b * step:min(len(pcm), (b + 1) * step)]
+                assert chunk[k * 2] == seg.min(), (step, c, k, chunk[k * 2], seg.min())
+                assert chunk[k * 2 + 1] == seg.max(), (step, c, k, chunk[k * 2 + 1], seg.max())
 
 
 def main():
