@@ -91,7 +91,8 @@ driver's rate.
 On startup the program lists every installed ASIO driver, then every MIDI input
 device.
 
-While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit.
+In instrument mode, click `new sound` in the console for another random sound, drawn
+from `samples_path` or `vsts_path` by `samples_ratio`.
 
 ## Notes
 
