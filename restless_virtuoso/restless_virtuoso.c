@@ -21,6 +21,7 @@
 
 #include "asio_abi.h"
 #include "dsp.h"
+#include "vst_abi.h"
 #define DR_WAV_IMPLEMENTATION
 #include "../analysis/dr_wav.h"
 
@@ -32,7 +33,7 @@
 
 typedef struct {
     const char *driver, *in, *out, *midiIn, *midiOut;
-    char instrument[MAX_PATH];
+    char instrument[MAX_PATH], samplesPath[MAX_PATH], vstsPath[MAX_PATH];
     double gainDb;
     int rate, buffer, synth, list, inputChannel;
 } Options;
@@ -227,6 +228,36 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS *info)
 static volatile uint32_t midiHead, midiTail;
 static uint32_t midiQueue[MIDI_QUEUE];
 
+#define VST_MAX_PLUGINS 1024
+#define VST_MAX_EVENTS 256
+#define VST_MAX_OUTPUTS 32
+
+typedef struct {
+    int32_t numEvents;
+    intptr_t reserved;
+    VstEvent *events[VST_MAX_EVENTS];
+    VstMidiEvent midi[VST_MAX_EVENTS];
+} MidiEventList;
+
+static MidiEventList midiEvents;
+static AEffect *vstEffect;
+
+static void queue_midi_event(uint32_t message)
+{
+    if (midiEvents.numEvents == VST_MAX_EVENTS) return;
+
+    VstMidiEvent *event = &midiEvents.midi[midiEvents.numEvents];
+    memset(event, 0, sizeof *event);
+    event->type = kVstMidiType;
+    event->byteSize = sizeof *event;
+    event->midiData[0] = (char)(message & 0xff);
+    event->midiData[1] = (char)(message >> 8 & 0xff);
+    event->midiData[2] = (char)(message >> 16 & 0xff);
+    midiEvents.events[midiEvents.numEvents++] = (VstEvent *)event;
+}
+
+static void trigger_drum(int note);
+
 static const char *asio_error_text(ASIOError error)
 {
     switch (error) {
@@ -275,12 +306,18 @@ static int midi_pop(uint32_t *message)
 static void drain_midi(void)
 {
     uint32_t message;
+    midiEvents.numEvents = 0;
     while (midi_pop(&message)) {
         int status = (int)(message & 0xf0);
         int note = (int)(message >> 8) & 0x7f;
         int velocity = (int)(message >> 16) & 0x7f;
-        if (status == 0x90 && velocity > 0) synth_note_on(note, velocity / 127.0f);
-        else if (status == 0x80 || status == 0x90) synth_note_off(note);
+        if (status == 0x90 && velocity > 0) {
+            synth_note_on(note, velocity / 127.0f);
+            trigger_drum(note);
+        } else if (status == 0x80 || status == 0x90) {
+            synth_note_off(note);
+        }
+        if (vstEffect && status < 0xf0) queue_midi_event(message);
     }
 }
 
@@ -344,7 +381,7 @@ static void print_wide_path(const wchar_t *path)
     else printf("%ls", path + (wcsncmp(path, L"\\\\?\\", 4) ? 0 : 4));
 }
 
-static int playlistMode;
+static int playlistMode, instrumentMode;
 static wchar_t *audioFiles[QUEUE_FILES];
 static int audioFileCount;
 static const wchar_t *playlistFolder;
@@ -490,6 +527,322 @@ static void render_playlist(float *dst, int outputs, int frames)
     }
 }
 
+static void shuffle(int *items, int count)
+{
+    for (int i = count - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        int swap = items[i];
+        items[i] = items[j];
+        items[j] = swap;
+    }
+}
+
+typedef void (*PathVisitor)(const wchar_t *path);
+
+static void scan_tree(const wchar_t *folder, const wchar_t *extension, PathVisitor visit)
+{
+    size_t folderLength = wcslen(folder);
+    wchar_t *pattern = malloc((folderLength + 3) * sizeof(wchar_t));
+    if (!pattern) return;
+    swprintf(pattern, folderLength + 3, L"%ls\\*", folder);
+
+    WIN32_FIND_DATAW entry;
+    HANDLE find = FindFirstFileW(pattern, &entry);
+    free(pattern);
+    if (find == INVALID_HANDLE_VALUE) return;
+
+    do {
+        size_t nameLength = wcslen(entry.cFileName);
+        wchar_t *path = malloc((folderLength + nameLength + 2) * sizeof(wchar_t));
+        if (!path) continue;
+        swprintf(path, folderLength + nameLength + 2, L"%ls\\%ls", folder, entry.cFileName);
+
+        int directory = entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
+        const wchar_t *dot = wcsrchr(entry.cFileName, L'.');
+        if (directory && !(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            scan_tree(path, extension, visit);
+        else if (!directory && dot && !_wcsicmp(dot, extension)) {
+            visit(path);
+            continue;
+        }
+        free(path);
+    } while (FindNextFileW(find, &entry));
+    FindClose(find);
+}
+
+static Track *drumSamples;
+static int drumSampleCount, drumSampleCapacity;
+static int drumNoteSample[128];
+static Track drumVoices[128];
+
+static void add_sample(const wchar_t *path)
+{
+    if (drumSampleCount == drumSampleCapacity) {
+        int capacity = drumSampleCapacity ? drumSampleCapacity * 2 : 64;
+        Track *grown = realloc(drumSamples, (size_t)capacity * sizeof *grown);
+        if (!grown) {
+            free((void *)path);
+            return;
+        }
+        drumSamples = grown;
+        drumSampleCapacity = capacity;
+    }
+    if (decode_track(&drumSamples[drumSampleCount], path) == 0) drumSampleCount++;
+    free((void *)path);
+}
+
+static void load_drums(const char *folder)
+{
+    wchar_t *wide = widen(folder);
+    wchar_t *path = wide ? long_path(wide) : NULL;
+    free(wide);
+    if (!path || !is_folder_w(path)) {
+        log_error("samples_path '%s' is not a folder; drum samples are off.\n", folder);
+        free(path);
+        return;
+    }
+
+    scan_tree(path, L".wav", add_sample);
+    free(path);
+    if (!drumSampleCount) {
+        log_error("No .wav files under samples_path '%s'.\n", folder);
+        return;
+    }
+
+    int *pool = malloc((size_t)drumSampleCount * sizeof *pool);
+    if (!pool) return;
+    for (int i = 0; i < drumSampleCount; i++) pool[i] = i;
+    shuffle(pool, drumSampleCount);
+    for (int note = 0; note < 128; note++) drumNoteSample[note] = pool[note % drumSampleCount];
+    free(pool);
+}
+
+static void trigger_drum(int note)
+{
+    if (!drumSampleCount) return;
+    drumVoices[note] = drumSamples[drumNoteSample[note]];
+    drumVoices[note].position = 0;
+    drumVoices[note].fraction = 0;
+}
+
+static void render_drums(float *dst, int outputs, int frames)
+{
+    for (int i = 0; i < frames; i++) {
+        for (int note = 0; note < 128; note++) {
+            Track *voice = &drumVoices[note];
+            if (!voice->samples || voice->position >= voice->frames) continue;
+
+            for (int j = 0; j < outputs; j++)
+                dst[(size_t)j * frames + i] += track_sample(voice, j);
+
+            voice->fraction += (double)voice->rate / g.rate;
+            drwav_uint64 whole = (drwav_uint64)voice->fraction;
+            voice->fraction -= (double)whole;
+            voice->position += whole;
+        }
+    }
+}
+
+static HMODULE vstLibraries[VST_MAX_PLUGINS];
+static int vstLibraryCount, vstOutputCount, vstProgram;
+static float *vstZeros, *vstOutputMemory;
+static float **vstInputs, **vstOutputs;
+
+static intptr_t host_callback(AEffect *effect, int32_t opcode, int32_t index, intptr_t value,
+                              void *ptr, float opt)
+{
+    (void)effect;
+    (void)index;
+    (void)value;
+    (void)opt;
+
+    switch (opcode) {
+    case audioMasterVersion: return 2400;
+    case audioMasterGetSampleRate: return (intptr_t)g.rate;
+    case audioMasterGetBlockSize: return g.bufferSize;
+    case audioMasterGetCurrentProcessLevel: return 2;
+    case audioMasterGetVendorVersion: return 1;
+    case audioMasterGetVendorString:
+    case audioMasterGetProductString:
+        if (ptr) strcpy((char *)ptr, "restless_virtuoso");
+        return 1;
+    default: return 0;
+    }
+}
+
+static AEffect *create_effect(HMODULE library)
+{
+    AEffect *(*entry)(VstHostCallbackProc) = (void *)GetProcAddress(library, "VSTPluginMain");
+    if (!entry) entry = (void *)GetProcAddress(library, "main");
+    if (!entry) return NULL;
+
+    AEffect *effect = entry(host_callback);
+    if (!effect || effect->magic != kVstEffectMagic) return NULL;
+    return effect;
+}
+
+static void vst_free_buffers(void)
+{
+    free(vstZeros);
+    free(vstInputs);
+    free(vstOutputMemory);
+    free(vstOutputs);
+    vstZeros = NULL;
+    vstInputs = NULL;
+    vstOutputMemory = NULL;
+    vstOutputs = NULL;
+}
+
+static int vst_allocate(int frames)
+{
+    int slots = vstEffect->numInputs > 2 ? vstEffect->numInputs : 2;
+
+    vstZeros = calloc((size_t)frames, sizeof(float));
+    vstInputs = malloc((size_t)slots * sizeof *vstInputs);
+    vstOutputs = malloc((size_t)vstOutputCount * sizeof *vstOutputs);
+    vstOutputMemory = malloc((size_t)vstOutputCount * frames * sizeof *vstOutputMemory);
+    if (!vstZeros || !vstInputs || !vstOutputs || !vstOutputMemory) {
+        vst_free_buffers();
+        return -1;
+    }
+
+    for (int i = 0; i < slots; i++) vstInputs[i] = vstZeros;
+    for (int j = 0; j < vstOutputCount; j++) vstOutputs[j] = vstOutputMemory + (size_t)j * frames;
+    return 0;
+}
+
+static int vst_start(void)
+{
+    if (!vstEffect) return 0;
+
+    vstEffect->dispatcher(vstEffect, effSetSampleRate, 0, 0, NULL, (float)g.rate);
+    vstEffect->dispatcher(vstEffect, effSetBlockSize, 0, g.bufferSize, NULL, 0);
+    vstEffect->dispatcher(vstEffect, effMainsChanged, 0, 1, NULL, 0);
+    if (vst_allocate((int)g.bufferSize) != 0) {
+        log_error("Out of memory for the VST buffers.\n");
+        return -1;
+    }
+    return 0;
+}
+
+static void vst_stop(void)
+{
+    if (!vstEffect) return;
+    vstEffect->dispatcher(vstEffect, effMainsChanged, 0, 0, NULL, 0);
+    vst_free_buffers();
+}
+
+static int start_vst(HMODULE library)
+{
+    AEffect *effect = create_effect(library);
+    if (!effect) return -1;
+
+    if (!effect->dispatcher || (!(effect->flags & effFlagsIsSynth) && effect->numInputs > 0) ||
+        effect->numOutputs < 1 || effect->numOutputs > VST_MAX_OUTPUTS ||
+        (!effect->processReplacing && !effect->process)) {
+        effect->dispatcher(effect, effClose, 0, 0, NULL, 0);
+        return -1;
+    }
+
+    effect->dispatcher(effect, effOpen, 0, 0, NULL, 0);
+    vstEffect = effect;
+    vstOutputCount = effect->numOutputs;
+    vstProgram = effect->numPrograms > 1 ? rand() % effect->numPrograms : 0;
+    if (effect->numPrograms > 1)
+        effect->dispatcher(effect, effSetProgram, 0, vstProgram, NULL, 0);
+
+    if (vst_start() != 0) {
+        vst_stop();
+        effect->dispatcher(effect, effClose, 0, 0, NULL, 0);
+        vstEffect = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static void add_vst(const wchar_t *path)
+{
+    if (vstLibraryCount == VST_MAX_PLUGINS) {
+        free((void *)path);
+        return;
+    }
+
+    HMODULE library = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!library) log_error("Could not load '%ls'.\n", path);
+    else if (GetProcAddress(library, "VSTPluginMain") || GetProcAddress(library, "main"))
+        vstLibraries[vstLibraryCount++] = library;
+    else FreeLibrary(library);
+
+    free((void *)path);
+}
+
+static void load_vsts(const char *folder)
+{
+    wchar_t *wide = widen(folder);
+    wchar_t *path = wide ? long_path(wide) : NULL;
+    free(wide);
+    if (!path || !is_folder_w(path)) {
+        log_error("vsts_path '%s' is not a folder; no VST is used.\n", folder);
+        free(path);
+        return;
+    }
+
+    scan_tree(path, L".dll", add_vst);
+    free(path);
+    if (!vstLibraryCount) {
+        log_error("No VST plugins under vsts_path '%s'.\n", folder);
+        return;
+    }
+
+    int order[VST_MAX_PLUGINS];
+    for (int i = 0; i < vstLibraryCount; i++) order[i] = i;
+    shuffle(order, vstLibraryCount);
+
+    for (int i = 0; i < vstLibraryCount; i++)
+        if (start_vst(vstLibraries[order[i]]) == 0) return;
+
+    log_error("%d plugins under vsts_path '%s', but none could be started.\n",
+              vstLibraryCount, folder);
+}
+
+static void render_vst(float *dst, int outputs, int frames)
+{
+    if (!vstEffect) return;
+
+    if (midiEvents.numEvents)
+        vstEffect->dispatcher(vstEffect, effProcessEvents, 0, 0, (VstEvents *)&midiEvents, 0);
+
+    if (vstEffect->processReplacing) {
+        vstEffect->processReplacing(vstEffect, vstInputs, vstOutputs, frames);
+    } else {
+        memset(vstOutputMemory, 0, (size_t)vstOutputCount * frames * sizeof *vstOutputMemory);
+        vstEffect->process(vstEffect, vstInputs, vstOutputs, frames);
+    }
+
+    for (int j = 0; j < outputs; j++) {
+        const float *source = vstOutputs[j % vstOutputCount];
+        for (int i = 0; i < frames; i++) dst[(size_t)j * frames + i] += source[i];
+    }
+}
+
+static void render_instruments(float *dst, int outputs, int frames)
+{
+    memset(dst, 0, (size_t)outputs * frames * sizeof *dst);
+    render_drums(dst, outputs, frames);
+    render_vst(dst, outputs, frames);
+}
+
+static void close_vst(void)
+{
+    vst_stop();
+    if (vstEffect) {
+        vstEffect->dispatcher(vstEffect, effClose, 0, 0, NULL, 0);
+        vstEffect = NULL;
+    }
+    for (int i = 0; i < vstLibraryCount; i++) FreeLibrary(vstLibraries[i]);
+    vstLibraryCount = 0;
+}
+
 static void process_buffer(int32_t index)
 {
     const int frames = (int)g.bufferSize;
@@ -510,12 +863,11 @@ static void process_buffer(int32_t index)
     }
 
     memset(g.synthFloats, 0, (size_t)frames * sizeof(float));
-    if (g.synthEnabled) {
-        drain_midi();
-        synth_render(g.synthFloats, frames);
-    }
+    if (g.synthEnabled || instrumentMode) drain_midi();
+    if (g.synthEnabled) synth_render(g.synthFloats, frames);
 
-    if (g.fileFloats) render_playlist(g.fileFloats, g.nOut, frames);
+    if (playlistMode) render_playlist(g.fileFloats, g.nOut, frames);
+    else if (instrumentMode) render_instruments(g.fileFloats, g.nOut, frames);
 
     for (int j = 0; j < g.nOut; j++) {
         int source = g.nIn ? j % g.nIn : -1;
@@ -860,10 +1212,10 @@ static int create_buffers(void)
     size_t frames = (size_t)g.bufferSize;
     free_buffers();
     g.inputFloats = g.nIn ? malloc(frames * g.nIn * sizeof(float)) : NULL;
-    g.fileFloats = playlistMode ? malloc(frames * g.nOut * sizeof(float)) : NULL;
+    g.fileFloats = (playlistMode || instrumentMode) ? malloc(frames * g.nOut * sizeof(float)) : NULL;
     g.synthFloats = malloc(frames * sizeof(float));
     g.mixFloats = malloc(frames * sizeof(float));
-    if ((g.nIn && !g.inputFloats) || (playlistMode && !g.fileFloats) ||
+    if ((g.nIn && !g.inputFloats) || ((playlistMode || instrumentMode) && !g.fileFloats) ||
         !g.synthFloats || !g.mixFloats) {
         log_error("Out of memory for %d-frame buffers.\n", g.bufferSize);
         free_buffers();
@@ -1040,6 +1392,9 @@ static void shutdown_monitor(void)
     free_buffers();
     for (int i = 0; i < stemCount; i++) drwav_free(stems[i].samples, NULL);
     free(stems);
+    for (int i = 0; i < drumSampleCount; i++) drwav_free(drumSamples[i].samples, NULL);
+    free(drumSamples);
+    close_vst();
 }
 
 static int stream_midi(const char *device, int channel)
@@ -1119,6 +1474,20 @@ static const char *json_value(const char *text, const char *key)
     return NULL;
 }
 
+static int json_string(const char *text, const char *key, char *out, size_t size)
+{
+    const char *value = json_value(text, key);
+    if (!value || *value != '"') return 0;
+
+    const char *end = strchr(value + 1, '"');
+    if (!end || end == value + 1 || (size_t)(end - value - 1) >= size) return 0;
+
+    size_t length = (size_t)(end - value - 1);
+    memcpy(out, value + 1, length);
+    out[length] = 0;
+    return 1;
+}
+
 static int load_settings(const char *path, Options *options)
 {
     FILE *file = fopen(path, "rb");
@@ -1132,16 +1501,12 @@ static int load_settings(const char *path, Options *options)
     fclose(file);
     text[length] = 0;
 
-    const char *instrument = json_value(text, "instrument");
-    const char *end = instrument && *instrument == '"' ? strchr(instrument + 1, '"') : NULL;
-    if (!end || end == instrument + 1 || (size_t)(end - instrument - 1) >= sizeof options->instrument) {
+    if (!json_string(text, "instrument", options->instrument, sizeof options->instrument)) {
         log_error("Settings '%s' need an \"instrument\" string.\n", path);
         return -1;
     }
-
-    size_t instrumentLength = (size_t)(end - instrument - 1);
-    memcpy(options->instrument, instrument + 1, instrumentLength);
-    options->instrument[instrumentLength] = 0;
+    json_string(text, "samples_path", options->samplesPath, sizeof options->samplesPath);
+    json_string(text, "vsts_path", options->vstsPath, sizeof options->vstsPath);
 
     const char *channel = json_value(text, "input-channel");
     char *stop = NULL;
@@ -1260,9 +1625,19 @@ static int run(int argc, char **argv, const wchar_t *folder)
         } else if (resolve_driver(options.instrument, names, driverCount)) {
             if (!options.driver) options.driver = options.instrument;
         } else if (resolve_midi_in(options.instrument) >= 0) {
-            int result = stream_midi(options.instrument, options.inputChannel);
-            printf("\n");
-            return result;
+            if (!options.samplesPath[0] && !options.vstsPath[0]) {
+                int result = stream_midi(options.instrument, options.inputChannel);
+                printf("\n");
+                return result;
+            }
+            if (options.inputChannel > 16) {
+                log_error("MIDI channel %d is out of range (1-16).\n", options.inputChannel);
+                return 1;
+            }
+            instrumentMode = 1;
+            g.synthEnabled = 0;
+            g.midiChannel = options.inputChannel;
+            if (!options.midiIn) options.midiIn = options.instrument;
         } else {
             log_error("Instrument '%s' is neither a folder of wav files, an installed ASIO driver "
                       "nor a MIDI input.\n", options.instrument);
@@ -1310,7 +1685,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     printf("\n");
     log_trace("devices listed\n");
 
-    if (playlistMode) {
+    if (playlistMode || instrumentMode) {
         if (select_channels(options.in, g.inCount, g.inCh, &g.nIn, 0, "input") != 0) goto done;
     } else if (options.inputChannel > 0 && !options.in) {
         if (options.inputChannel > g.inCount) {
@@ -1339,6 +1714,10 @@ static int run(int argc, char **argv, const wchar_t *folder)
 
     if (setup_rate(options.rate) != 0) goto done;
     if (setup_buffer(options.buffer) != 0) goto done;
+    if (instrumentMode) {
+        if (options.samplesPath[0]) load_drums(options.samplesPath);
+        if (options.vstsPath[0]) load_vsts(options.vstsPath);
+    }
     log_trace("rate and buffer set\n");
     if (create_buffers() != 0) goto done;
     log_trace("buffers created\n");
@@ -1354,6 +1733,17 @@ static int run(int argc, char **argv, const wchar_t *folder)
         printf("  %d wav files mixed from ", stemCount);
         print_wide_path(playlistFolder);
         printf("\n");
+    }
+    if (drumSampleCount) printf("  %d drum samples\n", drumSampleCount);
+    if (vstEffect) {
+        char name[64] = "";
+        vstEffect->dispatcher(vstEffect, effGetEffectName, 0, 0, name, 0);
+        name[63] = 0;
+        if (vstEffect->numPrograms > 0)
+            printf("  VST %s, preset %d/%d\n", name[0] ? name : "plugin", vstProgram + 1,
+                   vstEffect->numPrograms);
+        else
+            printf("  VST %s, default preset\n", name[0] ? name : "plugin");
     }
 
     if (g.midiInIndex >= 0) {
@@ -1391,9 +1781,11 @@ static int run(int argc, char **argv, const wchar_t *folder)
                 g.buffersCreated = 0;
             }
             free_buffers();
+            vst_stop();
 
             if (setup_rate(0) != 0 || setup_buffer(options.buffer) != 0 ||
-                create_buffers() != 0 || g.asio->vtable->start(g.asio) != ASE_OK) {
+                vst_start() != 0 || create_buffers() != 0 ||
+                g.asio->vtable->start(g.asio) != ASE_OK) {
                 log_line("could not reopen the ASIO buffers; restart the program");
                 break;
             }
@@ -1448,6 +1840,7 @@ int main(int argc, char **argv)
 {
     SetUnhandledExceptionFilter(crash_handler);
     open_error_log();
+    srand((unsigned)GetTickCount64());
     wchar_t *folder = dropped_folder();
     int exitCode = run(argc - (folder ? 1 : 0), argv + (folder ? 1 : 0), folder);
     pause_on_error(exitCode);
