@@ -46,21 +46,24 @@ to start from it:
 }
 ```
 
-`instrument` is an ASIO driver or MIDI input name from `--list`, or the absolute path
-of a folder. A folder plays every `.wav` file in it, in name order, back to back, and
-the first file follows the last one immediately. `input-channel` is the 1-based ASIO
-input, or the MIDI channel for a MIDI device, whose messages are then streamed to the
-console. `Focusrite USB ASIO Input 1.json` is a ready template; settings files are
-named after the input device, with its exact capitalization.
+A folder dropped onto `restless_virtuoso.exe` (or passed as the first argument) is
+played directly, as if it were the `instrument` key, and may be longer than
+`MAX_PATH`.
 
-A folder is played on the selected outputs with no ASIO input monitoring unless
+`instrument` is an ASIO driver or MIDI input name from `--list`, or the absolute path
+of a folder. A folder's `.wav` files play together as stems and loop when the longest
+one ends. `input-channel` is the 1-based ASIO input, or the MIDI channel for a MIDI
+device, whose messages are then streamed to the console.
+`Focusrite USB ASIO Input 1.json` is a ready template; settings files are named after
+the input device, with its exact capitalization.
+
+A folder is mixed onto the selected outputs with no ASIO input monitoring unless
 `--in` is given. Files of any channel count play on all outputs, wrapping when there
-are more outputs than file channels, and a file's sample rate is converted to the
+are more outputs than file channels, and each file's sample rate is converted to the
 driver's rate.
 
-On startup the program prints every input channel of the selected ASIO driver and
-every MIDI input device, so the indices used by `--in` and `--midi-in` are listed
-before monitoring starts.
+On startup the program lists every installed ASIO driver, then every MIDI input
+device.
 
 While running: `m` mute, `+`/`-` gain, `p` open the ASIO control panel, `q` quit.
 

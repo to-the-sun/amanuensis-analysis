@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "asio_abi.h"
 #include "dsp.h"
@@ -290,46 +291,108 @@ typedef struct {
     double fraction;
 } Track;
 
-static Track playing, queued;
-static CRITICAL_SECTION queueLock;
-static int playlistMode, queueReady, queueStalled;
-static char audioFiles[QUEUE_FILES][MAX_PATH];
-static int audioFileCount, audioFileNext;
+static wchar_t *long_path(const wchar_t *path)
+{
+    if (!wcsncmp(path, L"\\\\?\\", 4)) {
+        size_t size = (wcslen(path) + 1) * sizeof(wchar_t);
+        wchar_t *copy = malloc(size);
+        if (copy) memcpy(copy, path, size);
+        return copy;
+    }
+
+    wchar_t full[32768];
+    size_t length = wcslen(path);
+    int drive = length >= 3 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/');
+    int unc = length >= 2 && path[0] == L'\\' && path[1] == L'\\';
+    const wchar_t *source = path;
+
+    if (!drive && !unc) {
+        DWORD result = GetFullPathNameW(path, 32768, full, NULL);
+        if (!result || result >= 32768) return NULL;
+        source = full;
+        unc = full[0] == L'\\' && full[1] == L'\\';
+    }
+
+    length = wcslen(source);
+    wchar_t *result = malloc((length + (unc ? 7 : 5)) * sizeof(wchar_t));
+    if (!result) return NULL;
+    if (unc) swprintf(result, length + 7, L"\\\\?\\UNC\\%ls", source + 2);
+    else swprintf(result, length + 5, L"\\\\?\\%ls", source);
+    for (wchar_t *character = result; *character; character++)
+        if (*character == L'/') *character = L'\\';
+    return result;
+}
+
+static wchar_t *widen(const char *text)
+{
+    int length = MultiByteToWideChar(CP_ACP, 0, text, -1, NULL, 0);
+    if (length <= 0) return NULL;
+    wchar_t *wide = malloc((size_t)length * sizeof(wchar_t));
+    if (wide) MultiByteToWideChar(CP_ACP, 0, text, -1, wide, length);
+    return wide;
+}
+
+static int is_folder_w(const wchar_t *path)
+{
+    DWORD attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static void print_wide_path(const wchar_t *path)
+{
+    if (!wcsncmp(path, L"\\\\?\\UNC\\", 8)) printf("\\\\%ls", path + 8);
+    else printf("%ls", path + (wcsncmp(path, L"\\\\?\\", 4) ? 0 : 4));
+}
+
+static int playlistMode;
+static wchar_t *audioFiles[QUEUE_FILES];
+static int audioFileCount;
+static const wchar_t *playlistFolder;
+static Track *stems;
+static int stemCount;
 
 static int compare_names(const void *a, const void *b)
 {
-    return _stricmp(a, b);
+    return _wcsicmp(*(const wchar_t *const *)a, *(const wchar_t *const *)b);
 }
 
-static int scan_audio_files(const char *folder)
+static int scan_audio_files(const wchar_t *folder)
 {
-    char pattern[MAX_PATH + 4];
-    snprintf(pattern, sizeof pattern, "%s\\*", folder);
+    size_t folderLength = wcslen(folder);
+    wchar_t *pattern = malloc((folderLength + 3) * sizeof(wchar_t));
+    if (!pattern) return -1;
+    swprintf(pattern, folderLength + 3, L"%ls\\*", folder);
 
-    WIN32_FIND_DATAA entry;
-    HANDLE find = FindFirstFileA(pattern, &entry);
+    WIN32_FIND_DATAW entry;
+    HANDLE find = FindFirstFileW(pattern, &entry);
+    free(pattern);
     if (find == INVALID_HANDLE_VALUE) return -1;
 
     do {
-        const char *extension = strrchr(entry.cFileName, '.');
+        const wchar_t *extension = wcsrchr(entry.cFileName, L'.');
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !extension) continue;
-        if (_stricmp(extension, ".wav") || audioFileCount == QUEUE_FILES) continue;
-        snprintf(audioFiles[audioFileCount++], MAX_PATH, "%s\\%s", folder, entry.cFileName);
-    } while (FindNextFileA(find, &entry));
+        if (_wcsicmp(extension, L".wav") || audioFileCount == QUEUE_FILES) continue;
+
+        size_t nameLength = wcslen(entry.cFileName);
+        wchar_t *file = malloc((folderLength + nameLength + 2) * sizeof(wchar_t));
+        if (!file) continue;
+        swprintf(file, folderLength + nameLength + 2, L"%ls\\%ls", folder, entry.cFileName);
+        audioFiles[audioFileCount++] = file;
+    } while (FindNextFileW(find, &entry));
     FindClose(find);
 
-    qsort(audioFiles, (size_t)audioFileCount, MAX_PATH, compare_names);
+    qsort(audioFiles, (size_t)audioFileCount, sizeof audioFiles[0], compare_names);
     return audioFileCount;
 }
 
-static int decode_track(Track *track, const char *path)
+static int decode_track(Track *track, const wchar_t *path)
 {
     unsigned channels = 0, rate = 0;
     drwav_uint64 frames = 0;
-    float *samples = drwav_open_file_and_read_pcm_frames_f32(path, &channels, &rate, &frames, NULL);
+    float *samples = drwav_open_file_and_read_pcm_frames_f32_w(path, &channels, &rate, &frames, NULL);
     if (!samples || !channels || !rate || !frames) {
         drwav_free(samples, NULL);
-        log_error("Could not decode '%s'.\n", path);
+        log_error("Could not decode '%ls'.\n", path);
         return -1;
     }
 
@@ -341,95 +404,89 @@ static int decode_track(Track *track, const char *path)
     return 0;
 }
 
-/* Decodes the next queued file on the main thread; the ASIO callback only ever
-   picks up a track that is already decoded. */
-static void queue_next_track(void)
+static int start_playlist_w(const wchar_t *folder)
 {
-    if (queueStalled || !audioFileCount) return;
-
-    EnterCriticalSection(&queueLock);
-    int needed = !queueReady;
-    LeaveCriticalSection(&queueLock);
-    if (!needed) return;
-
-    for (int remaining = audioFileCount; remaining > 0; remaining--) {
-        Track track;
-        int loaded = decode_track(&track, audioFiles[audioFileNext]);
-        audioFileNext = (audioFileNext + 1) % audioFileCount;
-        if (loaded != 0) {
-            if (remaining == 1) {
-                log_error("Every audio file in the queue failed to decode.\n");
-                queueStalled = 1;
-            }
-            continue;
-        }
-
-        EnterCriticalSection(&queueLock);
-        queued = track;
-        queueReady = 1;
-        LeaveCriticalSection(&queueLock);
-        return;
+    wchar_t *path = long_path(folder);
+    if (!path) {
+        log_error("Could not resolve the folder path.\n");
+        return -1;
     }
+    if (scan_audio_files(path) <= 0) {
+        log_error("Could not find any .wav files in '%ls'.\n", path);
+        free(path);
+        return -1;
+    }
+    playlistFolder = path;
+
+    stems = calloc((size_t)audioFileCount, sizeof *stems);
+    if (!stems) {
+        log_error("Out of memory for %d audio files.\n", audioFileCount);
+        return -1;
+    }
+
+    for (int i = 0; i < audioFileCount; i++)
+        if (decode_track(&stems[stemCount], audioFiles[i]) == 0) stemCount++;
+
+    if (!stemCount) {
+        log_error("Every audio file in the folder failed to decode.\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int start_playlist(const char *folder)
 {
-    if (scan_audio_files(folder) <= 0) {
-        log_error("Could not find any .wav files in '%s'.\n", folder);
+    wchar_t *path = widen(folder);
+    if (!path) {
+        log_error("Could not convert the folder path.\n");
         return -1;
     }
-
-    InitializeCriticalSection(&queueLock);
-    queue_next_track();
-    if (!queueReady) return -1;
-
-    playing = queued;
-    queueReady = 0;
-    return 0;
+    int result = start_playlist_w(path);
+    free(path);
+    return result;
 }
 
-static void take_queued_track(void)
+static float track_sample(const Track *track, int output)
 {
-    if (!TryEnterCriticalSection(&queueLock)) return;
-    if (queueReady) {
-        playing = queued;
-        queueReady = 0;
+    if (!track->samples || track->position >= track->frames) return 0.0f;
+
+    size_t channel = (size_t)output % track->channels;
+    drwav_uint64 next = track->position + 1 < track->frames ? track->position + 1 : track->position;
+    const float *a = track->samples + (size_t)track->position * track->channels + channel;
+    const float *b = track->samples + (size_t)next * track->channels + channel;
+    return *a + (*b - *a) * (float)track->fraction;
+}
+
+static void advance_tracks(void)
+{
+    int finished = 1;
+    for (int i = 0; i < stemCount; i++) {
+        Track *track = &stems[i];
+        if (track->position >= track->frames) continue;
+
+        track->fraction += (double)track->rate / g.rate;
+        drwav_uint64 whole = (drwav_uint64)track->fraction;
+        track->fraction -= (double)whole;
+        track->position += whole;
+        if (track->position < track->frames) finished = 0;
     }
-    LeaveCriticalSection(&queueLock);
-}
 
-static float track_sample(int output)
-{
-    if (!playing.samples) return 0.0f;
-
-    size_t channel = (size_t)output % playing.channels;
-    drwav_uint64 next = playing.position + 1 < playing.frames ? playing.position + 1 : playing.position;
-    const float *a = playing.samples + (size_t)playing.position * playing.channels + channel;
-    const float *b = playing.samples + (size_t)next * playing.channels + channel;
-    return *a + (*b - *a) * (float)playing.fraction;
-}
-
-static void advance_track(void)
-{
-    if (playing.samples) {
-        playing.fraction += (double)playing.rate / g.rate;
-        drwav_uint64 whole = (drwav_uint64)playing.fraction;
-        playing.fraction -= (double)whole;
-        playing.position += whole;
-        if (playing.position < playing.frames) return;
-
-        drwav_free(playing.samples, NULL);
-        memset(&playing, 0, sizeof playing);
+    if (!finished) return;
+    for (int i = 0; i < stemCount; i++) {
+        stems[i].position = 0;
+        stems[i].fraction = 0;
     }
-    take_queued_track();
 }
 
 static void render_playlist(float *dst, int outputs, int frames)
 {
     for (int i = 0; i < frames; i++) {
-        for (int j = 0; j < outputs; j++)
-            dst[(size_t)j * frames + i] = track_sample(j);
-        advance_track();
+        for (int j = 0; j < outputs; j++) {
+            float value = 0.0f;
+            for (int s = 0; s < stemCount; s++) value += track_sample(&stems[s], j);
+            dst[(size_t)j * frames + i] = value;
+        }
+        advance_tracks();
     }
 }
 
@@ -684,45 +741,6 @@ static int open_driver(const char *name, HWND window)
     return 0;
 }
 
-static void print_channels(const char *label, ASIOBool isInput, int count)
-{
-    printf("%s:\n", label);
-    if (!count) {
-        printf("  (none)\n");
-        return;
-    }
-
-    for (int channel = 0; channel < count; channel++) {
-        ASIOChannelInfo info;
-        memset(&info, 0, sizeof info);
-        info.channel = channel;
-        info.isInput = isInput;
-
-        char name[33] = "(unnamed)";
-        if (g.asio->vtable->getChannelInfo(g.asio, &info) == ASE_OK) {
-            memcpy(name, info.name, 32);
-            name[32] = 0;
-        }
-        printf("  %2d  %s\n", channel + 1, name);
-    }
-}
-
-static void print_midi_inputs(void)
-{
-    UINT count = midiInGetNumDevs();
-    printf("MIDI inputs:\n");
-    if (!count) {
-        printf("  (none)\n");
-        return;
-    }
-
-    for (UINT i = 0; i < count; i++) {
-        MIDIINCAPS caps;
-        if (midiInGetDevCaps(i, &caps, sizeof caps) != MMSYSERR_NOERROR) continue;
-        printf("  %2u  %s\n", i, caps.szPname);
-    }
-}
-
 static void print_selection(const int *channels, int count)
 {
     for (int i = 0; i < count; i++) printf("%s%d", i ? "," : "", channels[i] + 1);
@@ -955,14 +973,6 @@ static void list_devices(void)
         if (midiInGetDevCaps(i, &caps, sizeof caps) == MMSYSERR_NOERROR) printf("  %u  %s\n", i, caps.szPname);
     }
     if (!inputs) printf("  (none)\n");
-
-    printf("MIDI outputs:\n");
-    UINT outputs = midiOutGetNumDevs();
-    for (UINT i = 0; i < outputs; i++) {
-        MIDIOUTCAPS caps;
-        if (midiOutGetDevCaps(i, &caps, sizeof caps) == MMSYSERR_NOERROR) printf("  %u  %s\n", i, caps.szPname);
-    }
-    if (!outputs) printf("  (none)\n");
 }
 
 static void adjust_gain(float delta)
@@ -1028,8 +1038,8 @@ static void shutdown_monitor(void)
         g.asio = NULL;
     }
     free_buffers();
-    drwav_free(playing.samples, NULL);
-    drwav_free(queued.samples, NULL);
+    for (int i = 0; i < stemCount; i++) drwav_free(stems[i].samples, NULL);
+    free(stems);
 }
 
 static int stream_midi(const char *device, int channel)
@@ -1086,6 +1096,12 @@ static int is_json_path(const char *path)
 {
     const char *dot = strrchr(path, '.');
     return dot && !_stricmp(dot, ".json");
+}
+
+static int is_folder(const char *path)
+{
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 static const char *json_value(const char *text, const char *key)
@@ -1197,14 +1213,14 @@ static void pause_on_error(int exitCode)
     getchar();
 }
 
-static int run(int argc, char **argv)
+static int run(int argc, char **argv, const wchar_t *folder)
 {
     log_trace("run start\n");
     Options options;
     memset(&options, 0, sizeof options);
     options.synth = 1;
 
-    const char *settings = argc > 1 && is_json_path(argv[1]) ? argv[1] : NULL;
+    const char *settings = !folder && argc > 1 && is_json_path(argv[1]) ? argv[1] : NULL;
     if (settings && load_settings(settings, &options) != 0) return 1;
 
     int parsed = parse_args(argc - (settings ? 1 : 0), argv + (settings ? 1 : 0), &options);
@@ -1234,9 +1250,11 @@ static int run(int argc, char **argv)
     char names[64][128];
     int driverCount = list_drivers(names, 64);
 
-    if (options.instrument[0]) {
-        DWORD attributes = GetFileAttributesA(options.instrument);
-        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    if (folder) {
+        playlistMode = 1;
+        if (start_playlist_w(folder) != 0) return 1;
+    } else if (options.instrument[0]) {
+        if (is_folder(options.instrument)) {
             playlistMode = 1;
             if (start_playlist(options.instrument) != 0) return 1;
         } else if (resolve_driver(options.instrument, names, driverCount)) {
@@ -1288,10 +1306,9 @@ static int run(int argc, char **argv)
     log_trace("driver opened\n");
 
     printf("%s\n\n", g.driverName);
-    print_channels("Audio inputs", ASIOTrue, g.inCount);
-    print_midi_inputs();
+    list_devices();
     printf("\n");
-    log_trace("channels listed\n");
+    log_trace("devices listed\n");
 
     if (playlistMode) {
         if (select_channels(options.in, g.inCount, g.inCh, &g.nIn, 0, "input") != 0) goto done;
@@ -1333,7 +1350,11 @@ static int run(int argc, char **argv)
     printf(" -> out ");
     print_selection(g.outCh, g.nOut);
     printf(", gain %+.1f dB\n", g.gainDb);
-    if (playlistMode) printf("  %d wav files queued from %s\n", audioFileCount, options.instrument);
+    if (playlistMode) {
+        printf("  %d wav files mixed from ", stemCount);
+        print_wide_path(playlistFolder);
+        printf("\n");
+    }
 
     if (g.midiInIndex >= 0) {
         MIDIINCAPS caps;
@@ -1358,7 +1379,6 @@ static int run(int argc, char **argv)
     ULONGLONG lastDraw = 0;
     while (!g.quit) {
         pump_messages();
-        queue_next_track();
 
         if (InterlockedExchange(&g.reset, 0)) {
             log_line("driver settings changed, reconfiguring");
@@ -1408,11 +1428,28 @@ done:
     return exitCode;
 }
 
+static wchar_t *dropped_folder(void)
+{
+    int count = 0;
+    LPWSTR *arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!arguments) return NULL;
+
+    wchar_t *folder = NULL;
+    if (count > 1) {
+        wchar_t *path = long_path(arguments[1]);
+        if (path && is_folder_w(path)) folder = path;
+        else free(path);
+    }
+    LocalFree(arguments);
+    return folder;
+}
+
 int main(int argc, char **argv)
 {
     SetUnhandledExceptionFilter(crash_handler);
     open_error_log();
-    int exitCode = run(argc, argv);
+    wchar_t *folder = dropped_folder();
+    int exitCode = run(argc - (folder ? 1 : 0), argv + (folder ? 1 : 0), folder);
     pause_on_error(exitCode);
     if (errorLog) fclose(errorLog);
     return exitCode;
