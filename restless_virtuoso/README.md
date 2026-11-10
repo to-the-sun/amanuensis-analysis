@@ -1,8 +1,8 @@
 # restless_virtuoso
 
-Plays selected ASIO input channels on selected ASIO output channels, for monitoring
-an audio interface at ASIO latency. MIDI input can be played through a built-in sine
-synth and/or forwarded to a MIDI output.
+Plays selected ASIO input channels, or the WAV files in a folder, on selected ASIO
+output channels, for monitoring an audio interface at ASIO latency. MIDI input can
+be played through a built-in sine synth and/or forwarded to a MIDI output.
 
 The driver's own ASIO interface is used directly, so no ASIO SDK download, PortAudio
 or WASAPI is involved and no non-ASIO device can be selected.
@@ -41,15 +41,22 @@ to start from it:
 
 ```json
 {
-  "device": "Focusrite USB ASIO",
+  "instrument": "Focusrite USB ASIO",
   "input-channel": 1
 }
 ```
 
-`device` is an ASIO driver or MIDI input name from `--list`. `input-channel` is the
-1-based ASIO input, or the MIDI channel for a MIDI device, whose messages are then
-streamed to the console. `Focusrite USB ASIO Input 1.json` is a ready template;
-settings files are named after the input device, with its exact capitalization.
+`instrument` is an ASIO driver or MIDI input name from `--list`, or the absolute path
+of a folder. A folder plays every `.wav` file in it, in name order, back to back, and
+the first file follows the last one immediately. `input-channel` is the 1-based ASIO
+input, or the MIDI channel for a MIDI device, whose messages are then streamed to the
+console. `Focusrite USB ASIO Input 1.json` is a ready template; settings files are
+named after the input device, with its exact capitalization.
+
+A folder is played on the selected outputs with no ASIO input monitoring unless
+`--in` is given. Files of any channel count play on all outputs, wrapping when there
+are more outputs than file channels, and a file's sample rate is converted to the
+driver's rate.
 
 On startup the program prints every input channel of the selected ASIO driver and
 every MIDI input device, so the indices used by `--in` and `--midi-in` are listed
