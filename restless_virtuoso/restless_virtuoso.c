@@ -514,12 +514,14 @@ static float track_sample(const Track *track, int output)
 typedef struct {
     volatile LONG seq;
     volatile LONGLONG qpc;
+    volatile LONG elapsed;
     DWORD pid;
     wchar_t folder[1024];
 } LoopCue;
 
 static HANDLE cueMapping;
 static LoopCue *cue;
+static ULONGLONG playStart;
 
 typedef struct TakeChunk {
     struct TakeChunk *next;
@@ -561,9 +563,11 @@ static void send_loop_start(void)
     open_cue();
     if (!cue) return;
 
-    LARGE_INTEGER now;
+    LARGE_INTEGER now, frequency;
     QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
     cue->qpc = now.QuadPart;
+    cue->elapsed = (LONG)((now.QuadPart - (LONGLONG)playStart) * 1000 / frequency.QuadPart);
     take.seen = InterlockedIncrement(&cue->seq);
 }
 
@@ -618,7 +622,8 @@ static void check_loop_cue(void)
 
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
-    add_pass((double)(LONGLONG)((ULONGLONG)qpc - take.origin) * 1000.0 / (double)frequency.QuadPart);
+    double ms = (double)(LONGLONG)((ULONGLONG)qpc - take.origin) * 1000.0 / (double)frequency.QuadPart;
+    add_pass(take.passCount ? ms : -(double)cue->elapsed);
     take.active = take.rate > 0;
 }
 
@@ -2283,7 +2288,12 @@ static int run(int argc, char **argv, const wchar_t *folder)
         goto done;
     }
     g.started = 1;
-    if (playlistMode) send_loop_start();
+    if (playlistMode) {
+        LARGE_INTEGER start;
+        QueryPerformanceCounter(&start);
+        playStart = (ULONGLONG)start.QuadPart;
+        send_loop_start();
+    }
     log_trace("started\n");
 
     init_console_input();

@@ -96,7 +96,10 @@ what it plays at the first cue it receives and marks a pass for that cue and for
 later one. It streams the take, a mono mix of its outputs, into the `[palettes]` folder
 beside the stems folder as `palette_YYYY-MM-DD-HH-MM-SS.wav`, 16-bit PCM, and
 `passes_YYYY-MM-DD-HH-MM-SS.txt`
-with one `index, milliseconds 1.;` line per pass, measured from the first cue. The take
+with one `index, milliseconds 1.;` line per pass, measured from the first cue. An
+instance that starts after the stems instance has already begun joins at the next loop
+and writes its first pass as a negative number, the milliseconds the stems instance had
+been playing by then. The take
 ends, and its files are completed, when the stems instance exits or the recording
 instance is closed. Closing with the console's own close button is handled too, since
 the program waits for the files before it lets Windows end it.
