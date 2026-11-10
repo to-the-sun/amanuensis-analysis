@@ -344,12 +344,12 @@ static void print_wide_path(const wchar_t *path)
     else printf("%ls", path + (wcsncmp(path, L"\\\\?\\", 4) ? 0 : 4));
 }
 
-static Track playing, queued;
-static CRITICAL_SECTION queueLock;
-static int playlistMode, queueReady, queueStalled;
+static int playlistMode;
 static wchar_t *audioFiles[QUEUE_FILES];
-static int audioFileCount, audioFileNext;
+static int audioFileCount;
 static const wchar_t *playlistFolder;
+static Track *stems;
+static int stemCount;
 
 static int compare_names(const void *a, const void *b)
 {
@@ -404,37 +404,6 @@ static int decode_track(Track *track, const wchar_t *path)
     return 0;
 }
 
-/* Decodes the next queued file on the main thread; the ASIO callback only ever
-   picks up a track that is already decoded. */
-static void queue_next_track(void)
-{
-    if (queueStalled || !audioFileCount) return;
-
-    EnterCriticalSection(&queueLock);
-    int needed = !queueReady;
-    LeaveCriticalSection(&queueLock);
-    if (!needed) return;
-
-    for (int remaining = audioFileCount; remaining > 0; remaining--) {
-        Track track;
-        int loaded = decode_track(&track, audioFiles[audioFileNext]);
-        audioFileNext = (audioFileNext + 1) % audioFileCount;
-        if (loaded != 0) {
-            if (remaining == 1) {
-                log_error("Every audio file in the queue failed to decode.\n");
-                queueStalled = 1;
-            }
-            continue;
-        }
-
-        EnterCriticalSection(&queueLock);
-        queued = track;
-        queueReady = 1;
-        LeaveCriticalSection(&queueLock);
-        return;
-    }
-}
-
 static int start_playlist_w(const wchar_t *folder)
 {
     wchar_t *path = long_path(folder);
@@ -449,12 +418,19 @@ static int start_playlist_w(const wchar_t *folder)
     }
     playlistFolder = path;
 
-    InitializeCriticalSection(&queueLock);
-    queue_next_track();
-    if (!queueReady) return -1;
+    stems = calloc((size_t)audioFileCount, sizeof *stems);
+    if (!stems) {
+        log_error("Out of memory for %d audio files.\n", audioFileCount);
+        return -1;
+    }
 
-    playing = queued;
-    queueReady = 0;
+    for (int i = 0; i < audioFileCount; i++)
+        if (decode_track(&stems[stemCount], audioFiles[i]) == 0) stemCount++;
+
+    if (!stemCount) {
+        log_error("Every audio file in the folder failed to decode.\n");
+        return -1;
+    }
     return 0;
 }
 
@@ -470,48 +446,47 @@ static int start_playlist(const char *folder)
     return result;
 }
 
-static void take_queued_track(void)
+static float track_sample(const Track *track, int output)
 {
-    if (!TryEnterCriticalSection(&queueLock)) return;
-    if (queueReady) {
-        playing = queued;
-        queueReady = 0;
-    }
-    LeaveCriticalSection(&queueLock);
+    if (!track->samples || track->position >= track->frames) return 0.0f;
+
+    size_t channel = (size_t)output % track->channels;
+    drwav_uint64 next = track->position + 1 < track->frames ? track->position + 1 : track->position;
+    const float *a = track->samples + (size_t)track->position * track->channels + channel;
+    const float *b = track->samples + (size_t)next * track->channels + channel;
+    return *a + (*b - *a) * (float)track->fraction;
 }
 
-static float track_sample(int output)
+static void advance_tracks(void)
 {
-    if (!playing.samples) return 0.0f;
+    int finished = 1;
+    for (int i = 0; i < stemCount; i++) {
+        Track *track = &stems[i];
+        if (track->position >= track->frames) continue;
 
-    size_t channel = (size_t)output % playing.channels;
-    drwav_uint64 next = playing.position + 1 < playing.frames ? playing.position + 1 : playing.position;
-    const float *a = playing.samples + (size_t)playing.position * playing.channels + channel;
-    const float *b = playing.samples + (size_t)next * playing.channels + channel;
-    return *a + (*b - *a) * (float)playing.fraction;
-}
-
-static void advance_track(void)
-{
-    if (playing.samples) {
-        playing.fraction += (double)playing.rate / g.rate;
-        drwav_uint64 whole = (drwav_uint64)playing.fraction;
-        playing.fraction -= (double)whole;
-        playing.position += whole;
-        if (playing.position < playing.frames) return;
-
-        drwav_free(playing.samples, NULL);
-        memset(&playing, 0, sizeof playing);
+        track->fraction += (double)track->rate / g.rate;
+        drwav_uint64 whole = (drwav_uint64)track->fraction;
+        track->fraction -= (double)whole;
+        track->position += whole;
+        if (track->position < track->frames) finished = 0;
     }
-    take_queued_track();
+
+    if (!finished) return;
+    for (int i = 0; i < stemCount; i++) {
+        stems[i].position = 0;
+        stems[i].fraction = 0;
+    }
 }
 
 static void render_playlist(float *dst, int outputs, int frames)
 {
     for (int i = 0; i < frames; i++) {
-        for (int j = 0; j < outputs; j++)
-            dst[(size_t)j * frames + i] = track_sample(j);
-        advance_track();
+        for (int j = 0; j < outputs; j++) {
+            float value = 0.0f;
+            for (int s = 0; s < stemCount; s++) value += track_sample(&stems[s], j);
+            dst[(size_t)j * frames + i] = value;
+        }
+        advance_tracks();
     }
 }
 
@@ -1071,8 +1046,8 @@ static void shutdown_monitor(void)
         g.asio = NULL;
     }
     free_buffers();
-    drwav_free(playing.samples, NULL);
-    drwav_free(queued.samples, NULL);
+    for (int i = 0; i < stemCount; i++) drwav_free(stems[i].samples, NULL);
+    free(stems);
 }
 
 static int stream_midi(const char *device, int channel)
@@ -1384,7 +1359,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
     print_selection(g.outCh, g.nOut);
     printf(", gain %+.1f dB\n", g.gainDb);
     if (playlistMode) {
-        printf("  %d wav files queued from ", audioFileCount);
+        printf("  %d wav files mixed from ", stemCount);
         print_wide_path(playlistFolder);
         printf("\n");
     }
@@ -1412,7 +1387,6 @@ static int run(int argc, char **argv, const wchar_t *folder)
     ULONGLONG lastDraw = 0;
     while (!g.quit) {
         pump_messages();
-        queue_next_track();
 
         if (InterlockedExchange(&g.reset, 0)) {
             log_line("driver settings changed, reconfiguring");
