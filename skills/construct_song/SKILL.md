@@ -32,6 +32,8 @@ each layer a role and to keep layers from masking each other.
   one mixdown.
 - The stems sum to the song: every stem passes through the same master stages
   and the same gain envelopes.
+- At least one pattern plays at every point between the master fade-in and
+  fade-out. A break drops to one layer, never to zero.
 - Delivery is one zip containing the song, every stem and the full report.
 
 ## Vocabulary
@@ -49,17 +51,29 @@ each layer a role and to keep layers from masking each other.
   arrangement removes it.
 - **Unit**: one arrangement step, normally two periods.
 
-## 0. Analyze the palette
+## 0. Use the reports analyzer's evidence
 
-Start with the audio-pattern-reports analyzer. It gives silence-delimited
-sections, novelty and lag peaks, which show where the material changes.
+Start with the audio-pattern-reports analyzer. It measures the material
+independently and supplies the section boundaries and lag evidence this skill
+uses.
 
 ```bash
 python3 skills/audio-pattern-reports/analyze_audio.py palette.wav --json analysis.json
 ```
 
-Use the sections to avoid cutting across silence or a tonal change. Treat its
-lag peaks as candidates only; section 1 measures the period directly.
+Read its output:
+
+- `sections`: silence-delimited spans (0.1 s RMS, −50 dB, 0.5 s minimum
+  silence). Patterns cannot cross these boundaries.
+- `candidates[].onset_peaks`: autocorrelation of the onset envelope.
+- `candidates[].lag_peaks`: summed per-band lag similarity, the strongest
+  period evidence.
+- `candidates[].band_peaks`: per-band autocorrelation (sub, bass, lowmid, mid,
+  high, air), used to separate a full loop from a half-period.
+- `novelty_peaks`: where the texture changes.
+
+Do not invent sections or a grid when the analyzer found silence or a clear
+boundary.
 
 ## 1. Measure the period
 
@@ -89,6 +103,13 @@ period; `duration / period` is the segment count.
 If no peak exceeds ~0.1, the material has no usable repetition; say so instead
 of inventing a grid.
 
+Confirm the period against the analyzer: every usable section should show a
+`lag_peaks` entry at the period or an integer multiple, and the `high` or `air`
+band should support the full loop. If the bass repeats at half the period while
+the high band repeats at the full period, the full period is the loop
+(nested-period rule). A section shorter than one period contributes no
+segments.
+
 ## 2. Segment grid, runs and complexity
 
 Try eight phase offsets inside one period and keep the phase that maximizes the
@@ -100,6 +121,10 @@ mean similarity of adjacent segments. For each segment compute:
 
 Similarity is `0.5 * cosine(spectrum) + 0.5 * corr(rhythm)`. A run is a maximal
 sequence of adjacent segments above `max(0.45, percentile(similarity, 60))`.
+
+A run cannot cross a section boundary. A segment belongs to a section only
+when its whole span lies inside it, and adjacency is computed only between
+segments of the same section.
 
 A run is a pattern only if the through-line holds across **every** segment:
 
@@ -173,13 +198,16 @@ SCHEDULE = [
     ('intro', 2, [0, 1],      -7.0),
     ('A',     4, [0, 1, 2],    0.0),
     ('B',     4, [0, 1, 2, 3], 1.0),
-    ('break', 1, [],         -60.0),
+    ('breakdown', 1, [0],    -5.0),
     ('A2',    2, [0, 1, 2],   -1.0),
     ('C',     4, list(range(N)), 1.5),
     ('D',     2, [1, 2, 3, 4], 0.5),
     ('outro', 2, [0, 1],      -6.0),
 ]
 ```
+
+No set is empty. A break is a drop to one layer, never to zero: at least one
+pattern plays at every point between the master fade-in and fade-out.
 
 Use 0.25–0.30 s fades on every entrance and exit, a 4 s fade-in and a 7 s
 fade-out on the shared section gain. One unit of silence before a chorus is an
@@ -304,7 +332,8 @@ complexity, used or not), and the master numbers.
 - [ ] Stems vs song: max residual ≤ 2 LSB; report the dB figure.
 - [ ] Every reported pattern has at least two full segments in the report.
 - [ ] Song layers are tonally compatible and non-negatively transient-aligned.
-- [ ] Section RMS arc rises into the full sections and the break is silent.
+- [ ] Section RMS arc rises into the full sections.
+- [ ] Minimum active layers is 1 between the master fade-in and fade-out.
 - [ ] Report builder exits 0 and the Range request returns 206.
 - [ ] Say plainly that the mix was measured, not auditioned.
 
@@ -326,5 +355,9 @@ complexity, used or not), and the master numbers.
   `min(0, over)` mutes everything below the threshold and produces a 30 dB crest.
 - A limiter that smooths gain after the sliding minimum lets peaks through.
 - Do not level stems after the master chain; it breaks the exact sum.
+- Never give a section an empty layer set. The silent break is the classic bug:
+  a multi-second hole in every stem. Use one layer instead.
+- A pattern that crosses an analyzer section boundary is not valid; split it or
+  drop the crossing segments.
 - Scale the final master by the loudest stem as well as the song, or a stem can
   clip at 16-bit and break the sum.
