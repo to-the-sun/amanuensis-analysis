@@ -15,19 +15,15 @@ measured, what is estimated, and where the uncertainty is.
 
 ## Core vocabulary
 
-- **Bar**: the base pulse, often about 2.0–2.14 s in this material.
-- **Pattern**: one contiguous repeated section. Its **loop length** is one full
-  repetition, normally an integer number of bars.
-- **Segment** in the generated reports: one full loop repetition. This is not
-  the same as a bar. A 2-bar pattern has two equal bars inside each segment.
-- **Pattern region**: ends at the last complete loop. A shorter tail is
-  excluded rather than reported, so every segment has the full loop length.
+- **Bar**: not an essential unit of this strategy, but equivalent to a measure in most standard depictions of music, generally smaller or the same size as the following measurements, though not necessarily.
+- **Segment** a single iteration of a repeating pattern. This is not necessarily
+  the same as a bar. 
+- **Pattern**: one contiguous repeated section of segments. A shorter tail is
+  excluded rather than reported, so every segment has a uniform length.
 
 All segments in a pattern have the same nominal length because the report
 imposes a uniform grid. The report does not independently detect every segment
-boundary. Say this explicitly if the user asks whether the lengths are
-"totally uniform": segments are uniform by construction; the audio is not
-proven sample-exact.
+boundary.
 
 ## 0. Inputs and preparation
 
