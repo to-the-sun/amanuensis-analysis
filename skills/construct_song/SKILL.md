@@ -1,229 +1,293 @@
 # Construct Song
 
-Use this skill when the user supplies a palette recording (mono mix plus its
-`passes` text file) and wants a finished song and stems, without using the
-repository's C tools to build it.
+Use this skill when the user supplies a palette recording (one continuous mono
+performance) and wants a finished song plus separate stems, without the
+repository's C tools.
 
-The palette is one continuous performance, not multitracks. The song is built by
-finding repeated 4-bar units, selecting units that agree harmonically and differ
-rhythmically, and layering them as separate tracks. Each stem is one of those
-units played as its own part; it is not a frequency band of one recording.
+The palette is not a multitrack. The song is assembled from material that is
+already in it: sequences of segments that repeat. You find those sequences,
+chop them on the measured grid, layer them as separate parts, and arrange them.
+Nothing is generated.
+
+## What is allowed
+
+The construction is limited to chopping, looping, arranging and mixing.
+
+- Allowed: trimming on the grid, equal-power crossfades, gain changes, fades,
+  panning, EQ, compression, limiting.
+- Not allowed: synthesis, sample replacement, reverb, delay, chorus,
+  saturation, pitch shifting, time-stretching, or any other effect. Do not
+  "repair" a layer with a filter that changes its rhythm or pitch.
+
+EQ is mixing: it changes the level of parts of the spectrum. Use it to give
+each layer a role and to keep layers from masking each other.
+
+## Guarantees
+
+- No `passes` file, loop-point table, or project-specific analysis code is
+  needed or used.
+- No tempo, meter, bar count or phrase length is assumed. The repeating period
+  is measured from the audio.
+- A **pattern** is a sequential repeating series of at least two **segments**.
+  A segment is valid when its rhythm and/or spectrum recurs in the next segment
+  (same onsets in the same places, same pitch content, same band shape).
+- Each stem is one pattern with its own gain/EQ role. It is never a frequency
+  band cut out of one mixdown.
+- The stems sum to the song: every stem passes through the same linear master
+  stages and the same gain envelopes.
 
 ## Vocabulary
 
-- **Bar**: four beats at the palette tempo, about 1.83 s at 131.4 BPM.
-- **Unit**: one 4-bar phrase, the loop length used for layering.
-- **Pattern**: a unit taken from a specific pass and bar offset.
-- **Layer**: one pattern assigned a role by EQ and level.
-- **Stem**: the rendered layer across the whole song, silent where the
+- **Segment**: one measured repetition period of the palette.
+- **Period**: the repeating time unit found by autocorrelation, at least 1 s so
+  subdivisions are not mistaken for segments.
+- **Pattern**: a run of at least two consecutive similar segments. Its audio is
+  the loop; its length is `segments * period`.
+- **Layer**: a pattern with a gain and EQ role.
+- **Stem**: a layer rendered across the whole song, silent where the
   arrangement removes it.
+- **Unit**: one pattern length, the arrangement step.
 
-## 0. Inputs
+## 0. Analyze the palette
 
-- `palette_<stamp>.wav`: mono PCM; its duration is the whole performance.
-- `passes_<stamp>.txt`: one line per pass, `index, loop_point_ms pad;`.
-  Pass `i` spans `[loop_point_ms_i, loop_point_ms_{i+1})`. The boundaries are
-  loop points, so every pass starts on the musical grid; the last pass runs to
-  the end of the file.
+Start with the audio-pattern-reports analyzer. It gives silence-delimited
+sections, novelty and lag peaks, which tell you where the material changes and
+which lags are worth checking. It does not choose patterns.
 
-Read the file, convert to float, and keep the pass table:
-
-```python
-P = []
-for line in open(passes):
-    q = line.replace(';', ' ').replace(',', ' ').split()
-    if q:
-        P.append((int(q[0]), float(q[1])))
-P.sort()
-START = {i: ms / 1000 for i, ms in P}
+```bash
+python3 skills/audio-pattern-reports/analyze_audio.py palette.wav --json analysis.json
 ```
 
-Confirm that pass durations are integer multiples of half a bar before relying
-on the grid.
+Use the sections to avoid cutting across silence or a tonal change. Treat the
+lag peaks as candidates only; section 1 measures the period directly.
 
-## 1. Grid and tempo
+## 1. Measure the period
 
-Pass durations are the most reliable tempo evidence: each is an exact multiple
-of two beats. Divide a long pass by its plausible bar count and average across
-passes. For the reference palette, `47484.8 ms / 26 bars = 1826.34 ms`, giving
-131.4 BPM and `BAR = 1.82640 s`; a 4-bar unit is 7.3056 s.
-
-Cross-check with a high-band onset detector (STFT 512, hop 64, flux above
-3.5 kHz). Real music here clusters at ~210–260 ms (eighth), ~450 ms (beat) and
-~1.8 s (bar). A flat histogram means the material has no usable pulse.
-
-Cross-check repetition with a coarse self-similarity matrix (0.25 s features,
-band energies plus 12 log bands): similarity peaks at the 4-bar lag confirm the
-unit length. Do not trust a 2-beat "loop point" as the pattern length; the
-palette repeats at 4 bars even though boundaries fall every 2 beats.
-
-## 2. Candidate units
-
-Slice every 4-bar unit that fits inside a pass, stepping 4 bars:
+Compute a positive log-flux onset envelope, then its autocorrelation. Search
+lags from 1.0 s to 8.0 s; anything shorter is usually a subdivision.
 
 ```python
-unit_len = 4 * BAR
-for pidx, ms in P:
-    a0 = ms / 1000
-    for b in range(0, int((end - a0) / BAR) - 3, 4):
-        seg = x[round((a0 + b * BAR) * SR):round((a0 + (b + 4) * BAR) * SR)]
+NFFT, HOP = 2048, 512
+S = np.abs(np.fft.rfft(frames * hann, axis=1))
+# 64 log-spaced bands, band energy (sum of squared magnitudes), not mean magnitude
+bands = np.stack([(S[:, a:b] ** 2).sum(axis=1) for a, b in band_edges], axis=1)
+logE = np.log(bands + 1e-6)
+flux = np.maximum(np.diff(logE, axis=0), 0).sum(axis=1)
+env = np.maximum(flux - median_filter(flux, 63), 0); env /= env.max()
+
+e = env - env.mean()
+nfft = 1 << int(np.ceil(np.log2(2 * len(e))))
+E = np.fft.rfft(e, nfft)
+ac = np.fft.irfft(E * np.conj(E), nfft)[:len(e)]
+ac /= np.maximum(len(e) - np.arange(len(e)), 1); ac /= ac[0]
 ```
 
-Skip units that are silent or shorter than the unit. Record `(pass, bar, time)`
-for every candidate; those three values identify it for the rest of the run.
+Find local maxima in the 1–8 s range. Choose the **shortest** peak whose value
+is at least 85% of the strongest peak and whose 2x and 3x multiples are also at
+least 40% of the strongest. Refine it with parabolic interpolation. That is the
+period; `duration / period` is the number of segments.
 
-## 3. Per-unit features
+Record the period and the segment count. If the ACF has no peak above ~0.1,
+the material has no usable repetition; say so instead of inventing a grid.
 
-Compute four things for each unit.
+## 2. Segment grid, similarity and runs
 
-1. **Band balance** from a 2048-point STFT: energy share below 80 Hz, 80–250,
-   250–1200, 1200–4000 and above 4 kHz. This decides role, not instrument:
-   low-dominant units become bass, high-dominant units become percussion.
-2. **Rhythm signature**: one value per sixteenth (64 slots over 4 bars), from
-   the percussive component of the spectrogram (magnitude minus a time-median
-   harmonic estimate). Normalize to peak 1. Two units whose signatures are
-   uncorrelated occupy different slots and layer cleanly.
-3. **Pitch-class content** from f0 tracking, not from raw spectral binning.
-   Raw chroma is dominated by low-frequency energy and returns the same answer
-   for everything. Autocorrelation per 46 ms frame gives usable f0s:
+Try eight phase offsets inside one period and keep the phase that maximizes the
+mean similarity of adjacent segments. For each segment compute:
 
-   ```python
-   ac = np.fft.irfft(np.abs(np.fft.rfft(pre * hann)) ** 2, n, axis=1)
-   ac /= ac[:, :1]
-   k = np.argmax(ac[:, int(SR/700):int(SR/60)], axis=1) + int(SR/700)
-   f0 = SR / k
-   ```
+1. **Spectrum**: the mean log-band vector over the segment (64 values).
+2. **Rhythm**: the onset envelope resampled to 24 slots over the segment.
 
-   Keep frames with periodicity strength above ~0.25, fold to pitch class with
-   `round(69 + 12*log2(f0/440)) % 12`, and weight by strength. The reference run
-   produced a stable F#/G#/C#/E/A distribution, while the first 185 s of the
-   palette is F/C based. Those eras must not be layered together: F against F#
-   is a semitone clash.
-4. **Phase**: the slot index of maximum percussive energy, modulo 16. Most units
-   of one performance share it; units that differ by whole bars can still be
-   aligned, but check the shift before trusting it.
+Segment similarity is `0.5 * cosine(spectrum) + 0.5 * corr(rhythm)`. A run is a
+maximal sequence of adjacent segments whose similarity exceeds
+`max(0.45, percentile(similarity, 60))`. Keep runs of at least two segments.
 
-## 4. Choose the layer set
+Candidate patterns are windows of two or three consecutive segments inside a
+run. Score each by the mean adjacent similarity of its segments. Record its
+start/end time, segment count, score, RMS, band profile and chroma.
 
-Score combinations of four units, all from the mutually compatible tonality:
+## 3. Choose the layer set
 
-- **Harmony**: mean pairwise correlation of the f0 pitch-class vectors, target
-  above +0.85.
-- **Rhythm**: mean pairwise correlation of rhythm signatures; near 0 is ideal,
-  strongly positive means doubling the same part.
-- **Band separation**: mean `1 - corr(band vectors)`, so the four cover
-  different registers.
-- **Phase**: prefer pairs whose best circular shift is small, or apply the shift
-  to the audio.
+Reject candidates that are more than 9 dB below the loudest candidate: a quiet
+window will need so much makeup gain that it raises noise instead of adding a
+part. Then require:
 
-Assign roles from the chosen units' own balance rather than from taste:
-low-dominant → bass, high-dominant/noisy → percussion, mid-dominant tonal →
-chords, mid-high with clear attacks → lead. In the reference run:
+- **Tonal compatibility**: pairwise correlation of the f0 chroma vectors at
+  least 0.7 (fall back to 0.5 only if nothing qualifies). Never layer across a
+  tonal shift; a semitone clash cannot be fixed by EQ.
+- **No overlap in time**: each layer comes from a different part of the
+  performance, so the stems are genuinely different material.
+- **Spectral role coverage**: compare each candidate's band profile with the
+  palette average, `d = mean_log_band - global_mean_log_band`. Classify by the
+  band where `d` is largest (low / mid / high). Prefer a set that covers
+  different roles.
+- **Rhythm decorrelation**: mean pairwise rhythm correlation near zero. Strong
+  positive correlation means two layers are doubling the same part.
+- **Profile contrast**: mean absolute difference of the `d` vectors should be
+  large enough that the layers occupy different spectral space.
 
-| Layer | Source | Role EQ | Level |
-|---|---|---|---|
-| bass | pass 26, bar 8 (524.7 s) | LP 300 Hz | −20 dBFS |
-| perc | pass 18, bar 0 (228.9 s) | HP 1.5 kHz | −25 dBFS |
-| chords | pass 22, bar 8 (356.7 s) | 200 Hz–5 kHz | −18 dBFS |
-| lead | pass 24, bar 12 (440.7 s) | HP 900 Hz, +3 dB @ 3 kHz | −21 dBFS |
+Choose three or four layers. Fewer good layers sound better than four that
+mask each other. Assign roles from measurement, not taste: relative low boost
+becomes bass, relative mid boost becomes chords, relative high boost becomes
+air/percussion.
 
-Correlation between the four rendered layers should be near zero; if two layers
-correlate strongly they are the same part and one should be replaced.
-
-## 5. Arrangement
-
-Tile each unit to the song length with a ~10 ms equal-power crossfade at every
-seam, gate it per section, and shape section dynamics:
+Use f0 autocorrelation for chroma. Folding raw FFT bins is dominated by the low
+end and reports the same key for everything:
 
 ```python
-SECTIONS = [
-    ('intro',   8, {'chords'},                         -2.5),
-    ('verse1', 16, {'chords', 'perc', 'bass'},          0.0),
-    ('chorus1', 16, {'chords', 'perc', 'bass', 'lead'}, 2.0),
-    ('verse2',  8, {'chords', 'bass'},                 -1.0),
-    ('build',   8, {'chords', 'perc', 'bass'},          0.5),
-    ('break',   1, set(),                             -60.0),
-    ('chorus2', 16, {'chords', 'perc', 'bass', 'lead'}, 2.0),
-    ('bridge',  8, {'chords', 'lead'},                 -3.0),
-    ('final',  16, {'chords', 'perc', 'bass', 'lead'}, 2.5),
-    ('outro',   8, {'chords', 'bass'},                 -3.0),
+ac = np.fft.irfft(np.abs(np.fft.rfft(frame * hann)) ** 2, NFFT)
+ac /= ac[:1]
+k = np.argmax(ac[int(SR/700):int(SR/55)]) + int(SR/700)
+f0 = SR / k                       # keep frames with periodicity > 0.25
+pc = round(69 + 12 * np.log2(f0 / 440)) % 12
+```
+
+## 4. Align
+
+Because every pattern sits on the same measured grid, layers align by
+construction. If two patterns still fight, cross-correlate their rhythm
+signatures and rotate one pattern's audio circularly by the best lag inside its
+own length. Rotation is a chop, not a time-stretch. Do not resample.
+
+## 5. Arrange
+
+Tile each pattern to the song length with a ~10 ms equal-power crossfade at
+every seam, then gate it per section. A pattern boundary is the natural
+arrangement step. A simple form that works:
+
+```python
+SCHEDULE = [
+    ('intro', 2, [0, 1],      -7.0),
+    ('A',     4, [0, 1, 2],    0.0),
+    ('B',     4, [0, 1, 2, 3], 1.0),
+    ('break', 1, [],         -60.0),
+    ('A2',    2, [0, 1, 2],   -1.0),
+    ('C',     4, [0, 1, 2, 3], 1.5),
+    ('D',     2, [1, 2, 3],    0.5),
+    ('outro', 2, [0, 1],      -6.0),
 ]
 ```
 
-Use 0.25–0.30 s equal-power fades on every layer entrance and exit, plus a 4 s
-fade-in and 7 s fade-out on the shared section gain. One bar of full silence
-before a chorus is an effective drop and costs nothing. The reference form is
-105 bars, 191.77 s, with section RMS from −23.2 (intro) to −13.9 dBFS (final).
+Use 0.25–0.30 s fades on every entrance and exit, a 4 s fade-in and a 7 s
+fade-out on the shared section gain. One unit of silence before a chorus is an
+effective drop and needs no effect. Section gains are dB trims applied to all
+layers alike.
 
-## 6. Master chain
+## 6. Mix
 
-Apply to the summed mix, and to every stem through the same linear stages so the
-stems still sum (section 7):
+Per layer: gain to a common active RMS (for example −17 dBFS), then EQ for its
+role. Measured roles, not fixed frequencies:
 
-1. Peaking −3 dB at 400 Hz (Q 1.0), peaking +2.5 dB at 3 kHz (Q 0.8), peaking
-   +1.5 dB at 10 kHz (Q 0.7), 28 Hz high-pass.
-2. Normalize peak to 1.
-3. Makeup gain to target RMS, then a lookahead limiter:
+| Role | Typical chain |
+|---|---|
+| bass | high-pass 26 Hz, low-pass 130–150 Hz, +2 dB at 90 Hz |
+| chords | high-pass 120 Hz, −2 dB at 380 Hz, low-pass 1.5 kHz |
+| air/perc | high-pass 700 Hz, +1.5 dB at 2.8 kHz, high shelf +1 dB at 9 kHz |
 
-   ```python
-   g = np.minimum(1.0, thr / (np.abs(sig) + 1e-9))
-   g = minimum_filter1d(g, size=2*k_look + 1)       # 3 ms lookahead
-   g = uniform_filter1d(g, size=k_rel)              # 35 ms
-   g = minimum_filter1d(g, size=k_rel)              # guarantee no overshoot
-   sig *= g
-   ```
+Master chain, in order:
 
-4. Final peak −0.45 dBFS. The reference master measured −15.9 dBFS RMS with
-   15.5 dB crest and 0 clipped samples.
+1. EQ: high-pass 30 Hz, −2 dB at 380 Hz (Q 0.9), +2 dB at 3.2 kHz (Q 0.8),
+   +1.5 dB high shelf at 10.5 kHz.
+2. Bus compression on 2 ms block RMS: threshold −26 dB, ratio 4:1, 5 ms attack,
+   120 ms release, makeup to the target RMS. Peak-normalized palettes are often
+   clipped and have 20 dB+ crest; compress before limiting or the master will
+   be quiet.
+3. Limiter: required gain `min(1, threshold / |x|)`, then a sliding **minimum**
+   over ~30 ms so no sample can exceed the ceiling. Threshold −6 dB, final peak
+   −0.45 dBFS.
 
-## 7. Exact-sum stems
+Do not smooth the gain with a filter that can raise it again after the minimum;
+that lets peaks through and the final normalization then makes the whole song
+quiet. A sliding minimum is the guarantee.
 
-Render each stem with the same common factor:
+## 7. Stems that sum to the song
+
+Apply the master EQ, compressor gain and limiter gain to the sum, and the same
+linear stages and the same gain arrays to each stem. Accumulate in float64.
 
 ```python
-mstems = {n: master_eq(s) for n, s in stems.items()}
+proc = [master_eq(layer) for layer in layers]
 mix = np.zeros(n, np.float64)
-for s in mstems.values():
-    mix += s                       # float64 accumulation, not sum()
+for s in proc:
+    mix += s
 peak = np.abs(mix).max()
-common = 10 ** (makeup_db / 20) * limiter_gain(mix / peak * makeup_lin) * final_scalar
-song  = (mix / peak * common_lin).astype(np.float32)
-stems = {n: (s / peak * common).astype(np.float32) for n, s in mstems.items()}
+pre = mix / peak * 10 ** (-6 / 20)
+comp = compressor_gain(pre)          # common envelope
+scaled = pre * comp
+g = limiter_gain(scaled)             # common envelope
+final = 0.95 / np.abs(scaled * g).max()
+song = scaled * g * final
+stems = [(s / peak) * 10 ** (-6 / 20) * comp * g * final for s in proc]
 ```
 
-A single common gain keeps the property that the stems add up to the song. In
-16-bit output the sum is within 2 LSB (about −95 dBFS); that is rounding, not an
-error.
+The 16-bit sum should be within 2 LSB of the song (about −95 dBFS); that is
+rounding, not a mismatch. Do not level the stems independently afterwards.
 
-## 8. Verification
+## 8. Show the patterns with audio-pattern-reports
 
-- All WAVs mono, 44.1 kHz, 16-bit, identical length; 0 clipped samples.
-- Stems vs song: max 2 LSB; report the dB figure.
-- Peak, RMS and crest of the song; octave-band shares (this palette lands around
-  23% at 160–320 Hz, 39% at 320–640, 14% at 640–2500, 8% at 2.5–5 kHz).
-- Section RMS arc shows a real lift into the chorus.
-- Layer pairwise correlation near zero.
-- Block RMS audit: the only long quiet run should be the intentional break.
-- Zip listing and `unzip -t`.
+The reports are how the user sees what was identified. For each chosen pattern,
+give the start and end of its segment window and set `length` to one period so
+the report draws every segment:
 
-## 9. Pitfalls
+```json
+{
+  "title": "Palette patterns used in the song",
+  "reports": [{
+    "file": "palette.wav",
+    "patterns": [
+      {"start": 54.9, "end": 62.2, "length": 3.66, "bars": 1,
+       "name": "Layer 1", "color": "#4dabf7"}
+    ]
+  }]
+}
+```
 
-- Do not filter loud sections with a 25–40 Hz low-pass through `sosfiltfilt`.
-  Edge transients inflated the crest from 12 to 25 dB and forced a −26 dBFS
-  master. Leave those sections unfiltered; keep low-pass sweeps for intros,
-  bridges and outros only.
-- A zero-phase FFT EQ can overshoot on dense material. A minimum-phase biquad
-  chain behaves predictably; if a linear-phase chain is used, measure crest
-  before deciding on makeup gain.
-- HPSS stems are not useful on this material: the percussive mask captures
-  almost everything and the harmonic stems come out 20 dB down. Pattern layers
-  are the meaningful decomposition here.
-- Chroma computed by folding raw FFT bins is unreliable; the low end dominates
-  and every unit looks like the same key. Use f0 tracking.
-- Do not layer units across a tonal shift. Find the split (here, F/C before
-  ~185 s versus F#/G#/C#/E after) and keep layers inside one side.
-- Equal-power crossfades at seams are fine, but a lone loud sample at a join is
-  usually source material, not an edit click; compare jump density with the
-  source before chasing it.
-- Never claim the mix was auditioned. Verify structure, levels and sums, and say
-  plainly that listening is still required.
+`bars` is informational. `end` is a search bound: the builder truncates to the
+last complete `length` segment, so a two-segment window with
+`length = period` shows exactly two segments.
+
+```bash
+python3 skills/audio-pattern-reports/pattern_report_builder.py \
+  --spec report_spec.json --src /path/to/palette --out artifacts/pattern_reports
+python3 skills/audio-pattern-reports/pattern_report_server.py \
+  --root artifacts/pattern_reports --port 8000
+curl -s -D - -o /dev/null -H 'Range: bytes=0-99' \
+  http://127.0.0.1:8000/palette.wav        # expect 206
+```
+
+Include the report directory in the delivery zip and show the preview. Report
+the builder's exit status; a page that loads is not proof that seeking works.
+
+## 9. Delivery
+
+Package the song, one WAV per stem, and the report directory. Keep the zip
+outside itself and verify it with `unzip -t`. State the pattern table (source
+times, segments, role), the measured period, and the master numbers.
+
+## 10. Verification checklist
+
+- [ ] All WAVs mono, 44.1 kHz, 16-bit, identical length, 0 clipped samples.
+- [ ] Peak, RMS and crest reported; no sample above −0.45 dBFS.
+- [ ] Stems vs song: max residual ≤ 2 LSB; report the dB figure.
+- [ ] Layer correlation near zero; each stem audible only in its sections.
+- [ ] Section RMS arc rises into the full sections and the break is silent.
+- [ ] Every pattern has at least two full segments; report builder exits 0.
+- [ ] Range request returns 206 and the preview opens.
+- [ ] Say plainly that the mix was measured, not auditioned.
+
+## 11. Pitfalls
+
+- An ACF peak at ~0.45 s is a subdivision, not a segment. Keep the 1 s floor.
+- Band shares computed from mean magnitude per bin are wrong because wide high
+  bands are averaged over more bins. Use band energy and compare the profile
+  with the palette average.
+- Chroma from raw FFT bins is unreliable; use f0 autocorrelation. Do not layer
+  patterns from different tonal eras.
+- Do not assume four bars, 131 BPM, or a 7.3 s unit. The measured period is the
+  only grid.
+- Do not read or require a `passes` file. If one is present, ignore it.
+- A compressor's target gain is `-max(over, 0) * (1 - 1/ratio)`. Using
+  `min(0, over)` mutes everything below the threshold and produces a 30 dB crest.
+- A limiter that smooths gain after the sliding minimum lets peaks through; the
+  final normalization then drops the whole mix by 6–10 dB.
+- Do not level stems after the master chain; it breaks the exact sum.
