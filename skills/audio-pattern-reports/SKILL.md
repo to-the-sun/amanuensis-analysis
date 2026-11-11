@@ -17,8 +17,8 @@ measured, what is estimated, and where the uncertainty is.
 
 - **Bar**: not an essential unit of this strategy, but equivalent to a measure in most standard depictions of music, generally smaller or the same size as the following measurements, though not necessarily.
 - **Segment**: a single iteration of a repeating pattern. This is not necessarily
-  the same as a bar. 
-- **Pattern**: one contiguous repeated section of segments. A shorter tail is
+  the same as a bar. All segments within the same pattern have the same length. 
+- **Pattern**: one contiguous repeated section of at least three segments. A shorter tail is
   excluded rather than reported, so every segment has a uniform length.
 
 All segments in a pattern have the same nominal length because the report
