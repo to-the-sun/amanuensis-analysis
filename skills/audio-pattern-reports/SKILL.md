@@ -6,7 +6,9 @@ Use this skill when the user gives one or more audio files and wants:
 - loop/bar/segment lengths measured;
 - an interactive HTML report per file with the full waveform, pattern regions,
   segment rows, zooming, playback and playhead jumping;
-- the reports and audio packaged for download.
+- a song assembled from the patterns, with a mastered WAV and one WAV per
+  pattern stem, plus a player page with per-stem arrangement waveforms;
+- the reports, song and audio packaged for download.
 
 The goal is a reproducible analysis, not a black-box detector. Report what is
 measured, what is estimated, and where the uncertainty is.
@@ -151,7 +153,80 @@ pattern_reports/
 The builder validates the resident coarse min/max data and the first fine
 chunk against the PCM before finishing.
 
-## 3. Memory-safe waveform design
+## 3. Build the song from the patterns
+
+A song is layered from the same patterns the report shows. Each pattern
+contributes one stem built from its full measured region and tiled whole; it is
+never chopped into bars. Add a `song` block to the report object in the spec:
+
+```json
+"song": {
+  "bars": 96,
+  "targets": [-21, -18, -18, -20, -20],
+  "sections": [
+    [0, 8, [0, 2]],
+    [8, 16, [0, 1, 2]],
+    [16, 48, [0, 1, 2, 3, 4]],
+    [48, 56, [0, 1, 2]],
+    [56, 80, [0, 1, 2, 3, 4]],
+    [80, 88, [2, 4]],
+    [88, 96, [0, 1, 2, 3, 4]]
+  ]
+}
+```
+
+- `sections`: `[startBar, endBar, [patternIndexes]]`, 0-based, in bars. A stem
+  is audible only inside its sections. All patterns must share a bar length
+  within 20 ms or the builder refuses.
+- `bars`: song length. With no `sections`, a 96-bar plan is generated (patterns
+  enter progressively, one mid-song break and two breakdowns). Any other length
+  requires explicit sections.
+- `targets`: pre-master RMS target in dBFS per pattern, default -20.
+- `fadeOutBars`: ending fade length, default 2.
+
+```bash
+python3 song_builder.py --spec report-spec.json \
+  --report-dir artifacts/pattern_reports
+```
+
+The builder reads the report's `summary.js` and copied WAV, so it uses exactly
+the patterns and segment grid the report shows.
+
+Output:
+
+```
+pattern_reports/
+  song.html
+  song/
+    finished_song.wav
+    stems/pattern_1.wav ...
+    data/arr.js  a4096.js  a512.js  a64.js
+```
+
+Guarantees:
+
+- each stem is the whole measured region tiled end to end, with a 4 ms fade at
+  every repeat; the last partial repeat is cut only under the ending fade;
+- gates ramp over 30 ms at section boundaries;
+- stems are trimmed to their targets, then share one master scale and the same
+  fades; their sum equals the master to within 2 LSB, which the builder asserts;
+- the index gets a Song card;
+- peak levels load as script tags, so `song.html` works from `file://` as well
+  as over HTTP.
+
+The page plays the master or all stems in sync, seeks, mutes individual stems,
+and draws one arrangement row per stem. Drag horizontally on a row to zoom,
+right-click to zoom out, Reset Zoom to return, and click to jump and play.
+
+Song-level checks:
+
+- [ ] Builder exits 0; printed stem delta is at most 2 LSB; clipped is 0.
+- [ ] All stem rows draw in `song.html`, with gaps where the arrangement mutes
+      them.
+- [ ] A deep zoom loads a finer `a*.js` level and Reset Zoom restores the view.
+- [ ] Click-to-seek starts playback; mute toggles one stem.
+
+## 4. Memory-safe waveform design
 
 Do **not** inline the whole PCM or a dense waveform in the HTML. The report
 uses a coarse resident tier plus on-demand min/max chunks, mirroring the
@@ -175,7 +250,7 @@ flux-report strategy:
 Keep this invariant when modifying the report. A full view must remain
 usable with only `summary.js`.
 
-## 4. Interaction requirements
+## 5. Interaction requirements
 
 The report must provide:
 
@@ -207,7 +282,7 @@ curl -s -D - -o /dev/null -H 'Range: bytes=0-99' \
 
 Expect `206` and `Content-Range`.
 
-## 5. Validation checklist
+## 6. Validation checklist
 
 Builder-level:
 
@@ -219,6 +294,8 @@ Builder-level:
 - [ ] `l8_0.js` exists and its first bins match the PCM.
 - [ ] Every pattern's segments are exactly `length` long; no partial tail
       segment exists.
+- [ ] When a song is built, the stem sum check passes and the song page loads
+      its arrangement data.
 
 Browser-level, when a browser is available:
 
@@ -235,7 +312,7 @@ If the browser automation wrapper errors, use the available DOM/evaluate and
 click tools instead of claiming the interaction was tested. A screenshot is
 not proof of playback or seeking.
 
-## 6. Packaging
+## 7. Packaging
 
 ```bash
 cd artifacts
@@ -244,12 +321,13 @@ zip -r pattern-reports.zip pattern_reports \
 unzip -t pattern-reports.zip
 ```
 
-Include the index, all HTML reports, the WAVs and the `data/` chunks. Do not
+Include the index, all HTML reports, the WAVs, the `data/` chunks, and when a
+song was built, `song.html` plus `song/` (master, stems and `song/data/`). Do not
 include the zip inside itself. If the index should offer a download, create the
 zip first, copy it into the report folder, and add a link; the zip must still
 not contain itself. Report the final size and entry count.
 
-## 7. Worked example from the original run
+## 8. Worked example from the original run
 
 Three mono 44.1 kHz palette WAVs, analyzed independently:
 
@@ -275,7 +353,7 @@ Observed structure:
 This run produced `artifacts/palette_pattern_reports/` and
 `artifacts/palette-pattern-reports.zip` (about 99.4 MiB, 128 entries).
 
-## 8. Pitfalls and lessons
+## 9. Pitfalls and lessons
 
 - Do not name a helper `inspect.py`; it shadows the standard library and can
   break imports. Use `analyze_audio.py` or another distinct name.
