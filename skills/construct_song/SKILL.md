@@ -32,6 +32,7 @@ each layer a role and to keep layers from masking each other.
   one mixdown.
 - The stems sum to the song: every stem passes through the same master stages
   and the same gain envelopes.
+- Delivery is one zip containing the song, every stem and the full report.
 
 ## Vocabulary
 
@@ -269,15 +270,32 @@ curl -s -D - -o /dev/null -H 'Range: bytes=0-99' \
   http://127.0.0.1:3007/palette.wav        # expect 206
 ```
 
-Include the report directory in the delivery zip and show the preview. Report
-the builder's exit status; a page that loads is not proof that seeking works.
+The report directory goes inside the single delivery zip (section 9). Show the
+preview and report the builder's exit status; a page that loads is not proof
+that seeking works.
 
 ## 9. Delivery
 
-Package the song, one WAV per stem, and the report directory. Keep the zip
-outside itself and verify it with `unzip -t`. State the period, the pattern
-table (source times, segment counts, complexity, used or not), and the master
-numbers.
+Deliver everything in **one** zip. Never hand over separate song and report
+archives.
+
+```
+construct_song/
+  palette_song.wav
+  stem_01.wav
+  stem_02.wav
+  ...
+  report/
+    index.html
+    <palette>.html
+    <palette>.wav
+    data/...
+```
+
+Copy the song and stems into the archive root and the report directory, with
+its audio, under `report/`. Keep the zip outside itself and verify it with
+`unzip -t`. State the period, the pattern table (source times, segment counts,
+complexity, used or not), and the master numbers.
 
 ## 10. Verification checklist
 
