@@ -75,20 +75,23 @@ When `instrument` is a MIDI input, two more keys add instruments to it:
   plays it.
 - `vsts_path` loads every 64-bit VST 2 `.dll` under the folder and its subfolders,
   then picks one at random and sets a random factory preset on it. Plugins without
-  factory presets keep their default. `vst_stats.txt` in that folder supplies the
+  factory presets keep their default. `vsti_stats.txt` in that folder supplies the
   real preset count and MIDI range for each plugin:
 
-  ```
-  Serum: 128, 24-96
-  Vital: 300, 0-127
+  ```json
+  {
+    "Serum.dll" : { "range" : [ 24, 96 ], "presets" : 128 },
+    "Vital.dll" : { "range" : [ 0, 127 ], "presets" : 300 }
+  }
   ```
 
-  One line per plugin, named by its `.dll` file name or its own name,
-  case-insensitive; `#` starts a comment. The first number is how many presets the
-  plugin actually has, and random presets are drawn from it instead of the count the
-  plugin reports. The range is the MIDI notes the plugin handles: notes outside it
-  wrap around into it. Every `new sound` on a VST also shifts all its notes by a
-  random -2 to +2 octaves before that wrap.
+  Entries are named by their `.dll` file name or the plugin's own name,
+  case-insensitive. `presets` is how many presets the plugin actually has, and
+  random presets are drawn from it instead of the count the plugin reports. `range`
+  is the MIDI notes the plugin handles: notes outside it wrap around into it. Every
+  `new sound` on a VST also shifts all its notes by a random -6 to +6 octaves before
+  that wrap, enough to move middle C anywhere in 0-127. `vst_stats.txt` is read when
+  `vsti_stats.txt` is not there.
 - `samples_ratio` is the percentage chance, 0 to 100 (default 50), that a new sound
   comes from `samples_path` instead of `vsts_path` when both are loaded. Only one of
   them plays.

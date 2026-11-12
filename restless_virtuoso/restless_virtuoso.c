@@ -257,7 +257,7 @@ static MidiEventList midiEvents;
 static AEffect *vstEffect;
 
 #define VST_NAME 128
-#define VST_MAX_OCTAVE 2
+#define VST_MAX_OCTAVE 6
 
 typedef struct {
     char name[VST_NAME];
@@ -1156,65 +1156,89 @@ static void add_vst(const wchar_t *path)
     free((void *)path);
 }
 
-static char *trim(char *text)
+static const char *json_value(const char *text, const char *key)
 {
-    while (*text == ' ' || *text == '\t') text++;
-    char *end = text + strlen(text);
-    while (end > text && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
-        *--end = 0;
-    return text;
+    size_t length = strlen(key);
+    for (const char *at = text; (at = strchr(at, '"')); at++) {
+        at++;
+        if (strncmp(at, key, length) || at[length] != '"') continue;
+        at += length + 1;
+        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
+        if (*at++ != ':') continue;
+        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
+        return at;
+    }
+    return NULL;
 }
 
 static void load_vst_stats(const wchar_t *folder)
 {
+    static const wchar_t *names[] = {L"vsti_stats.txt", L"vst_stats.txt"};
     wchar_t file[32768];
-    swprintf(file, 32768, L"%ls\\vst_stats.txt", folder);
-    FILE *input = _wfopen(file, L"rb");
+    FILE *input = NULL;
+    for (int i = 0; i < 2 && !input; i++) {
+        swprintf(file, 32768, L"%ls\\%ls", folder, names[i]);
+        input = _wfopen(file, L"rb");
+    }
     if (!input) return;
 
-    char line[512];
-    while (vstStatsCount < VST_MAX_PLUGINS && fgets(line, sizeof line, input)) {
-        char *text = line;
-        if (!memcmp(text, "\xef\xbb\xbf", 3)) text += 3;
+    fseek(input, 0, SEEK_END);
+    long size = ftell(input);
+    fseek(input, 0, SEEK_SET);
+    char *text = size > 0 ? malloc((size_t)size + 1) : NULL;
+    if (text) text[fread(text, 1, (size_t)size, input)] = 0;
+    fclose(input);
+    if (!text) return;
 
-        char *comment = strchr(text, '#');
-        if (comment) *comment = 0;
+    char *at = text;
+    while (vstStatsCount < VST_MAX_PLUGINS && (at = strchr(at, '"'))) {
+        char *name = ++at;
+        char *nameEnd = strchr(name, '"');
+        if (!nameEnd) break;
+        at = nameEnd + 1;
 
-        char *colon = strchr(text, ':');
-        if (!colon) continue;
-        *colon = 0;
+        char *value = nameEnd + 1;
+        while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+        if (*value++ != ':') continue;
+        while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+        if (*value != '{') continue;
 
-        char *name = trim(text);
-        if (!name[0] || strlen(name) >= VST_NAME) continue;
+        char *objectEnd = strchr(value, '}');
+        if (!objectEnd) break;
+        char brace = *objectEnd;
+        *objectEnd = 0;
 
-        char *end;
-        long presets = strtol(colon + 1, &end, 10);
-        if (end == colon + 1) continue;
+        VstStats *stats = &vstStats[vstStatsCount++];
+        size_t length = (size_t)(nameEnd - name);
+        if (length >= VST_NAME) length = VST_NAME - 1;
+        memcpy(stats->name, name, length);
+        stats->name[length] = 0;
+        if (length > 4 && !_stricmp(stats->name + length - 4, ".dll")) stats->name[length - 4] = 0;
 
-        int low = 0, high = 127;
-        while (*end == ' ' || *end == '\t') end++;
-        if (*end == ',') {
-            long first = strtol(end + 1, &end, 10);
-            while (*end == ' ' || *end == '\t') end++;
-            if (*end == '-') {
-                long second = strtol(end + 1, NULL, 10);
-                low = first < 0 ? 0 : first > 127 ? 127 : (int)first;
-                high = second < 0 ? 0 : second > 127 ? 127 : (int)second;
-                if (low > high) {
-                    int swap = low;
-                    low = high;
-                    high = swap;
-                }
+        const char *presets = json_value(value, "presets");
+        const char *range = json_value(value, "range");
+        stats->presets = presets ? atoi(presets) : 0;
+        stats->low = 0;
+        stats->high = 127;
+        if (range && *range == '[') {
+            const char *comma = strchr(range, ',');
+            stats->low = atoi(range + 1);
+            stats->high = comma ? atoi(comma + 1) : stats->low;
+            if (stats->low < 0) stats->low = 0;
+            if (stats->low > 127) stats->low = 127;
+            if (stats->high < 0) stats->high = 0;
+            if (stats->high > 127) stats->high = 127;
+            if (stats->low > stats->high) {
+                int swap = stats->low;
+                stats->low = stats->high;
+                stats->high = swap;
             }
         }
 
-        VstStats *stats = &vstStats[vstStatsCount++];
-        memcpy(stats->name, name, strlen(name) + 1);
-        stats->presets = (int)presets;
-        stats->low = low;
-        stats->high = high;
+        *objectEnd = brace;
+        at = objectEnd + 1;
     }
-    fclose(input);
+    free(text);
 }
 
 static void load_vsts(const char *folder)
@@ -2234,21 +2258,6 @@ static int is_folder(const char *path)
 {
     DWORD attributes = GetFileAttributesA(path);
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-static const char *json_value(const char *text, const char *key)
-{
-    size_t length = strlen(key);
-    for (const char *at = text; (at = strchr(at, '"')); at++) {
-        at++;
-        if (strncmp(at, key, length) || at[length] != '"') continue;
-        at += length + 1;
-        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
-        if (*at++ != ':') continue;
-        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
-        return at;
-    }
-    return NULL;
 }
 
 static int json_string(const char *text, const char *key, char *out, size_t size)
