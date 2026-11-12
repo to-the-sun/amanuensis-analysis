@@ -12,16 +12,18 @@ OUT = os.path.join(HERE, 'waveform_patterns.png')
 
 BG, WAVE, SEP, MUTED, AXIS = '#07080c', '#5e6773', '#1b1c26', '#9aa2ae', '#4a505c'
 W, H, DPI = 4600, 1600, 200
-PT = 72.0 / DPI
 LEFT, RIGHT, TOP, BOT = 330, 4570, 232, 1440
 RED, GOLD, GREEN, LIME = '#f12a1e', '#f1ad03', '#3ad07d', '#87fa96'
 
-# name, colour, segment length (s), [(pattern start, segment count), ...]
+# One grid for every pattern: 2 cells = the 2.15 s bar, 1 cell = the bass's 1.07 s
+# segment, so no two patterns' segment boundaries can land anywhere but together.
+GRID = 1.075
+# name, colour, segment length in cells, [(first cell, segment count), ...]
 PATTERNS = [
-    ('bass',   RED,   1.07, [(0.00, 73)]),
-    ('cymbal', GOLD,  2.15, [(2.50, 35)]),
-    ('kick',   GREEN, 2.15, [(2.50, 35)]),
-    ('kick',   LIME,  2.15, [(2.50, 6), (39.35, 5), (67.00, 1)]),
+    ('bass',   RED,   1, [(0, 73)]),
+    ('cymbal', GOLD,  2, [(2, 35)]),
+    ('kick',   GREEN, 2, [(2, 35)]),
+    ('kick',   LIME,  2, [(2, 6), (36, 5), (62, 1)]),
 ]
 
 sr, data = wavfile.read(SRC)
@@ -46,9 +48,11 @@ for y in (1, 2, 3):
 ax.fill_between(centres, 2 + lo * 1.9, 2 + hi * 1.9, color=WAVE, lw=0)
 
 inset = 0.055
-for i, (_, colour, seglen, groups) in enumerate(PATTERNS):
+for i, (_, colour, cells, groups) in enumerate(PATTERNS):
     y0, y1 = 3 - i + inset, 4 - i - inset
-    for start, count in groups:
+    seglen = cells * GRID
+    for cell, count in groups:
+        start = cell * GRID
         ax.add_patch(Rectangle((start, y0), count * seglen, y1 - y0, fill=False,
                                edgecolor=colour, lw=1.4, joinstyle='miter', clip_on=False))
         for k in range(1, count):
@@ -62,12 +66,12 @@ for t in range(0, int(dur), 5):
 ax.text(dur / 2, -0.24, 'time (s)', color=MUTED, fontsize=7.5, ha='center', va='top', clip_on=False)
 
 lane_h = (BOT - TOP) / 4
-for i, (name, colour, seglen, groups) in enumerate(PATTERNS):
+for i, (name, colour, cells, groups) in enumerate(PATTERNS):
     yc = 1 - (TOP + (i + 0.5) * lane_h) / H
     fig.patches.append(Rectangle((48 / W, yc - 7 / H), 15 / W, 15 / H,
                                  transform=fig.transFigure, facecolor=colour, lw=0))
     fig.text(74 / W, yc + 0.006, name, color=colour, fontsize=11, fontweight='bold', va='center')
-    fig.text(74 / W, yc - 0.013, f'{seglen:.2f} s \u00d7 {sum(n for _, n in groups)}',
+    fig.text(74 / W, yc - 0.013, f'{cells * GRID:.2f} s \u00d7 {sum(n for _, n in groups)}',
              color=MUTED, fontsize=8, va='center')
 
 fig.text(48 / W, 1 - 78 / H, os.path.basename(SRC), color='#ffffff',
