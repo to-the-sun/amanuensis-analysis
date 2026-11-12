@@ -1,0 +1,30 @@
+{
+  "title": "Analyze Palettes",
+  "description": "Patterns anchored to pass loop points, with segment grids, zooming and playback.",
+  "reports": [
+    {
+      "file": "palette_2026-11-10.wav",
+      "patterns": [
+        {
+          "start": 9.594,
+          "end": 46.195,
+          "length": 3.652825,
+          "bars": 2,
+          "name": "Pattern 1",
+          "color": "#4dabf7"
+        },
+        {
+          "start": 46.195,
+          "end": 90.038,
+          "length": 1.826412,
+          "bars": 1,
+          "name": "Pattern 2",
+          "color": "#ffa94d"
+        }
+      ],
+      "song": {
+        "targets": [-20, -20]
+      }
+    }
+  ]
+}

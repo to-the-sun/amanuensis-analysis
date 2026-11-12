@@ -2,6 +2,8 @@ import os, re, json, base64, shutil, argparse, html
 import numpy as np
 import scipy.io.wavfile as wavfile
 
+import passes
+
 CHUNK_BINS = 65536
 COARSE_STEP = 4096
 LEVELS = [(8, True), (64, True), (512, True)]
@@ -58,7 +60,7 @@ def pattern_cards(patterns):
         segs = p['segments']
         meta = (f"{fmt_precise(p['start'])} &ndash; {fmt_precise(p['end'])} &middot; "
                 f"{p['length']:.3f} s &middot; {p['bars']} bar{'s' if p['bars'] != 1 else ''} &middot; "
-                f"{len(segs)} segments")
+                f"{len(segs)} segments &middot; pass {p['pass']} +{p['startBar']}")
         chips = []
         for j, s in enumerate(segs):
             dur = s['end'] - s['start']
@@ -801,6 +803,8 @@ def build_report(spec, out_dir, src_dir):
             pcm = np.clip(np.round(mono * 32767.0), -32768, 32767).astype('<i2')
     total = len(pcm)
     duration = total / sr
+    passes_path = passes.find_passes_file(src_path)
+    spans = passes.pass_spans(passes.parse_passes(passes_path), duration)
 
     out_wav = os.path.join(out_dir, filename)
     if not os.path.exists(out_wav) or os.path.getsize(out_wav) != os.path.getsize(src_path):
@@ -822,6 +826,8 @@ def build_report(spec, out_dir, src_dir):
         name = str(p.get('name', 'Pattern %d' % (i + 1)))
         color = p.get('color', COLORS[i % len(COLORS)])
         bars = int(p.get('bars', 1))
+        span = passes.pass_at(start, spans)
+        start_bar = passes.entry_bar(start, span, length / bars)
         segments, end = build_segments(start, end, length)
         if not segments:
             raise ValueError('Pattern %d has no full %.3f s segment in %.3f-%.3f'
@@ -834,11 +840,17 @@ def build_report(spec, out_dir, src_dir):
             'end': end,
             'length': length,
             'bars': bars,
+            'pass': span['index'],
+            'passStart': round(span['loop'], 3),
+            'startBar': start_bar,
             'segments': segments,
         })
 
     if not patterns:
         raise ValueError('No patterns supplied for %s' % filename)
+    shift = min(p['startBar'] for p in patterns)
+    for p in patterns:
+        p['entryBar'] = p['startBar'] - shift
 
     inter_coarse, coarse_bins = minmax_bins(pcm, COARSE_STEP)
     levels_meta = []
@@ -858,6 +870,7 @@ def build_report(spec, out_dir, src_dir):
         'coarseStep': COARSE_STEP,
         'coarseBins': int(coarse_bins),
         'levels': levels_meta,
+        'passesFile': os.path.basename(passes_path),
         'patterns': patterns,
     }
     with open(os.path.join(data_dir, 'summary.js'), 'w') as f:

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Independent candidate finder for repeated audio sections and loop lengths.
+"""Independent candidate finder for palette passes and loop lengths.
 
-This does not use any project-specific analysis code. It prints, for each
-silence-delimited section, the strongest autocorrelation and lag-similarity
-peaks, plus band-wise peaks. The operator still has to interpret the
-candidates and choose pattern boundaries and loop lengths.
+This does not use any project-specific analysis code. It requires the palette's
+passes text file, groups consecutive passes of equal length, and prints loop
+candidates for each pass run. Pattern starts are the pass loop points; the
+operator still chooses the loop lengths.
 
 Usage:
     python3 analyze_audio.py file.wav [more.wav ...] [--json out.json]
@@ -21,6 +21,8 @@ import tempfile
 import numpy as np
 import scipy.io.wavfile as wavfile
 import scipy.signal as sig
+
+import passes
 
 
 def load_audio(path):
@@ -144,6 +146,81 @@ def detect_sections(x, sr, threshold_db=-50.0, min_silence=0.5, min_section=1.0)
     return out or [(0.0, len(x) / sr)]
 
 
+def estimate_bar(spans, lo=1.2, hi=3.0):
+    usable = [s for s in spans if s['end'] - s['start'] >= 3.0 * lo]
+    best_err, best_bar = float('inf'), 2.0
+    bar = lo
+    while bar <= hi:
+        err = sum(((s['end'] - s['start']) / bar -
+                   round((s['end'] - s['start']) / bar)) ** 2 *
+                  (s['end'] - s['start']) for s in usable)
+        if err < best_err:
+            best_err, best_bar = err, bar
+        bar += 0.0002
+    return best_bar
+
+
+def group_passes(spans):
+    runs = []
+    for s in spans:
+        d = s['end'] - s['start']
+        if runs and abs(d - runs[-1]['dur']) <= max(0.04, 0.002 * d):
+            r = runs[-1]
+            r['end'] = s['end']
+            r['last'] = s['index']
+            r['count'] += 1
+        else:
+            runs.append({'first': s['index'], 'last': s['index'], 'start': s['start'],
+                         'end': s['end'], 'dur': d, 'count': 1})
+    return runs
+
+
+def mean_lag_sim(F, i0, i1, lag):
+    if i1 - i0 <= lag:
+        return None
+    return float((F[:, i0:i1 - lag] * F[:, i0 + lag:i1]).sum(axis=0).mean())
+
+
+def suggest_loop(F, fps, run, bar, min_segments=3):
+    span = run['end'] - run['start']
+    if abs(span / bar - round(span / bar)) > 0.1:
+        return None
+    run_bars = int(round(span / bar))
+    if run_bars < min_segments:
+        return None
+    i0 = int(round(run['start'] * fps))
+    i1 = min(F.shape[1], int(round(run['end'] * fps)))
+    scores = []
+    for m in range(1, run_bars // min_segments + 1):
+        sim = mean_lag_sim(F, i0, i1, int(round(m * bar * fps)))
+        if sim is not None:
+            scores.append((m, sim))
+    if not scores:
+        return None
+    best = max(sim for _, sim in scores)
+    bars = min(m for m, sim in scores if sim >= best - 0.02)
+    sim = dict(scores)[bars]
+    ref = -1.0
+    for off in (-0.5, 0.5):
+        other = mean_lag_sim(F, i0, i1, int(round((bars + off) * bar * fps)))
+        if other is not None:
+            ref = max(ref, other)
+    segments = int(span // (bars * bar))
+    if segments < min_segments:
+        return None
+    margin = sim - ref
+    confidence = 'clear' if sim >= 0.55 and margin >= 0.05 else (
+        'plausible' if sim >= 0.45 else 'ambiguous')
+    return {
+        'firstPass': run['first'], 'lastPass': run['last'],
+        'start': round(run['start'], 3),
+        'end': round(run['start'] + segments * bars * bar, 3),
+        'length': round(bars * bar, 6), 'bars': bars, 'segments': segments,
+        'meanSimilarity': round(sim, 3), 'peakMargin': round(margin, 3),
+        'confidence': confidence,
+    }
+
+
 def novelty_peaks(F, fps, max_lag=8.0):
     """Cheap novelty from a 4 fps downsample; avoids a full-resolution SSM."""
     target = 4.0
@@ -207,22 +284,39 @@ def analyze(path, args):
         env = env - env.mean()
         band_env[name] = env
 
-    sections = detect_sections(x, sr, args.threshold_db,
-                               args.min_silence, args.min_section)
+    passes_path = passes.find_passes_file(path)
+    spans = passes.pass_spans(passes.parse_passes(passes_path), dur)
+    bar = estimate_bar(spans)
+    runs = group_passes(spans)
+    silence_sections = detect_sections(x, sr, args.threshold_db,
+                                       args.min_silence, args.min_section)
     result = {
         'file': os.path.basename(path),
+        'passesFile': os.path.basename(passes_path),
         'sampleRate': int(sr),
         'duration': round(dur, 3),
         'fps': round(float(fps), 3),
-        'sections': [[round(s, 3), round(e, 3)] for s, e in sections],
+        'bar': round(bar, 6),
+        'passes': [{'index': s['index'], 'loop': round(s['loop'], 3),
+                    'pad': round(s['pad'], 3), 'end': round(s['end'], 3),
+                    'bars': round((s['end'] - s['start']) / bar, 2)} for s in spans],
+        'runs': [{'firstPass': r['first'], 'lastPass': r['last'],
+                  'start': round(r['start'], 3), 'end': round(r['end'], 3),
+                  'passes': r['count'], 'bars': round((r['end'] - r['start']) / bar, 2)}
+                 for r in runs],
+        'silenceSections': [[round(s, 3), round(e, 3)] for s, e in silence_sections],
         'novelty_peaks': novelty_peaks(F, fps),
         'candidates': [],
+        'suggested': [],
     }
     print('\n===== %s  %.2fs  %d Hz' % (os.path.basename(path), dur, sr))
-    print('sections:', ' '.join('%.2f-%.2f' % se for se in sections))
+    print('passes: %s  bar %.4f s' % (os.path.basename(passes_path), bar))
+    print('pass runs:', ' '.join('%d-%d@%.2f' % (r['first'], r['last'], r['start'])
+                                 for r in runs))
     if result['novelty_peaks']:
         print('novelty peaks:', ' '.join('%.2f' % p for p in result['novelty_peaks']))
-    for s, e in sections:
+    for r in runs:
+        s, e = r['start'], r['end']
         i0 = max(0, int(round(s * fps)))
         i1 = min(F.shape[1], int(round(e * fps)))
         if i1 - i0 < 4:
@@ -233,6 +327,7 @@ def analyze(path, args):
         if ml < 2:
             continue
         cand = {
+            'passes': [r['first'], r['last']],
             'section': [round(s, 3), round(e, 3)],
             'onset_peaks': peak_list(acf1(od, ml), fps, min(max_lag, (e - s) / 2), args.top),
             'lag_peaks': peak_list(acf_bands(fs, ml), fps, min(max_lag, (e - s) / 2), args.top),
@@ -242,12 +337,20 @@ def analyze(path, args):
             cand['band_peaks'][name] = peak_list(
                 acf1(env[i0:i1], ml), fps, min(max_lag, (e - s) / 2), 5)
         result['candidates'].append(cand)
-        print('  %.2f-%.2f' % (s, e))
+        print('  pass %d-%d  %.2f-%.2f' % (r['first'], r['last'], s, e))
         print('    onset:', ' '.join('%.2f:%.3f' % z for z in cand['onset_peaks']))
         print('    lag  :', ' '.join('%.2f:%.3f' % z for z in cand['lag_peaks']))
         for name in ('sub', 'bass', 'mid', 'high', 'air'):
             if name in cand['band_peaks']:
                 print('    %-5s:' % name, ' '.join('%.2f:%.3f' % z for z in cand['band_peaks'][name]))
+    for r in runs:
+        sug = suggest_loop(F, fps, r, bar)
+        if sug:
+            result['suggested'].append(sug)
+            print('  suggest pass %d-%d  %.2f-%.2f  %.3f s / %d bars  %d segments  %s %.2f'
+                  % (sug['firstPass'], sug['lastPass'], sug['start'], sug['end'],
+                     sug['length'], sug['bars'], sug['segments'],
+                     sug['confidence'], sug['meanSimilarity']))
     return result
 
 
