@@ -15,23 +15,29 @@ measured, what is estimated, and where the uncertainty is.
 
 ## Core vocabulary
 
-- **Bar**: not an essential unit of this strategy, but equivalent to a measure in most standard depictions of music, generally smaller or the same size as the following measurements, though not necessarily.
+- **Bar**: the base pulse of a region. Equivalent to a measure in most standard
+  depictions of music, generally smaller than or the same size as the following
+  measurements, though not necessarily. A file can change tempo, so measure the
+  bar in each region rather than once for the file.
 - **Segment**: a single iteration of a repeating pattern. This is not necessarily
-  the same as a bar. All segments within the same pattern have the same length. 
-- **Pattern**: one contiguous repeated section of at least three segments. A shorter tail is
-  excluded rather than reported, so every segment of that pattern has a
-  uniform length.
+  the same as a bar. All segments within the same pattern have the same length.
+- **Pattern**: one contiguous repeated region of at least three segments. A
+  shorter tail is excluded rather than reported, so every segment of that
+  pattern has a uniform length.
+- **Pattern region**: the span of audio the loop was measured over, from its
+  start to the end of its last complete segment. This is the unit the song uses,
+  whole.
 
 All segments in a pattern have the same nominal length because the report
 imposes a uniform grid. The report does not independently detect every segment
 boundary.
 
-Patterns are independent of each other. Patterns of any segment length can and
-should be found and used within the same audio file: a file often holds a
-2-bar loop in one section, a 4-bar loop in another and a single-bar figure in a
-third. Uniform segment length is required only *within* a pattern, never across
-patterns or across the file. Measure each region on its own terms; do not force
-one loop length onto the whole file.
+Patterns are independent of each other. A file may hold one loop length in every
+region, or a different length in each; both are normal, and neither is imposed
+by the tool. In one file a 2-bar loop can run for thirty segments in one section,
+a 4-bar loop for fourteen in the next and a 3-bar loop for nineteen after that.
+Uniform segment length is required only *within* a pattern, never across patterns
+or across the file. Measure each region on its own terms.
 
 ## 0. Inputs and preparation
 
@@ -50,7 +56,7 @@ one loop length onto the whole file.
 5. Dependencies: Python 3, NumPy, SciPy. `ffmpeg` only for non-WAV input.
    Do not use repository-specific audio analysis code unless the user asks.
 
-## 1. Find sections and loop candidates
+## 1. Find pattern regions and loop candidates
 
 Run the bundled helper:
 
@@ -68,15 +74,58 @@ It computes, independently of the project:
 - autocorrelation and lag-similarity peaks per section;
 - band-wise autocorrelation peaks.
 
-The helper prints candidates; it does not choose patterns for you. Interpret
-them with the following checks:
+The helper prints candidates; it does not choose patterns for you.
+
+### 1a. Regions come from sections
+
+Start from the silence-delimited sections: they are the composer's own
+divisions, and a section is normally one pattern. Report one pattern per
+section, with the region covering the section from just after the gap to the end
+of its last complete segment. Do not carve a section down to the few bars that
+repeat most exactly: a pattern is what a listener hears looping through the
+whole section, and a region of ten, twenty or thirty segments is a normal
+result.
+
+Split a long section only where the loop itself changes — a new bar length, a
+new harmonic rhythm, an obvious change of density. Two or three sub-regions of
+sixty to a hundred seconds each are typical for a five-minute section. Do not
+leave a stretch of a section unrepresented when it loops at its own length.
+
+### 1b. The loop is an integer number of bars
+
+For each region:
+
+1. Estimate the base bar from onset spacing or the ACF, typically 1.8–2.2 s in
+   this material but measure it per region.
+2. Test 1, 2, 3, 4 and 8 bars as candidate loop lengths.
+3. Score each candidate by **mean lag similarity over the whole region**: the
+   average, across every frame of the region, of the similarity between a frame
+   and the frame one loop later. The candidate region must be at least three
+   segments long.
+4. Prefer the shortest candidate that explains the whole region. A stronger
+   score at 2× or 4× a shorter loop is usually the same loop with a
+   two- or four-bar layer on top — but take the longer one when the region's
+   high-level content genuinely needs it (see the nested-period note below).
+5. Confirm it is a **peak**: the chosen lag must score clearly above lags that
+   are not near-integer bar multiples of the region. A held pad or a fade tail
+   matches at every lag, so a high score alone is not evidence — the score has
+   to fall away at neighbouring non-multiple lags.
+
+Do **not** gate candidates on the fraction of frames that exceed a strict
+similarity. Real loop regions here score about 0.55–0.81 on the mean, and a
+frame-fraction gate at 0.8 rejects most of them while ranking the fade tail and
+long held textures — which match at every lag, frame after frame — above the
+actual music. The mean over the whole region plus the peak test is what
+distinguishes a loop from a steady texture; a frame-wise threshold does not.
+
+### 1c. Checks
 
 1. **Section boundaries.** Prefer actual silence gaps. If the file is
    continuous, use novelty peaks and clear changes in timbre/level. Leave a
    little margin around fades; do not start a pattern in the middle of a tail.
 2. **Fundamental vs harmonics.** A strong peak at 2L, 3L or 4L is often a
    harmonic of the loop, not the loop itself. Compare the onset ACF, mel lag
-   similarity and band ACF. Prefer the shortest prominent peak that explains
+   similarity and band ACF. Prefer the shortest plausible peak that explains
    the whole section and is consistent with the musical structure.
 3. **Nested periods.** A low band may repeat at half the full loop while a
    high layer repeats only at the full loop. Choose the full loop when the
@@ -86,19 +135,20 @@ them with the following checks:
 4. **Cycle count.** Check that `(end - start) / loop_length` is close to an
    integer. A remainder is normal at the end and is excluded: the pattern ends
    at the last full loop. If the remainder is almost a whole loop, revisit the
-   start/end.
-5. **Bar multiple.** Estimate the base bar and express the loop as an integer
-   number of bars. Typical bar lengths here are about 2.0–2.14 s, but measure
-   rather than assuming. Across patterns the base can drift slightly.
-6. **Confidence.** Record whether the loop is clear, plausible, or ambiguous.
-   Do not claim sample-accurate boundaries from an ACF peak. A useful tolerance
-   is a few tens of milliseconds for the loop estimate.
+   start/end. A region of fewer than three full segments is not a pattern.
+5. **Bar multiple.** Express the loop as an integer number of bars. Typical bar
+   lengths here are about 1.8–2.2 s, but measure rather than assuming. The bar
+   can differ between regions of the same file.
+6. **Confidence.** Record whether the loop is clear, plausible, or ambiguous,
+   and record the mean similarity. Do not claim sample-accurate boundaries from
+   an ACF peak. A useful tolerance is a few tens of milliseconds for the loop
+   estimate.
 
 Write down a table before building anything:
 
-| File | Pattern | Start (s) | End (s) | Loop (s) | Bars | Segments (all full) |
-|---|---|---:|---:|---:|---:|---:|
-| example.wav | 1 | 4.10 | 92.60 | 4.271 | 2 | 20 |
+| File | Pattern | Start (s) | End (s) | Loop (s) | Bars | Mean sim | Segments (all full) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| example.wav | 1 | 4.10 | 92.60 | 4.271 | 2 | 0.65 | 20 |
 
 ## 2. Build the report specification
 
@@ -169,8 +219,8 @@ the report object in the spec:
 
 ```json
 "song": {
-  "starts": [0, 8, 20, 36, 56],
-  "targets": [-21, -18, -18, -20, -20]
+  "starts": [0, 16, 6, 10, 12, 8],
+  "targets": [-20, -20, -20, -20, -20, -20]
 }
 ```
 
@@ -210,8 +260,10 @@ Guarantees:
 - each stem is the whole measured region, once, from first sample to last,
   with no truncation, muting, gating or tiling; the only attenuation is a 4 ms
   anti-click ramp at each end of the region;
-- stems are trimmed to their targets, then share one master scale; their sum
-  equals the master to within 2 LSB, which the builder asserts;
+- stems are trimmed to their targets, then share one master scale;
+- the master is written as the exact sum of the quantized stems, so the stems
+  reconstruct it sample for sample and the builder's sum check is 0 LSB for any
+  number of patterns;
 - there is no master fade in or out, so no pattern's tail is faded early;
 - the index gets a Song card;
 - peak levels load as script tags, so `song.html` works from `file://` as well
@@ -223,7 +275,7 @@ right-click to zoom out, Reset Zoom to return, and click to jump and play.
 
 Song-level checks:
 
-- [ ] Builder exits 0; printed stem delta is at most 2 LSB; clipped is 0.
+- [ ] Builder exits 0; printed stem delta is 0 LSB; clipped is 0.
 - [ ] Each stem's audio is exactly its pattern's measured region
       (`segments × length`) once, beginning at its entry bar, with nothing
       after the region and no repeated copy of it.
@@ -301,6 +353,10 @@ Builder-level:
       segment exists.
 - [ ] When a song is built, the stem sum check passes and the song page loads
       its arrangement data.
+- [ ] The segment counts in the report match `(end - start) / length` rounded
+      down, per pattern, and each region is covered whole.
+- [ ] No pattern region was reduced to a handful of bars to raise its mean
+      similarity.
 
 Browser-level, when a browser is available:
 
@@ -332,9 +388,9 @@ include the zip inside itself. If the index should offer a download, create the
 zip first, copy it into the report folder, and add a link; the zip must still
 not contain itself. Report the final size and entry count.
 
-## 8. Worked example from the original run
+## 8. Worked examples
 
-Three mono 44.1 kHz palette WAVs, analyzed independently:
+**Original run, three mono 44.1 kHz palette WAVs**, analyzed independently:
 
 | File | Duration | Pattern | Start–End (s) | Loop (s) | Bars | Segments |
 |---|---:|---|---:|---:|---:|---:|
@@ -346,16 +402,35 @@ Three mono 44.1 kHz palette WAVs, analyzed independently:
 | palette_2026-11-07 | 228.158 s | 2 | 55.00–223.46 | 8.022 | 4 | 21 |
 | palette_2026-11-08 | 371.367 s | 1 | 5.00–358.59 | 8.223 | 4 | 43 |
 
+**Sections run, one 609.10 s mono 44.1 kHz palette.** Four silence-delimited
+sections, with the long final section split into three where its loop changed:
+
+| Pattern | Start–End (s) | Loop (s) | Bars | Mean sim | Segments |
+|---|---:|---:|---:|---:|---:|
+| 1 | 1.00–60.10 | 3.652 | 2 | 0.65 | 16 |
+| 2 | 69.10–182.10 | 3.688 | 2 | 0.72 | 30 |
+| 3 | 184.00–289.70 | 7.300 | 4 | 0.81 | 14 |
+| 4 | 304.80–380.00 | 7.300 | 4 | 0.67 | 10 |
+| 5 | 380.00–470.00 | 7.288 | 4 | 0.55 | 12 |
+| 6 | 470.00–574.80 | 5.451 | 3 | 0.60 | 19 |
+
+Six patterns, three loop lengths, 101 segments. Each region is a whole section
+or sub-region, not a hand-picked run of the most identical bars. The song used
+all six regions once — 140.14 s, 77 bars, peak −0.5 dBFS, 0 clipped, stem sum
+0 LSB, and every stem verified as its full region once at its entry bar.
+
 Observed structure:
 
-- The base bar is roughly 2.0–2.14 s; loops are 1, 2 or 4 bars.
+- The base bar is roughly 1.8–2.2 s; loops are 1, 2, 3, 4 or 8 bars.
+- A section can hold one loop length for its whole length, and the next section
+  a different one. Both are reported on their own terms.
 - Pattern 4 of the first file has a strong ~4.1 s low-band half-period but the
   full high-level loop is ~8.24 s. Do not mistake the half-period for the
   pattern length.
 - Pattern regions end at the last full loop; shorter tails are excluded, so
   every reported segment is full length.
 
-This run produced `artifacts/palette_pattern_reports/` and
+The first run produced `artifacts/palette_pattern_reports/` and
 `artifacts/palette-pattern-reports.zip` (about 99.4 MiB, 128 entries).
 
 ## 9. Pitfalls and lessons
@@ -369,8 +444,18 @@ This run produced `artifacts/palette_pattern_reports/` and
   itself is already chunked and memory-safe.
 - ACF peaks are not segment boundaries. A strong peak can be a harmonic or a
   half-time layer. Cross-check with the other bands and the novelty/SSM.
-- The reports use a uniform grid. Do not describe the grid as measured
-  per-segment timing. 
+- Do not gate pattern candidates on the fraction of frames above a strict
+  similarity. Steady textures and fade tails score near 1.00 at every lag and
+  dominate such a gate, while real quasi-periodic loops score 0.55–0.81 and
+  drop out. Use the region mean plus the peak test instead.
+- Do not shrink a region to the bars with the highest similarity. A region of
+  ten to thirty segments that loops approximately is the pattern a listener
+  hears; three bars of it are not.
+- The reports use a uniform grid within each pattern. Do not describe the grid
+  as measured per-segment timing, and do not assume two patterns share a grid.
+- With several stems, independently rounded int16 stems can differ from a
+  separately rounded master by a few LSB. Write the master as the clipped sum
+  of the quantized stems so the reconstruction is exact.
 - Do not change repository source, commit, or open a PR for artifact-only work
   unless the user explicitly asks. Keep generated files under `artifacts/`.
 - The report server must support Range; otherwise WAV seeking and playhead

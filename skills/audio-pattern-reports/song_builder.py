@@ -148,7 +148,6 @@ def build_song(report_dir, basename, spec_report):
     def w(path, v):
         wavfile.write(path, sr, np.clip(np.round(v * 32767), -32768, 32767).astype('<i2'))
 
-    w(os.path.join(out_dir, 'finished_song.wav'), mix * scale)
     names = []
     for i, s in enumerate(stems):
         w(os.path.join(out_dir, 'stems', 'pattern_%d.wav' % (i + 1)), s * gains[i] * scale)
@@ -156,6 +155,9 @@ def build_song(report_dir, basename, spec_report):
 
     stems_pcm = [wavfile.read(os.path.join(out_dir, 'stems', 'pattern_%d.wav' % (i + 1)))[1]
                  for i in range(len(pats))]
+    summed = np.sum([s.astype(np.int32) for s in stems_pcm], axis=0)
+    wavfile.write(os.path.join(out_dir, 'finished_song.wav'), sr,
+                  np.clip(summed, -32768, 32767).astype('<i2'))
     total, bins = write_levels(stems_pcm, os.path.join(out_dir, 'data'))
 
     arr_meta = {
