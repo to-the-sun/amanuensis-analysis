@@ -21,11 +21,11 @@ STEPS = [4096, 512, 64]
 SEAM_S = 0.004
 
 
-def default_starts(bars_list):
-    starts, acc = [0], 0
-    for b in bars_list[:-1]:
-        acc += max(1, b // 2)
-        starts.append(acc)
+def default_starts(region_s, bar_of):
+    starts, acc = [0], 0.0
+    for d, b in zip(region_s[:-1], bar_of[1:]):
+        acc += d / 2
+        starts.append(int(round(acc / b)))
     return starts
 
 
@@ -106,21 +106,18 @@ def build_song(report_dir, basename, spec_report):
     sr = meta['sampleRate']
     if len(pats) < 1:
         raise ValueError('report has no patterns')
-    bar = pats[0]['length'] / max(1, pats[0]['bars'])
-    for p in pats:
-        pb = p['length'] / max(1, p['bars'])
-        if abs(pb - bar) > 0.02:
-            raise ValueError('patterns disagree on bar length: %.4f vs %.4f' % (bar, pb))
+    bar_of = [p['length'] / max(1, p['bars']) for p in pats]
     region_bars = [len(p['segments']) * p['bars'] for p in pats]
+    region_s = [len(p['segments']) * p['length'] for p in pats]
 
     cfg = spec_report.get('song') or {}
-    starts = cfg.get('starts') or default_starts(region_bars)
+    starts = cfg.get('starts') or default_starts(region_s, bar_of)
     starts = [int(s) for s in starts]
     if len(starts) != len(pats):
         raise ValueError('song.starts must have one value per pattern')
     if min(starts) < 0:
         raise ValueError('song.starts has a negative bar')
-    bars = max(s + b for s, b in zip(starts, region_bars))
+    start_s = [s * b for s, b in zip(starts, bar_of)]
 
     targets = cfg.get('targets') or [-20.0] * len(pats)
     if len(targets) != len(pats):
@@ -130,15 +127,14 @@ def build_song(report_dir, basename, spec_report):
     if sr2 != sr:
         raise ValueError('sample rate mismatch')
     x = x.astype(np.float64) / 32768.0
-    song = int(round(bars * bar * sr))
+    regs = [fade_edges(region(x, sr, p), sr) for p in pats]
+    offs = [int(round(t * sr)) for t in start_s]
+    song = max(o + len(r) for o, r in zip(offs, regs))
+    dur = song / sr
     stems, gains = [], []
-    for i, p in enumerate(pats):
-        reg = fade_edges(region(x, sr, p), sr)
-        a = int(round(starts[i] * bar * sr))
-        if a + len(reg) > song:
-            raise ValueError('pattern %d runs past the song end' % (i + 1))
+    for i, reg in enumerate(regs):
         stem = np.zeros(song)
-        stem[a:a + len(reg)] = reg
+        stem[offs[i]:offs[i] + len(reg)] = reg
         stems.append(stem)
         gains.append(10 ** ((targets[i] - rms_db(reg)) / 20))
 
@@ -166,9 +162,9 @@ def build_song(report_dir, basename, spec_report):
         'total': int(total),
         'steps': STEPS,
         'bins': {str(k): v for k, v in bins.items()},
-        'bar': round(bar, 4),
-        'bars': bars,
-        'starts': starts,
+        'bar': round(bar_of[0], 4),
+        'bars': int(round(dur / bar_of[0])),
+        'entries': [round(t, 6) for t in start_s],
     }
     with open(os.path.join(out_dir, 'data', 'arr.js'), 'w') as f:
         f.write('window.ARR_META = ' + json.dumps(arr_meta, separators=(',', ':')) + ';\n')
@@ -180,10 +176,9 @@ def build_song(report_dir, basename, spec_report):
             json.dumps('%d bars &middot; %.3f s' % (region_bars[i], p['length'] * len(p['segments']))),
             json.dumps(p.get('color', '#4dabf7')))
         for i, p in enumerate(pats))
-    dur = song / sr
-    summary = ('%d bars at %.3f s (%d:%04.1f), %d Hz mono. Each pattern plays whole from its '
-               'entry bar; the %d stems sum to the master.' % (bars, bar, int(dur // 60),
-                                                              dur % 60, sr, len(pats)))
+    summary = ('%d patterns (%d:%04.1f), %d Hz mono. Each pattern plays its whole region once '
+               'from its entry; the %d stems sum to the master.'
+               % (len(pats), int(dur // 60), dur % 60, sr, len(pats)))
     html_text = page_html('Song &mdash; ' + basename, summary, defs,
                           json.dumps(arr_meta, separators=(',', ':')), dur)
     with open(os.path.join(report_dir, 'song.html'), 'w') as f:
@@ -195,8 +190,9 @@ def build_song(report_dir, basename, spec_report):
             text = f.read()
         if 'href="song.html"' not in text:
             card = ('<a class="card" href="song.html"><strong>Song &mdash; %s</strong>'
-                    '<span>Master plus %d stems &middot; %d bars &middot; arrangement view</span>'
-                    '<span class="btn">Open song</span></a>\n' % (basename, len(pats), bars))
+                    '<span>Master plus %d stems &middot; %d:%04.1f &middot; arrangement view</span>'
+                    '<span class="btn">Open song</span></a>\n'
+                    % (basename, len(pats), int(dur // 60), dur % 60))
             text = text.replace('<div class="list">', '<div class="list">\n' + card, 1)
             with open(idx, 'w') as f:
                 f.write(text)
@@ -210,7 +206,7 @@ def build_song(report_dir, basename, spec_report):
         'song': os.path.join(out_dir, 'finished_song.wav'),
         'stems': [os.path.join(out_dir, 'stems', n + '.wav') for n in names],
         'page': os.path.join(report_dir, 'song.html'),
-        'bars': bars, 'bar': bar, 'duration': round(dur, 3),
+        'bars': arr_meta['bars'], 'bar': round(bar_of[0], 4), 'duration': round(dur, 3),
         'peak_db': round(20 * np.log10(np.abs(song_pcm).max() / 32768.0), 2),
         'rms_db': round(rms_db(song_pcm / 32768.0), 1),
         'clipped': int(np.sum(np.abs(song_pcm) >= 32767)),
@@ -529,8 +525,8 @@ function aDraw() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#0d0d11';
     ctx.fillRect(0, 0, W, H);
-    for (const b of AM.starts) {
-      const x = aX(b * AM.bar, W);
+    for (const t of AM.entries) {
+      const x = aX(t, W);
       ctx.strokeStyle = 'rgba(255,255,255,0.09)';
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
     }

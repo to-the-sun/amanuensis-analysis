@@ -19,11 +19,19 @@ measured, what is estimated, and where the uncertainty is.
 - **Segment**: a single iteration of a repeating pattern. This is not necessarily
   the same as a bar. All segments within the same pattern have the same length. 
 - **Pattern**: one contiguous repeated section of at least three segments. A shorter tail is
-  excluded rather than reported, so every segment has a uniform length.
+  excluded rather than reported, so every segment of that pattern has a
+  uniform length.
 
 All segments in a pattern have the same nominal length because the report
 imposes a uniform grid. The report does not independently detect every segment
 boundary.
+
+Patterns are independent of each other. Patterns of any segment length can and
+should be found and used within the same audio file: a file often holds a
+2-bar loop in one section, a 4-bar loop in another and a single-bar figure in a
+third. Uniform segment length is required only *within* a pattern, never across
+patterns or across the file. Measure each region on its own terms; do not force
+one loop length onto the whole file.
 
 ## 0. Inputs and preparation
 
@@ -167,16 +175,16 @@ the report object in the spec:
 ```
 
 - `starts`: the bar at which each pattern enters, one value per pattern,
-  0-based. Pattern `i` then plays its entire region from that bar and stops at
-  its natural end.
+  0-based, counted in that pattern's own bars. Pattern `i` then plays its
+  entire region from that bar and stops at its natural end.
 - Omitting `starts` gives a staggered plan in which each pattern enters half
   the previous pattern's region length after it.
-- Song length is fixed by the patterns, not chosen: it is the furthest
-  `start` plus the pattern's whole region in bars (`segments × bars`), which is
-  its reported length divided by the bar.
+- Song length is fixed by the patterns, not chosen: it is the furthest entry
+  time plus that pattern's whole region.
 - `targets`: pre-master RMS target in dBFS per pattern, default -20.
-- All patterns must share a bar length within 20 ms or the builder refuses, so
-  their entries can sit on one grid.
+- Patterns may differ in segment length and bar length; the builder places each
+  stem at its own entry time and needs no common grid. Choose entry bars for
+  each pattern in its own bar count.
 
 ```bash
 python3 song_builder.py --spec report-spec.json \
