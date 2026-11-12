@@ -103,6 +103,12 @@ take ends, and its files are completed, when the stems instance exits or the rec
 instance is closed. Closing with the console's own close button is handled too, since
 the program waits for the files before it lets Windows end it.
 
+An instrument instance also writes `sounds_YYYY-MM-DD-HH-MM-SS.txt` beside its take,
+one `index, milliseconds number;` line recording the sound it started with and each
+`new sound`, timed from the take's start. Every running instance shares one numbered
+list of sounds, so a number identifies a drum sample set or VST preset in every take,
+and the console prints the number with the description.
+
 On startup the program lists every installed ASIO driver, then every MIDI input
 device.
 
