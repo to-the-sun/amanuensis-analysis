@@ -55,7 +55,7 @@ typedef struct {
     HMIDIOUT midiOut;
     int midiInIndex, midiOutIndex;
     int midiChannel, midiStream;
-    int synthEnabled, samplesSound, samplesRatio;
+    int synthEnabled, samplesSound, samplesRatio, soundNumber;
     int buffersCreated, started;
 
     volatile LONG quit, reset;
@@ -530,13 +530,18 @@ typedef struct TakeChunk {
 } TakeChunk;
 
 typedef struct {
+    ULONGLONG qpc;
+    int number;
+} SoundMark;
+
+typedef struct {
     int active, wavOpen;
     unsigned rate;
     TakeChunk *first, *cursor;
     TakeChunk *volatile last;
     drwav wav;
     drwav_int16 *block;
-    wchar_t passesPath[1100];
+    wchar_t passesPath[1100], soundsPath[1100];
     drwav_uint64 frames;
     ULONGLONG origin;
     SYSTEMTIME at;
@@ -545,6 +550,8 @@ typedef struct {
     LONG seen;
     double *passMs;
     int passCount, passCapacity;
+    SoundMark *soundMarks;
+    int soundCount, soundCapacity;
 } Take;
 
 static Take take;
@@ -597,6 +604,21 @@ static void add_pass(double milliseconds)
         take.passCapacity = capacity;
     }
     take.passMs[take.passCount++] = milliseconds;
+}
+
+static void add_sound_mark(int number, ULONGLONG qpc)
+{
+    if (!number) return;
+
+    if (take.soundCount == take.soundCapacity) {
+        int capacity = take.soundCapacity ? take.soundCapacity * 2 : 16;
+        SoundMark *grown = realloc(take.soundMarks, (size_t)capacity * sizeof *grown);
+        if (!grown) return;
+        take.soundMarks = grown;
+        take.soundCapacity = capacity;
+    }
+    take.soundMarks[take.soundCount].qpc = qpc;
+    take.soundMarks[take.soundCount++].number = number;
 }
 
 static void check_loop_cue(void)
@@ -701,6 +723,7 @@ static void take_open(void)
         if (GetFileAttributesW(wavPath) == INVALID_FILE_ATTRIBUTES) break;
     }
     swprintf(take.passesPath, 1100, L"%lspasses_%ls%ls.txt", take.folder, stamp, suffix);
+    swprintf(take.soundsPath, 1100, L"%lssounds_%ls%ls.txt", take.folder, stamp, suffix);
 
     drwav_data_format format;
     memset(&format, 0, sizeof format);
@@ -753,6 +776,21 @@ static void take_finish(void)
             fclose(file);
             log_trace("wrote %ls\n", take.passesPath);
         }
+
+        if (instrumentMode && take.soundCount) {
+            FILE *sounds = _wfopen(take.soundsPath, L"w");
+            if (!sounds) log_error("Could not write '%ls'.\n", take.soundsPath);
+            else {
+                LARGE_INTEGER frequency;
+                QueryPerformanceFrequency(&frequency);
+                for (int i = 0; i < take.soundCount; i++)
+                    fprintf(sounds, "%d, %.6f 1.;\n", take.soundMarks[i].number,
+                            (double)(LONGLONG)(take.soundMarks[i].qpc - take.origin) * 1000.0 /
+                            (double)frequency.QuadPart);
+                fclose(sounds);
+                log_trace("wrote %ls\n", take.soundsPath);
+            }
+        }
     }
 
     free(take.block);
@@ -765,6 +803,12 @@ static void take_finish(void)
     }
     free(take.passMs);
     take.passMs = NULL;
+    take.soundCount = 0;
+    if (instrumentMode && g.soundNumber) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        add_sound_mark(g.soundNumber, (ULONGLONG)now.QuadPart);
+    }
     take.first = take.last = take.cursor = NULL;
     take.frames = 0;
     take.passCount = 0;
@@ -1155,20 +1199,71 @@ static void new_vst_sound(void)
     } else g.started = 1;
 }
 
-static void print_sound(const char *prefix)
+#define SOUND_MAX 1024
+#define SOUND_NAME 128
+
+typedef struct {
+    volatile LONG lock;
+    volatile LONG count;
+    char name[SOUND_MAX][SOUND_NAME];
+} SoundList;
+
+static HANDLE soundMapping;
+static SoundList *soundList;
+
+/* One list for every running instance, so a number names the same sound in each take. */
+static int sound_number(const char *name)
 {
-    if (g.samplesSound) printf("  %s%d drum samples\n", prefix, drumSampleCount);
+    if (!soundMapping) {
+        soundMapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(SoundList),
+                                          "Local\\RestlessVirtuosoSounds");
+        soundList = soundMapping ? MapViewOfFile(soundMapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SoundList)) : NULL;
+    }
+    if (!soundList) return 0;
+
+    while (InterlockedCompareExchange(&soundList->lock, 1, 0)) Sleep(0);
+
+    int count = (int)soundList->count, number = 0;
+    for (int i = 0; i < count; i++)
+        if (!strcmp(soundList->name[i], name)) { number = i + 1; break; }
+
+    if (!number && count < SOUND_MAX) {
+        strncpy(soundList->name[count], name, SOUND_NAME - 1);
+        soundList->name[count][SOUND_NAME - 1] = 0;
+        number = count + 1;
+        soundList->count = count + 1;
+    }
+
+    InterlockedExchange(&soundList->lock, 0);
+    return number;
+}
+
+static void sound_name(char *out, size_t size)
+{
+    out[0] = 0;
+    if (g.samplesSound) snprintf(out, size, "%d drum samples", drumSampleCount);
     else if (vstEffect) {
         char name[64] = "";
         vstEffect->dispatcher(vstEffect, effGetEffectName, 0, 0, name, 0);
         name[63] = 0;
         if (vstEffect->numPrograms > 0)
-            printf("  %sVST %s, preset %d/%d\n", prefix, name[0] ? name : "plugin", vstProgram + 1,
-                   vstEffect->numPrograms);
+            snprintf(out, size, "VST %s, preset %d/%d", name[0] ? name : "plugin", vstProgram + 1,
+                     vstEffect->numPrograms);
         else
-            printf("  %sVST %s, default preset\n", prefix, name[0] ? name : "plugin");
+            snprintf(out, size, "VST %s, default preset", name[0] ? name : "plugin");
     }
+}
+
+static void print_sound(const char *prefix)
+{
+    char name[160];
+    sound_name(name, sizeof name);
+    if (!name[0]) return;
+
+    g.soundNumber = sound_number(name);
+    printf("  %s%d: %s\n", prefix, g.soundNumber, name);
     fflush(stdout);
+    log_trace("sound %d: %s\n", g.soundNumber, name);
 }
 
 static void new_sound(void)
@@ -1178,7 +1273,10 @@ static void new_sound(void)
     else new_vst_sound();
 
     printf("\n");
-    print_sound("new sound: ");
+    print_sound("new sound ");
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    add_sound_mark(g.soundNumber, (ULONGLONG)now.QuadPart);
     g.lineWidth = 0;
 }
 
@@ -2292,7 +2390,7 @@ static int run(int argc, char **argv, const wchar_t *folder)
         print_wide_path(playlistFolder);
         printf("\n");
     }
-    print_sound("");
+    print_sound("sound ");
 
     if (g.midiInIndex >= 0) {
         MIDIINCAPS caps;
@@ -2308,6 +2406,11 @@ static int run(int argc, char **argv, const wchar_t *folder)
     if (playlistMode) publish_palette(playlistFolder);
     open_cue();
     take_join();
+    if (instrumentMode) {
+        LARGE_INTEGER at;
+        QueryPerformanceCounter(&at);
+        add_sound_mark(g.soundNumber, (ULONGLONG)at.QuadPart);
+    }
     if (g.asio->vtable->start(g.asio) != ASE_OK) {
         log_error("ASIOStart failed.\n");
         goto done;
