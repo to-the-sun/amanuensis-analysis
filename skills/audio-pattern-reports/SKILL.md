@@ -151,34 +151,32 @@ chunk against the PCM before finishing.
 
 ## 3. Build the song from the patterns
 
-A song is layered from the same patterns the report shows. Each pattern
-contributes one stem built from its full measured region and tiled whole; it is
-never chopped into bars. Add a `song` block to the report object in the spec:
+A song is layered from the same patterns the report shows, and every pattern
+used in it is used in its entirety. A stem is the pattern's whole measured
+region, first sample to last, placed once: no segment is dropped, no portion is
+silenced, gated or faded out early, and the region is never tiled or looped to
+fill more time. The arrangement decides only the bar at which each pattern
+enters; the pattern's own length decides when it stops. Add a `song` block to
+the report object in the spec:
 
 ```json
 "song": {
-  "bars": 96,
-  "targets": [-21, -18, -18, -20, -20],
-  "sections": [
-    [0, 8, [0, 2]],
-    [8, 16, [0, 1, 2]],
-    [16, 48, [0, 1, 2, 3, 4]],
-    [48, 56, [0, 1, 2]],
-    [56, 80, [0, 1, 2, 3, 4]],
-    [80, 88, [2, 4]],
-    [88, 96, [0, 1, 2, 3, 4]]
-  ]
+  "starts": [0, 8, 20, 36, 56],
+  "targets": [-21, -18, -18, -20, -20]
 }
 ```
 
-- `sections`: `[startBar, endBar, [patternIndexes]]`, 0-based, in bars. A stem
-  is audible only inside its sections. All patterns must share a bar length
-  within 20 ms or the builder refuses.
-- `bars`: song length. With no `sections`, a 96-bar plan is generated (patterns
-  enter progressively, one mid-song break and two breakdowns). Any other length
-  requires explicit sections.
+- `starts`: the bar at which each pattern enters, one value per pattern,
+  0-based. Pattern `i` then plays its entire region from that bar and stops at
+  its natural end.
+- Omitting `starts` gives a staggered plan in which each pattern enters half
+  the previous pattern's region length after it.
+- Song length is fixed by the patterns, not chosen: it is the furthest
+  `start` plus the pattern's whole region in bars (`segments × bars`), which is
+  its reported length divided by the bar.
 - `targets`: pre-master RMS target in dBFS per pattern, default -20.
-- `fadeOutBars`: ending fade length, default 2.
+- All patterns must share a bar length within 20 ms or the builder refuses, so
+  their entries can sit on one grid.
 
 ```bash
 python3 song_builder.py --spec report-spec.json \
@@ -201,11 +199,12 @@ pattern_reports/
 
 Guarantees:
 
-- each stem is the whole measured region tiled end to end, with a 4 ms fade at
-  every repeat; the last partial repeat is cut only under the ending fade;
-- gates ramp over 30 ms at section boundaries;
-- stems are trimmed to their targets, then share one master scale and the same
-  fades; their sum equals the master to within 2 LSB, which the builder asserts;
+- each stem is the whole measured region, once, from first sample to last,
+  with no truncation, muting, gating or tiling; the only attenuation is a 4 ms
+  anti-click ramp at each end of the region;
+- stems are trimmed to their targets, then share one master scale; their sum
+  equals the master to within 2 LSB, which the builder asserts;
+- there is no master fade in or out, so no pattern's tail is faded early;
 - the index gets a Song card;
 - peak levels load as script tags, so `song.html` works from `file://` as well
   as over HTTP.
@@ -217,8 +216,10 @@ right-click to zoom out, Reset Zoom to return, and click to jump and play.
 Song-level checks:
 
 - [ ] Builder exits 0; printed stem delta is at most 2 LSB; clipped is 0.
-- [ ] All stem rows draw in `song.html`, with gaps where the arrangement mutes
-      them.
+- [ ] Each stem's audio is exactly its pattern's measured region
+      (`segments × length`) once, beginning at its entry bar, with nothing
+      after the region and no repeated copy of it.
+- [ ] All stem rows draw in `song.html`, silent before their entry bar.
 - [ ] A deep zoom loads a finer `a*.js` level and Reset Zoom restores the view.
 - [ ] Click-to-seek starts playback; mute toggles one stem.
 
@@ -373,5 +374,7 @@ This run produced `artifacts/palette_pattern_reports/` and
 - If a preview host rejects plain curl with 403, that may be the preview's
   authentication layer, not a broken app. Check the app on loopback and open
   the preview through the provided browser panel.
+- A song may not repeat a pattern to fill time or gate one out of part of the
+  song: that stops it being heard whole. Give patterns later entry bars instead.
 - Keep the zip out of itself. Re-run the zip after adding a download link if
   the link target must be inside the served folder.

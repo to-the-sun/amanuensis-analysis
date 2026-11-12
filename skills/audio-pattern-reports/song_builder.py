@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build a song, stems and player page from a finished pattern report.
 
-Each stem is the pattern's full measured region tiled whole, gated by an
-arrangement, gain-trimmed and mastered. The stems sum exactly to the master.
+Each stem is the pattern's full measured region, placed once and never cut,
+gated or tiled; patterns differ only in the bar at which they enter. The stems
+are gain-trimmed and summed into the master.
 
 Usage:
     python3 song_builder.py --spec report-spec.json --report-dir artifacts/pattern_reports
@@ -18,27 +19,14 @@ import scipy.io.wavfile as wavfile
 
 STEPS = [4096, 512, 64]
 SEAM_S = 0.004
-GATE_S = 0.030
-FADE_IN_S = 0.015
 
 
-def default_sections(n):
-    if n < 1:
-        raise ValueError('no patterns')
-    first = [0, 2] if n > 2 else [0]
-    lead = n - 1
-    return [
-        [0, 8, first],
-        [8, 16, list(range(min(3, n)))],
-        [16, 24, list(range(min(4, n)))],
-        [24, 32, sorted(set(list(range(min(3, n))) + [lead]))],
-        [32, 48, list(range(n))],
-        [48, 56, list(range(min(3, n)))],
-        [56, 64, list(range(n))],
-        [64, 80, list(range(n))],
-        [80, 88, sorted({min(2, n - 1), lead})],
-        [88, 96, list(range(n))],
-    ]
+def default_starts(bars_list):
+    starts, acc = [0], 0
+    for b in bars_list[:-1]:
+        acc += max(1, b // 2)
+        starts.append(acc)
+    return starts
 
 
 def load_meta(report_dir, basename):
@@ -68,19 +56,6 @@ def fade_edges(reg, sr):
     reg[:seam] *= np.linspace(0, 1, seam)
     reg[-seam:] *= np.linspace(1, 0, seam)
     return reg
-
-
-def gate_env(sections, bars, bar, sr, stem_id):
-    song = int(round(bars * bar * sr))
-    step = np.zeros(song)
-    for a, b, ids in sections:
-        if stem_id in ids:
-            step[int(round(a * bar * sr)):int(round(b * bar * sr))] = 1.0
-    gate = max(1, int(round(GATE_S * sr)))
-    w = np.hanning(gate + 2)[1:-1]
-    w /= w.sum()
-    pad = np.pad(step, (gate, gate), mode='edge')
-    return np.convolve(pad, w, mode='same')[gate:gate + song]
 
 
 def rms_db(v):
@@ -136,25 +111,16 @@ def build_song(report_dir, basename, spec_report):
         pb = p['length'] / max(1, p['bars'])
         if abs(pb - bar) > 0.02:
             raise ValueError('patterns disagree on bar length: %.4f vs %.4f' % (bar, pb))
+    region_bars = [len(p['segments']) * p['bars'] for p in pats]
 
     cfg = spec_report.get('song') or {}
-    bars = int(cfg.get('bars', 96))
-    sections = cfg.get('sections')
-    if sections is None:
-        if bars != 96:
-            raise ValueError('song.bars != 96 requires explicit song.sections')
-        sections = default_sections(len(pats))
-        bars = max(s[1] for s in sections)
-    else:
-        sections = [[int(a), int(b), [int(i) for i in ids]] for a, b, ids in sections]
-        bars = int(cfg.get('bars', max(s[1] for s in sections)))
-        for a, b, ids in sections:
-            if not (0 <= a < b <= bars):
-                raise ValueError('bad section %s' % ([a, b, ids],))
-            if any(i < 0 or i >= len(pats) for i in ids):
-                raise ValueError('section references unknown pattern: %s' % ids)
-        if max(s[1] for s in sections) > bars:
-            raise ValueError('section extends past song.bars')
+    starts = cfg.get('starts') or default_starts(region_bars)
+    starts = [int(s) for s in starts]
+    if len(starts) != len(pats):
+        raise ValueError('song.starts must have one value per pattern')
+    if min(starts) < 0:
+        raise ValueError('song.starts has a negative bar')
+    bars = max(s + b for s, b in zip(starts, region_bars))
 
     targets = cfg.get('targets') or [-20.0] * len(pats)
     if len(targets) != len(pats):
@@ -167,21 +133,17 @@ def build_song(report_dir, basename, spec_report):
     song = int(round(bars * bar * sr))
     stems, gains = [], []
     for i, p in enumerate(pats):
-        reg = region(x, sr, p)
-        g = 10 ** ((targets[i] - rms_db(reg)) / 20)
-        tiled = np.tile(fade_edges(reg, sr), int(np.ceil(song / len(reg))))[:song]
-        stems.append(tiled * gate_env(sections, bars, bar, sr, i))
-        gains.append(g)
+        reg = fade_edges(region(x, sr, p), sr)
+        a = int(round(starts[i] * bar * sr))
+        if a + len(reg) > song:
+            raise ValueError('pattern %d runs past the song end' % (i + 1))
+        stem = np.zeros(song)
+        stem[a:a + len(reg)] = reg
+        stems.append(stem)
+        gains.append(10 ** ((targets[i] - rms_db(reg)) / 20))
 
     mix = sum(s * g for s, g in zip(stems, gains))
-    master = 0.95 / (np.abs(mix).max() + 1e-12)
-    fade_in = np.ones(song)
-    fi = max(1, int(round(FADE_IN_S * sr)))
-    fade_in[:fi] = np.linspace(0, 1, fi)
-    fo = max(1, int(round(cfg.get('fadeOutBars', 2) * bar * sr)))
-    fade_out = np.ones(song)
-    fade_out[-fo:] = 0.5 * (1 + np.cos(np.linspace(0, np.pi, fo)))
-    scale = master * fade_in * fade_out
+    scale = 0.95 / (np.abs(mix).max() + 1e-12)
 
     out_dir = os.path.join(report_dir, 'song')
     os.makedirs(os.path.join(out_dir, 'stems'), exist_ok=True)
@@ -206,7 +168,7 @@ def build_song(report_dir, basename, spec_report):
         'bins': {str(k): v for k, v in bins.items()},
         'bar': round(bar, 4),
         'bars': bars,
-        'sections': sorted({b for a, b, _ in sections} | {0}),
+        'starts': starts,
     }
     with open(os.path.join(out_dir, 'data', 'arr.js'), 'w') as f:
         f.write('window.ARR_META = ' + json.dumps(arr_meta, separators=(',', ':')) + ';\n')
@@ -215,13 +177,13 @@ def build_song(report_dir, basename, spec_report):
         "  { file: 'song/stems/%s.wav', name: %s, meta: %s, color: %s }" % (
             names[i],
             json.dumps(p.get('name', 'Pattern %d' % (i + 1))),
-            json.dumps('%d-bar loop &middot; %.3f s' % (p['bars'], p['length'])),
+            json.dumps('%d bars &middot; %.3f s' % (region_bars[i], p['length'] * len(p['segments']))),
             json.dumps(p.get('color', '#4dabf7')))
         for i, p in enumerate(pats))
     dur = song / sr
-    summary = ('%d bars at %.3f s (%d:%04.1f), %d Hz mono. Master plus %d pattern stems; '
-               'the stems sum to the master.' % (bars, bar, int(dur // 60), dur % 60,
-                                                sr, len(pats)))
+    summary = ('%d bars at %.3f s (%d:%04.1f), %d Hz mono. Each pattern plays whole from its '
+               'entry bar; the %d stems sum to the master.' % (bars, bar, int(dur // 60),
+                                                              dur % 60, sr, len(pats)))
     html_text = page_html('Song &mdash; ' + basename, summary, defs,
                           json.dumps(arr_meta, separators=(',', ':')), dur)
     with open(os.path.join(report_dir, 'song.html'), 'w') as f:
@@ -567,7 +529,7 @@ function aDraw() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#0d0d11';
     ctx.fillRect(0, 0, W, H);
-    for (const b of AM.sections) {
+    for (const b of AM.starts) {
       const x = aX(b * AM.bar, W);
       ctx.strokeStyle = 'rgba(255,255,255,0.09)';
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
