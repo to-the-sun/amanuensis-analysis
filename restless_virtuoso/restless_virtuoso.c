@@ -1212,8 +1212,9 @@ typedef struct {
 static HANDLE soundMapping;
 static SoundList *soundList;
 
-/* One list for every running instance, so a number names the same sound in each take. */
-static int sound_number(const char *name)
+/* One list for every running instance, so a number names the same sound in each take.
+   Each shuffled drum set is a different sound, so those always get a new number. */
+static int sound_number(const char *name, int unique)
 {
     if (!soundMapping) {
         soundMapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(SoundList),
@@ -1225,7 +1226,7 @@ static int sound_number(const char *name)
     while (InterlockedCompareExchange(&soundList->lock, 1, 0)) Sleep(0);
 
     int count = (int)soundList->count, number = 0;
-    for (int i = 0; i < count; i++)
+    for (int i = 0; !unique && i < count; i++)
         if (!strcmp(soundList->name[i], name)) { number = i + 1; break; }
 
     if (!number && count < SOUND_MAX) {
@@ -1262,7 +1263,7 @@ static void print_sound(const char *prefix)
     g.soundNumber = 0;
     if (!name[0]) return;
 
-    g.soundNumber = sound_number(name);
+    g.soundNumber = sound_number(name, g.samplesSound);
     printf("  %s%d: %s\n", prefix, g.soundNumber, name);
     fflush(stdout);
     log_trace("sound %d: %s\n", g.soundNumber, name);
