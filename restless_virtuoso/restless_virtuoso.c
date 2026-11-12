@@ -784,9 +784,10 @@ static void take_finish(void)
                 LARGE_INTEGER frequency;
                 QueryPerformanceFrequency(&frequency);
                 for (int i = 0; i < take.soundCount; i++)
-                    fprintf(sounds, "%d, %.6f 1.;\n", take.soundMarks[i].number,
+                    fprintf(sounds, "%d, %.6f %d;\n", i,
                             (double)(LONGLONG)(take.soundMarks[i].qpc - take.origin) * 1000.0 /
-                            (double)frequency.QuadPart);
+                            (double)frequency.QuadPart,
+                            take.soundMarks[i].number);
                 fclose(sounds);
                 log_trace("wrote %ls\n", take.soundsPath);
             }
