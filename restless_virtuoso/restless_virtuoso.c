@@ -256,6 +256,24 @@ typedef struct {
 static MidiEventList midiEvents;
 static AEffect *vstEffect;
 
+#define VST_NAME 128
+#define VST_MAX_OCTAVE 6
+
+typedef struct {
+    char name[VST_NAME];
+    int presets, low, high;
+} VstStats;
+
+static VstStats vstStats[VST_MAX_PLUGINS];
+static int vstStatsCount, vstRangeLow, vstRangeHigh = 127, vstOctave;
+
+static int vst_note(int note)
+{
+    int span = vstRangeHigh - vstRangeLow + 1;
+    note += vstOctave * 12;
+    return vstRangeLow + ((note - vstRangeLow) % span + span) % span;
+}
+
 static void queue_midi_event(uint32_t message)
 {
     if (midiEvents.numEvents == VST_MAX_EVENTS) return;
@@ -331,7 +349,11 @@ static void drain_midi(void)
         } else if (status == 0x80 || status == 0x90) {
             synth_note_off(note);
         }
-        if (vstEffect && status < 0xf0) queue_midi_event(message);
+        if (vstEffect && status < 0xf0) {
+            if (status == 0x80 || status == 0x90 || status == 0xa0)
+                message = (message & 0xffff00ffu) | (uint32_t)vst_note(note) << 8;
+            queue_midi_event(message);
+        }
     }
 }
 
@@ -968,7 +990,17 @@ static void render_drums(float *dst, int outputs, int frames)
 }
 
 static HMODULE vstLibraries[VST_MAX_PLUGINS];
-static int vstLibraryCount, vstActiveLibrary = -1, vstOutputCount, vstProgram;
+static char vstNames[VST_MAX_PLUGINS][VST_NAME];
+static int vstLibraryCount, vstActiveLibrary = -1, vstOutputCount, vstProgram, vstPresetCount;
+
+static VstStats *find_vst_stats(const char *name, const char *dll)
+{
+    for (int i = 0; i < vstStatsCount; i++)
+        if (!_stricmp(vstStats[i].name, name) || !_stricmp(vstStats[i].name, dll))
+            return &vstStats[i];
+    return NULL;
+}
+
 static float *vstZeros, *vstOutputMemory;
 static float **vstInputs, **vstOutputs;
 
@@ -1056,6 +1088,13 @@ static void vst_stop(void)
     vst_free_buffers();
 }
 
+static void effect_name(AEffect *effect, char *name, size_t size)
+{
+    name[0] = 0;
+    effect->dispatcher(effect, effGetEffectName, 0, 0, name, 0);
+    name[size - 1] = 0;
+}
+
 static int start_vst(int library)
 {
     AEffect *effect = create_effect(vstLibraries[library]);
@@ -1072,8 +1111,16 @@ static int start_vst(int library)
     vstEffect = effect;
     vstActiveLibrary = library;
     vstOutputCount = effect->numOutputs;
-    vstProgram = effect->numPrograms > 1 ? rand() % effect->numPrograms : 0;
-    if (effect->numPrograms > 1)
+
+    char name[VST_NAME];
+    effect_name(effect, name, sizeof name);
+    VstStats *stats = find_vst_stats(name, vstNames[library]);
+    vstPresetCount = stats && stats->presets > 0 ? stats->presets : effect->numPrograms;
+    vstRangeLow = stats ? stats->low : 0;
+    vstRangeHigh = stats ? stats->high : 127;
+    vstOctave = rand() % (2 * VST_MAX_OCTAVE + 1) - VST_MAX_OCTAVE;
+    vstProgram = vstPresetCount > 1 ? rand() % vstPresetCount : 0;
+    if (vstPresetCount > 1)
         effect->dispatcher(effect, effSetProgram, 0, vstProgram, NULL, 0);
 
     if (vst_start() != 0) {
@@ -1095,11 +1142,103 @@ static void add_vst(const wchar_t *path)
 
     HMODULE library = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!library) log_error("Could not load '%ls'.\n", path);
-    else if (GetProcAddress(library, "VSTPluginMain") || GetProcAddress(library, "main"))
+    else if (GetProcAddress(library, "VSTPluginMain") || GetProcAddress(library, "main")) {
+        const wchar_t *base = wcsrchr(path, L'\\');
+        wchar_t stem[VST_NAME];
+        wcsncpy(stem, base ? base + 1 : path, VST_NAME - 1);
+        stem[VST_NAME - 1] = 0;
+        wchar_t *dot = wcsrchr(stem, L'.');
+        if (dot) *dot = 0;
+        WideCharToMultiByte(CP_ACP, 0, stem, -1, vstNames[vstLibraryCount], VST_NAME, NULL, NULL);
         vstLibraries[vstLibraryCount++] = library;
-    else FreeLibrary(library);
+    } else FreeLibrary(library);
 
     free((void *)path);
+}
+
+static const char *json_value(const char *text, const char *key)
+{
+    size_t length = strlen(key);
+    for (const char *at = text; (at = strchr(at, '"')); at++) {
+        at++;
+        if (strncmp(at, key, length) || at[length] != '"') continue;
+        at += length + 1;
+        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
+        if (*at++ != ':') continue;
+        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
+        return at;
+    }
+    return NULL;
+}
+
+static void load_vst_stats(const wchar_t *folder)
+{
+    static const wchar_t *names[] = {L"vsti_stats.txt", L"vst_stats.txt"};
+    wchar_t file[32768];
+    FILE *input = NULL;
+    for (int i = 0; i < 2 && !input; i++) {
+        swprintf(file, 32768, L"%ls\\%ls", folder, names[i]);
+        input = _wfopen(file, L"rb");
+    }
+    if (!input) return;
+
+    fseek(input, 0, SEEK_END);
+    long size = ftell(input);
+    fseek(input, 0, SEEK_SET);
+    char *text = size > 0 ? malloc((size_t)size + 1) : NULL;
+    if (text) text[fread(text, 1, (size_t)size, input)] = 0;
+    fclose(input);
+    if (!text) return;
+
+    char *at = text;
+    while (vstStatsCount < VST_MAX_PLUGINS && (at = strchr(at, '"'))) {
+        char *name = ++at;
+        char *nameEnd = strchr(name, '"');
+        if (!nameEnd) break;
+        at = nameEnd + 1;
+
+        char *value = nameEnd + 1;
+        while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+        if (*value++ != ':') continue;
+        while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+        if (*value != '{') continue;
+
+        char *objectEnd = strchr(value, '}');
+        if (!objectEnd) break;
+        char brace = *objectEnd;
+        *objectEnd = 0;
+
+        VstStats *stats = &vstStats[vstStatsCount++];
+        size_t length = (size_t)(nameEnd - name);
+        if (length >= VST_NAME) length = VST_NAME - 1;
+        memcpy(stats->name, name, length);
+        stats->name[length] = 0;
+        if (length > 4 && !_stricmp(stats->name + length - 4, ".dll")) stats->name[length - 4] = 0;
+
+        const char *presets = json_value(value, "presets");
+        const char *range = json_value(value, "range");
+        stats->presets = presets ? atoi(presets) : 0;
+        stats->low = 0;
+        stats->high = 127;
+        if (range && *range == '[') {
+            const char *comma = strchr(range, ',');
+            stats->low = atoi(range + 1);
+            stats->high = comma ? atoi(comma + 1) : stats->low;
+            if (stats->low < 0) stats->low = 0;
+            if (stats->low > 127) stats->low = 127;
+            if (stats->high < 0) stats->high = 0;
+            if (stats->high > 127) stats->high = 127;
+            if (stats->low > stats->high) {
+                int swap = stats->low;
+                stats->low = stats->high;
+                stats->high = swap;
+            }
+        }
+
+        *objectEnd = brace;
+        at = objectEnd + 1;
+    }
+    free(text);
 }
 
 static void load_vsts(const char *folder)
@@ -1113,6 +1252,7 @@ static void load_vsts(const char *folder)
         return;
     }
 
+    load_vst_stats(path);
     scan_tree(path, L".dll", add_vst);
     free(path);
     if (!vstLibraryCount) {
@@ -1245,14 +1385,15 @@ static void sound_name(char *out, size_t size)
     out[0] = 0;
     if (g.samplesSound) snprintf(out, size, "%d drum samples", drumSampleCount);
     else if (vstEffect) {
-        char name[64] = "";
-        vstEffect->dispatcher(vstEffect, effGetEffectName, 0, 0, name, 0);
-        name[63] = 0;
-        if (vstEffect->numPrograms > 0)
-            snprintf(out, size, "VST %s, preset %d/%d", name[0] ? name : "plugin", vstProgram + 1,
-                     vstEffect->numPrograms);
+        char name[64];
+        effect_name(vstEffect, name, sizeof name);
+        char octave[24] = "";
+        if (vstOctave) snprintf(octave, sizeof octave, ", octave %+d", vstOctave);
+        if (vstPresetCount > 0)
+            snprintf(out, size, "VST %s, preset %d/%d%s", name[0] ? name : "plugin", vstProgram + 1,
+                     vstPresetCount, octave);
         else
-            snprintf(out, size, "VST %s, default preset", name[0] ? name : "plugin");
+            snprintf(out, size, "VST %s, default preset%s", name[0] ? name : "plugin", octave);
     }
 }
 
@@ -2117,21 +2258,6 @@ static int is_folder(const char *path)
 {
     DWORD attributes = GetFileAttributesA(path);
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-static const char *json_value(const char *text, const char *key)
-{
-    size_t length = strlen(key);
-    for (const char *at = text; (at = strchr(at, '"')); at++) {
-        at++;
-        if (strncmp(at, key, length) || at[length] != '"') continue;
-        at += length + 1;
-        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
-        if (*at++ != ':') continue;
-        while (*at == ' ' || *at == '\t' || *at == '\r' || *at == '\n') at++;
-        return at;
-    }
-    return NULL;
 }
 
 static int json_string(const char *text, const char *key, char *out, size_t size)
