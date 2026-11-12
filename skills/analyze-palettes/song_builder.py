@@ -22,7 +22,7 @@ SEAM_S = 0.004
 
 
 def load_meta(report_dir, basename):
-    with open(os.path.join(report_dir, 'data', basename, 'summary.js')) as f:
+    with open(os.path.join(report_dir, '[data]', basename, 'summary.js')) as f:
         text = f.read()
     return json.loads(re.search(r'window\.PATTERN_META = (\{.*?\});', text).group(1))
 
@@ -111,7 +111,7 @@ def build_song(report_dir, basename, spec_report):
     if len(targets) != len(pats):
         raise ValueError('song.targets must have one value per pattern')
 
-    sr2, x = read_wav(os.path.join(report_dir, basename + '.wav'))
+    sr2, x = read_wav(os.path.join(report_dir, '[palettes]', basename + '.wav'))
     if sr2 != sr:
         raise ValueError('sample rate mismatch')
     x = x.astype(np.float64) / 32768.0
@@ -129,24 +129,24 @@ def build_song(report_dir, basename, spec_report):
     mix = sum(s * g for s, g in zip(stems, gains))
     scale = 0.95 / (np.abs(mix).max() + 1e-12)
 
-    out_dir = os.path.join(report_dir, 'song')
-    os.makedirs(os.path.join(out_dir, 'stems'), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, 'data'), exist_ok=True)
+    stem_dir = os.path.join(report_dir, '[stems]')
+    stem_data = os.path.join(stem_dir, '[data]')
+    os.makedirs(stem_data, exist_ok=True)
+    master_path = os.path.join(os.path.dirname(os.path.abspath(report_dir)), 'finished_song.wav')
 
     def w(path, v):
         wavfile.write(path, sr, np.clip(np.round(v * 32767), -32768, 32767).astype('<i2'))
 
     names = []
     for i, s in enumerate(stems):
-        w(os.path.join(out_dir, 'stems', 'pattern_%d.wav' % (i + 1)), s * gains[i] * scale)
+        w(os.path.join(stem_dir, 'pattern_%d.wav' % (i + 1)), s * gains[i] * scale)
         names.append('pattern_%d' % (i + 1))
 
-    stems_pcm = [wavfile.read(os.path.join(out_dir, 'stems', 'pattern_%d.wav' % (i + 1)))[1]
+    stems_pcm = [wavfile.read(os.path.join(stem_dir, 'pattern_%d.wav' % (i + 1)))[1]
                  for i in range(len(pats))]
     summed = np.sum([s.astype(np.int32) for s in stems_pcm], axis=0)
-    wavfile.write(os.path.join(out_dir, 'finished_song.wav'), sr,
-                  np.clip(summed, -32768, 32767).astype('<i2'))
-    total, bins = write_levels(stems_pcm, os.path.join(out_dir, 'data'))
+    wavfile.write(master_path, sr, np.clip(summed, -32768, 32767).astype('<i2'))
+    total, bins = write_levels(stems_pcm, stem_data)
 
     arr_meta = {
         'total': int(total),
@@ -156,11 +156,11 @@ def build_song(report_dir, basename, spec_report):
         'bars': int(round(dur / bar_of[0])),
         'entries': [round(t, 6) for t in start_s],
     }
-    with open(os.path.join(out_dir, 'data', 'arr.js'), 'w') as f:
+    with open(os.path.join(stem_data, 'arr.js'), 'w') as f:
         f.write('window.ARR_META = ' + json.dumps(arr_meta, separators=(',', ':')) + ';\n')
 
     defs = ',\n'.join(
-        "  { file: 'song/stems/%s.wav', name: %s, meta: %s, color: %s }" % (
+        "  { file: '%%5Bstems%%5D/%s.wav', name: %s, meta: %s, color: %s }" % (
             names[i],
             json.dumps(p.get('name', 'Pattern %d' % (i + 1))),
             json.dumps('%d bars &middot; %.3f s' % (region_bars[i], p['length'] * len(p['segments']))),
@@ -187,14 +187,14 @@ def build_song(report_dir, basename, spec_report):
             with open(idx, 'w') as f:
                 f.write(text)
 
-    song_pcm = wavfile.read(os.path.join(out_dir, 'finished_song.wav'))[1].astype(np.int32)
+    song_pcm = wavfile.read(master_path)[1].astype(np.int32)
     delta = int(np.abs(np.sum([s.astype(np.int32) for s in stems_pcm], axis=0) - song_pcm).max())
     if delta > 2:
         raise RuntimeError('stem sum differs from master by %d LSB' % delta)
 
     out = {
-        'song': os.path.join(out_dir, 'finished_song.wav'),
-        'stems': [os.path.join(out_dir, 'stems', n + '.wav') for n in names],
+        'song': master_path,
+        'stems': [os.path.join(stem_dir, n + '.wav') for n in names],
         'page': os.path.join(report_dir, 'song.html'),
         'bars': arr_meta['bars'], 'bar': round(bar_of[0], 4), 'duration': round(dur, 3),
         'peak_db': round(20 * np.log10(np.abs(song_pcm).max() / 32768.0), 2),
@@ -304,13 +304,13 @@ __HEAD__
   <div class="hint">Drag horizontally on a stem to zoom. Right-click to zoom out. Click to jump and play.</div>
 </div>
 <a class="back" href="index.html">&larr; Back to reports</a>
-<script src="song/data/arr.js"></script>
+<script src="%5Bstems%5D/%5Bdata%5D/arr.js"></script>
 <script>
 const DEFS = [
 __DEFS__
 ];
 
-const master = new Audio('song/finished_song.wav');
+const master = new Audio('../finished_song.wav');
 master.preload = 'auto';
 const stems = DEFS.map(d => { const a = new Audio(d.file); a.preload = 'metadata'; return a; });
 [master, ...stems].forEach(a => { a.hidden = true; document.body.appendChild(a); });
@@ -480,7 +480,7 @@ function aLoad(step) {
   if (aData[step] || aPending[step]) return;
   aPending[step] = 1;
   const s = document.createElement('script');
-  s.src = 'song/data/a' + step + '.js';
+  s.src = '%5Bstems%5D/%5Bdata%5D/a' + step + '.js';
   s.onload = () => {
     aPending[step] = 0;
     const raw = window.ARR_LEVEL && window.ARR_LEVEL[step];

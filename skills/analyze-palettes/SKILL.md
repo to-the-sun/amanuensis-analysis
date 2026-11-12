@@ -56,7 +56,8 @@ across patterns or across the file. Measure each region on its own terms.
    `passes.py` does this discovery for the scripts. If no passes file is found,
    stop and ask for it; do not fall back to a guessed song placement.
 5. Create a workspace output directory, for example
-   `artifacts/<batch>_pattern_reports`. Keep generated data with the reports.
+   `artifacts/<batch>/pattern_reports`. Keep generated data with the reports;
+   the song master is written one level up, beside the report folder.
 6. Dependencies: Python 3, NumPy, SciPy. `ffmpeg` only for non-WAV input.
 
 ### 0a. The passes format
@@ -227,7 +228,7 @@ Build:
 python3 pattern_report_builder.py \
   --spec report-spec.json \
   --src /path/to/audio \
-  --out artifacts/pattern_reports
+  --out artifacts/<batch>/pattern_reports
 ```
 
 The builder fails if the passes file is missing. It does not reject a measured
@@ -237,16 +238,21 @@ chosen from the passes.
 Output layout:
 
 ```
-pattern_reports/
-  index.html
-  <audio-basename>.html
-  <audio-basename>.wav
-  data/<audio-basename>/
-    summary.js
-    l8_*.js
-    l64_*.js
-    l512_*.js
+artifacts/<batch>/
+  pattern_reports/
+    index.html
+    <audio-basename>.html
+    [palettes]/<audio-basename>.wav
+    [data]/<audio-basename>/
+      summary.js
+      l8_*.js
+      l64_*.js
+      l512_*.js
 ```
+
+`[data]`, `[palettes]` and `[stems]` are percent-encoded as `%5Bdata%5D`,
+`%5Bpalettes%5D` and `%5Bstems%5D` in every URL (`src`, chunk requests, audio
+files) and kept literal on disk.
 
 The builder validates the resident coarse min/max data and the first fine
 chunk against the PCM before finishing.
@@ -281,7 +287,7 @@ Add a `song` block to the report object for levels only:
 
 ```bash
 python3 song_builder.py --spec report-spec.json \
-  --report-dir artifacts/pattern_reports
+  --report-dir artifacts/<batch>/pattern_reports
 ```
 
 The builder reads the report's `summary.js` and copied WAV, so it uses exactly
@@ -290,13 +296,17 @@ the patterns, pass lead-ins and segment grid the report shows.
 Output:
 
 ```
-pattern_reports/
-  song.html
-  song/
-    finished_song.wav
-    stems/pattern_1.wav ...
-    data/arr.js  a4096.js  a512.js  a64.js
+artifacts/<batch>/
+  finished_song.wav
+  pattern_reports/
+    song.html
+    [stems]/
+      pattern_1.wav ...
+      [data]/arr.js  a4096.js  a512.js  a64.js
 ```
+
+`song.html` reaches the master with `../finished_song.wav`, so the report
+folder and the master must stay siblings.
 
 Guarantees:
 
@@ -361,15 +371,17 @@ Audio seeking requires a server that supports HTTP byte ranges. Use the
 bundled server, not a plain static server:
 
 ```bash
-python3 pattern_report_server.py --root artifacts/pattern_reports --port 8000
+python3 pattern_report_server.py --root artifacts/<batch> --port 8000
 ```
 
-It binds `0.0.0.0`, serves the report directory, and answers `Range` requests
-with `206 Partial Content`. Verify:
+Serve the batch folder holding both `pattern_reports/` and `finished_song.wav`;
+the reports are then at `http://127.0.0.1:8000/pattern_reports/index.html`. It
+binds `0.0.0.0` and answers `Range` requests with `206 Partial Content`.
+Verify:
 
 ```bash
 curl -s -D - -o /dev/null -H 'Range: bytes=0-99' \
-  http://127.0.0.1:8000/example.wav
+  http://127.0.0.1:8000/pattern_reports/%5Bpalettes%5D/example.wav
 ```
 
 Expect `206` and `Content-Range`.
@@ -387,7 +399,7 @@ Builder-level:
       segment exists.
 - [ ] Coarse min/max matches the WAV at sampled bins (the builder asserts a
       few bins).
-- [ ] `l8_0.js` exists and its first bins match the PCM.
+- [ ] `[data]/<audio-basename>/l8_0.js` exists and its first bins match the PCM.
 - [ ] When a song is built, the stem sum check passes and the song page loads
       its arrangement data.
 - [ ] No pattern region was reduced to a handful of bars to raise its mean
@@ -411,14 +423,16 @@ not proof of playback or seeking.
 ## 7. Packaging
 
 ```bash
-cd artifacts
-zip -r analyze-palettes.zip pattern_reports \
+cd artifacts/<batch>
+zip -r analyze-palettes.zip finished_song.wav pattern_reports \
   -x 'pattern_reports/analyze-palettes.zip'
 unzip -t analyze-palettes.zip
 ```
 
-Include the index, all HTML reports, the WAVs, the `data/` chunks, and when a
-song was built, `song.html` plus `song/` (master, stems and `song/data/`). Do not
+The archive root holds `finished_song.wav` beside the `pattern_reports/` folder.
+Include the index, all HTML reports, the `[palettes]/` WAVs, the `[data]/`
+chunks, and when a song was built, `song.html` plus `[stems]/` (stems and
+`[stems]/[data]/`). Do not
 include the zip inside itself. Report the final size and entry count.
 
 ## 8. Worked example
