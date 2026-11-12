@@ -1,0 +1,30 @@
+{
+  "title": "Analyze Palettes",
+  "description": "Patterns from measured sections, placed by pass-derived lead-ins.",
+  "reports": [
+    {
+      "file": "palette_2026-11-10.wav",
+      "patterns": [
+        {
+          "start": 1.00,
+          "end": 60.10,
+          "length": 3.652,
+          "bars": 2,
+          "name": "Pattern 1",
+          "color": "#4dabf7"
+        },
+        {
+          "start": 69.10,
+          "end": 182.10,
+          "length": 3.688,
+          "bars": 2,
+          "name": "Pattern 2",
+          "color": "#ffa94d"
+        }
+      ],
+      "song": {
+        "targets": [-20, -20]
+      }
+    }
+  ]
+}
