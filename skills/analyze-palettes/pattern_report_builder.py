@@ -6,6 +6,8 @@ import passes
 
 CHUNK_BINS = 65536
 COARSE_STEP = 4096
+DATA_DIR, DATA_URL = '[data]', '%5Bdata%5D'
+PALETTE_DIR, PALETTE_URL = '[palettes]', '%5Bpalettes%5D'
 LEVELS = [(8, True), (64, True), (512, True)]
 COLORS = ['#4dabf7', '#ffa94d', '#51cf66', '#cc5de8']
 
@@ -806,12 +808,12 @@ def build_report(spec, out_dir, src_dir):
     passes_path = passes.find_passes_file(src_path)
     spans = passes.pass_spans(passes.parse_passes(passes_path), duration)
 
-    out_wav = os.path.join(out_dir, filename)
+    out_wav = os.path.join(out_dir, PALETTE_DIR, filename)
+    os.makedirs(os.path.dirname(out_wav), exist_ok=True)
     if not os.path.exists(out_wav) or os.path.getsize(out_wav) != os.path.getsize(src_path):
         shutil.copy2(src_path, out_wav)
 
-    data_dir_name = os.path.join('data', basename)
-    data_dir = os.path.join(out_dir, data_dir_name)
+    data_dir = os.path.join(out_dir, DATA_DIR, basename)
     os.makedirs(data_dir, exist_ok=True)
 
     patterns = []
@@ -865,7 +867,7 @@ def build_report(spec, out_dir, src_dir):
         'channels': channels,
         'totalSamples': int(total),
         'duration': round(duration, 6),
-        'dataDir': data_dir_name.replace(os.sep, '/'),
+        'dataDir': DATA_URL + '/' + basename,
         'chunkBins': CHUNK_BINS,
         'coarseStep': COARSE_STEP,
         'coarseBins': int(coarse_bins),
@@ -887,9 +889,9 @@ def build_report(spec, out_dir, src_dir):
     html_text = (HTML_TEMPLATE
                  .replace('__TITLE__', html.escape('Pattern Analysis - ' + filename))
                  .replace('__META_LINE__', meta_line)
-                 .replace('__AUDIO_SRC__', filename)
+                 .replace('__AUDIO_SRC__', PALETTE_URL + '/' + filename)
                  .replace('__PATTERN_CARDS__', pattern_cards(patterns))
-                 .replace('__DATA_SCRIPT__', data_dir_name.replace(os.sep, '/') + '/summary.js')
+                 .replace('__DATA_SCRIPT__', DATA_URL + '/' + basename + '/summary.js')
                  .replace('__REPORT_JS__', JS))
     with open(os.path.join(out_dir, basename + '.html'), 'w') as f:
         f.write(html_text)
