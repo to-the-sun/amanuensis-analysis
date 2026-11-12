@@ -2,12 +2,12 @@
 
 A passes file holds one line per recorded pass, ``index, loop_point_ms pad;``.
 Pass i spans [loop_point_i, loop_point_{i+1}); the last pass runs to the end of
-the audio. Pattern starts are anchored to these loop points.
+the audio. As in analyze.c, a pattern is assigned to the pass it overlaps most,
+and its lead-in is the pattern start minus that pass's loop point plus the pad.
 """
 import os
 
 TEXT_EXTS = ('.txt', '.text')
-GRID_TOL = 0.05
 
 
 def find_passes_file(audio_path):
@@ -71,28 +71,15 @@ def pass_spans(rows, duration):
     return spans
 
 
-def pass_at(t, spans):
-    near = [s for s in spans if abs(t - s['loop']) <= GRID_TOL]
-    if near:
-        return min(near, key=lambda s: abs(t - s['loop']))
+def find_pass(start, end, spans):
+    best = spans[0]
+    best_overlap = -1.0
     for span in spans:
-        if span['loop'] <= t < span['end'] - 1e-9:
-            return span
-    return min(spans, key=lambda s: abs(s['start'] - t))
+        overlap = max(0.0, min(end, span['end']) - max(start, span['loop']))
+        if overlap > best_overlap:
+            best, best_overlap = span, overlap
+    return best
 
 
-def offset_in_pass(t, span):
-    return t - span['loop'] + span['pad']
-
-
-def entry_bar(t, span, bar_length):
-    offset = offset_in_pass(t, span)
-    bar = int(round(offset / bar_length))
-    if abs(offset - bar * bar_length) > GRID_TOL:
-        raise ValueError(
-            'start %.3f s is %.3f s off the pass %d bar grid (bar %.6f s)'
-            % (t, offset - bar * bar_length, span['index'], bar_length))
-    if bar < 0:
-        raise ValueError('start %.3f s falls %d bars before pass %d'
-                         % (t, -bar, span['index']))
-    return bar
+def lead_in(start, span):
+    return start - span['loop'] + span['pad']

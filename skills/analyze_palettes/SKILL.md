@@ -16,18 +16,23 @@ measured, what is estimated, and where the uncertainty is.
 ## Core vocabulary
 
 - **Bar**: the base pulse of a region. Equivalent to a measure in most standard
-  depictions of music. Estimate it from the pass durations (every pass is an
-  integer number of bars) and confirm with onset spacing.
+  depictions of music. A file can change tempo, so measure the bar in each
+  region rather than once for the file.
 - **Pass**: one recorded loop cycle. Its **loop point** is the millisecond
   position at which it starts. Pass `i` spans
   `[loop_point_i, loop_point_{i+1})`; the last pass runs to the end of the file.
+  The line's optional pad is added when the pass positions a pattern.
 - **Segment**: a single iteration of a repeating pattern. All segments within
   the same pattern have the same length.
 - **Pattern**: one contiguous repeated region of at least three segments. A
-  pattern always begins on a pass loop point plus a whole number of bars.
+  pattern begins where the audio repeats; it is not required to begin on a pass
+  loop point.
 - **Pattern region**: the span of audio the loop was measured over, from its
   start to the end of its last complete segment. This is the unit the song uses,
   whole.
+- **Lead-in**: `pattern start - pass loop point + pad`. It may be negative. The
+  earliest lead-in is shifted to 0, and the shifted value is the pattern's entry
+  in the song, in seconds. This is the `analyze.c` placement rule.
 
 Patterns are independent of each other. A file may hold one loop length in every
 region, or a different length in each; both are normal, and neither is imposed
@@ -49,8 +54,7 @@ across patterns or across the file. Measure each region on its own terms.
    - otherwise `passes*.txt` in the same folder.
 
    `passes.py` does this discovery for the scripts. If no passes file is found,
-   stop and ask for it; do not fall back to silence-delimited starts. Do not use
-   repository-specific audio analysis code unless the user asks.
+   stop and ask for it; do not fall back to a guessed song placement.
 5. Create a workspace output directory, for example
    `artifacts/<batch>_pattern_reports`. Keep generated data with the reports.
 6. Dependencies: Python 3, NumPy, SciPy. `ffmpeg` only for non-WAV input.
@@ -58,7 +62,7 @@ across patterns or across the file. Measure each region on its own terms.
 ### 0a. The passes format
 
 One line per pass, `index, loop_point_ms pad;`. The pad is optional and is the
-arbitrary offset used by the C analyzer to align a stem to its pass:
+arbitrary offset the C analyzer adds when placing a stem:
 
 ```text
 0, 977.324 1.;
@@ -74,11 +78,12 @@ rows = passes.parse_passes(passes_path)
 spans = passes.pass_spans(rows, duration)
 ```
 
-Each pass duration must be very close to an integer number of bars. A first
-pass may be a partial pickup and a last pass may be a short tail; both are
-normal and are excluded from patterns, not stretched onto the grid.
+Each pass duration must be close to an integer number of bars; estimate the bar
+by fitting integer multiples of a candidate bar to all pass durations. A first
+pass may be a partial pickup and a last pass a short tail; both are normal and
+are not pattern regions.
 
-## 1. Passes determine where patterns begin
+## 1. Find patterns in the sections
 
 Run the bundled helper:
 
@@ -88,101 +93,119 @@ python3 analyze_audio.py input.wav [more.wav ...] --json analysis.json
 
 It computes, independently of the project:
 
-- the pass table, an estimated bar, and runs of consecutive equal-length passes;
+- the pass table, an estimated bar, and runs of equal-length passes;
 - a 64-band log-mel spectrogram (STFT 2048, hop 1024, about 43 fps);
-- a positive spectral-flux onset envelope;
-- band envelopes for sub, bass, lowmid, mid, high and air;
-- silence-delimited sections, for reference only;
+- a positive spectral-flux onset envelope and band envelopes;
+- silence-delimited sections using 0.1 s RMS, −50 dB, 0.5 s minimum silence;
 - a low-rate self-similarity novelty curve;
-- autocorrelation and lag-similarity peaks per pass run;
-- a suggested loop length per pass run, with mean similarity and confidence.
+- autocorrelation and lag-similarity peaks per section;
+- a suggested loop length per section, with mean similarity and confidence;
+- each section's assigned pass and raw lead-in.
 
 The helper prints candidates; verify them rather than accepting them blindly.
 
-### 1a. Regions come from passes
+### 1a. Regions come from the sections
 
-Passes are the composer's own loop boundaries, so they are the start grid:
+Start from the silence-delimited sections: they are the composer's own
+divisions, and a section is normally one pattern. Report one pattern per
+section, with the region covering the section from just after the gap to the end
+of its last complete segment. Do not carve a section down to the few bars that
+repeat most exactly: a pattern is what a listener hears looping through the
+whole section.
 
-1. Group consecutive passes with the same duration (within a few tens of
-   milliseconds). Each run is a section; a run's first pass loop point is the
-   pattern start.
-2. One pattern per run, unless the loop itself changes inside the run.
-3. Do not start a pattern from a silence gap or an arbitrary ACF peak. If a run
-   begins with a fade, leave the fade out of the region by starting at the pass
-   loop point, not before it.
-4. Skip the intro/first partial pass and any final tail shorter than three
-   segments. A pass whose duration is not an integer number of bars is not a
-   pattern start; report it as a pickup or tail.
-5. Do not carve a run down to the bars that repeat most exactly. A pattern is
-   what a listener hears looping through the whole pass run.
+Split a long section only where the loop itself changes — a new bar length, a
+new harmonic rhythm, an obvious change of density. Two or three sub-regions of
+sixty to a hundred seconds each are typical for a five-minute section. Do not
+leave a stretch of a section unrepresented when it loops at its own length.
+Leave a little margin around fades; do not start a pattern in the middle of a
+tail. A pattern start is a measured musical start, not a pass loop point.
 
 ### 1b. The loop is an integer number of bars
 
-For each run:
+For each region:
 
-1. Estimate the base bar from the pass durations: each pass is an integer
-   number of bars. Confirm with onset spacing. A file can change tempo, so
-   measure per run rather than assuming one bar for the file.
-2. Test integer bar lengths that leave at least three segments in the run.
-   Include the pass length itself as a candidate.
-3. Score each candidate by **mean lag similarity over the whole run**: the
-   average, across every frame of the run, of the similarity between a frame
+1. Estimate the base bar from onset spacing or the ACF. Confirm it against the
+   pass-duration estimate; measure it per region.
+2. Test integer bar lengths that leave at least three segments. Include 1, 2, 3,
+   4 and 8 bars where they fit.
+3. Score each candidate by **mean lag similarity over the whole region**: the
+   average, across every frame of the region, of the similarity between a frame
    and the frame one loop later.
-4. Prefer the shortest candidate that explains the whole run. A stronger score
-   at 2× a shorter loop is usually the same loop with a two-bar layer on top.
+4. Prefer the shortest candidate that explains the whole region. A stronger
+   score at 2× or 4× a shorter loop is usually the same loop with a layer on
+   top — but take the longer one when the region's high-level content needs it.
 5. Confirm it is a **peak**: the chosen lag must score clearly above lags that
    are not near-integer bar multiples. A held pad or a fade tail matches at
    every lag, so a high score alone is not evidence.
 
 Do **not** gate candidates on the fraction of frames that exceed a strict
 similarity. Real loop regions score about 0.55–0.81 on the mean, and a
-frame-fraction gate rejects most of them while ranking steady textures above
-the actual music.
+frame-wise gate rejects most of them while ranking steady textures above the
+actual music.
 
-### 1c. Checks
+### 1c. Passes place the patterns relative to the song start
 
-1. **Pass grid.** The chosen start must equal the run's first loop point. The
-   report builder rejects a start that is more than 50 ms off the pass bar grid.
+This is the `analyze.c` rule. Passes do not cut or snap patterns:
+
+1. For each pattern, assign the pass it overlaps most in time. On a tie, use the
+   earlier pass.
+2. Compute `lead = pattern.start - pass.loop_point + pass.pad`.
+3. Shift all leads by `-min(lead)` and clamp at 0. That shifted value is the
+   pattern's **entry** in seconds.
+4. The song starts each stem at its entry. A negative raw lead is normal: it
+   means the pattern starts before its pass's loop point. The earliest pattern
+   defines the song's zero.
+
+Do not round the entry to a bar, and do not move a pattern start onto a loop
+point to make the lead zero. The lead is whatever the measured start and the
+assigned pass produce. In the worked example the raw leads run from −45.2 s to
+−37.3 s, so the song entries are 0–42.1 s, not bar multiples.
+
+### 1d. Checks
+
+1. **Section boundaries.** Prefer actual silence gaps. If the file is
+   continuous, use novelty peaks and clear changes in timbre/level.
 2. **Fundamental vs harmonics.** A strong peak at 2L, 3L or 4L is often a
-   harmonic of the loop, not the loop itself. Compare onset ACF, mel lag
-   similarity and band ACF. Prefer the shortest plausible peak consistent with
-   the musical structure.
-3. **Nested periods.** A low band may repeat at half the full loop while a
-   high layer repeats only at the full loop. Choose the full loop when the
-   run's high-level content requires it.
+   harmonic of the loop, not the loop. Compare onset ACF, mel lag similarity and
+   band ACF. Prefer the shortest plausible peak consistent with the structure.
+3. **Nested periods.** A low band may repeat at half the full loop while a high
+   layer repeats only at the full loop. Choose the full loop when the region's
+   high-level content requires it.
 4. **Cycle count.** Check that `(end - start) / loop_length` is close to an
    integer. A remainder is normal at the end and is excluded: the pattern ends
    at the last full loop. A region of fewer than three full segments is not a
    pattern.
 5. **Bar multiple.** Express the loop as an integer number of bars.
-6. **Confidence.** Record whether the loop is clear, plausible, or ambiguous,
+6. **Pass placement.** Confirm the assigned pass is the one with the largest
+   temporal overlap, and record the raw lead and the shifted entry.
+7. **Confidence.** Record whether the loop is clear, plausible, or ambiguous,
    and record the mean similarity. A useful tolerance is a few tens of
    milliseconds for the loop estimate.
 
 Write down a table before building anything:
 
-| File | Pattern | Pass | Start (s) | End (s) | Loop (s) | Bars | Mean sim | Segments |
-|---|---|---|---:|---:|---:|---:|---:|---:|
-| palette_2026-11-10 | 1 | 2–5 | 9.594 | 46.195 | 3.652825 | 2 | 0.58 | 10 |
+| File | Pattern | Pass | Start (s) | End (s) | Loop (s) | Bars | Lead (s) | Entry (s) | Segments |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| palette_2026-11-10 | 1 | 6 | 1.00 | 60.10 | 3.652 | 2 | −45.194 | 34.201 | 16 |
 
 ## 2. Build the report specification
 
 Create a JSON spec. Paths in `file` are relative to `--src` unless absolute.
-`start` must be a pass loop point; `end` is a search bound that the builder
+`start` is the measured pattern start; `end` is a search bound that the builder
 truncates to the last complete segment.
 
 ```json
 {
   "title": "Analyze Palettes",
-  "description": "Patterns anchored to pass loop points.",
+  "description": "Sections with pass-derived lead-ins.",
   "reports": [
     {
       "file": "palette_2026-11-10.wav",
       "patterns": [
         {
-          "start": 9.594,
-          "end": 46.195,
-          "length": 3.6524,
+          "start": 1.00,
+          "end": 60.10,
+          "length": 3.652,
           "bars": 2,
           "name": "Pattern 1",
           "color": "#4dabf7"
@@ -195,8 +218,8 @@ truncates to the last complete segment.
 
 `start`, `end` and `length` are seconds. `bars` is informational for the card.
 `name` and `color` are optional. The builder finds the passes file beside the
-audio, assigns each pattern to the pass containing its start, and records the
-pass index and bar offset in `summary.js`.
+audio, assigns each pattern to its maximum-overlap pass, and records `pass`,
+`passStart`, `passLead` and `entry` in `summary.js`.
 
 Build:
 
@@ -207,9 +230,9 @@ python3 pattern_report_builder.py \
   --out artifacts/pattern_reports
 ```
 
-The builder fails if the passes file is missing or a pattern start is off the
-pass bar grid. That failure is intentional: pattern starts come from the passes
-file, not from a guessed boundary.
+The builder fails if the passes file is missing. It does not reject a measured
+start for being off the pass loop grid, because pattern starts are measured, not
+chosen from the passes.
 
 Output layout:
 
@@ -236,12 +259,11 @@ region, first sample to last, placed once: no segment is dropped, no portion is
 silenced, gated or faded out early, and the region is never tiled or looped to
 fill more time.
 
-The passes file decides where each pattern begins. A pattern that starts on its
-pass loop point enters at bar 0; a pattern that starts `k` bars into its pass
-enters at bar `k`, after shifting the earliest pattern to bar 0. There is no
-manual `starts` list: the report's `summary.js` stores the pass-derived
-`entryBar` for each pattern, and `song_builder.py` uses it. Adding `song.starts`
-to the spec is an error.
+The passes file decides where each pattern begins relative to the song start.
+`summary.js` stores the shifted lead-in as `entry` in seconds; `song_builder.py`
+starts the stem at that time. There is no manual `starts` list, and adding
+`song.starts` to the spec is an error. Entries are seconds, not bars: the C
+analyzer pads each stem by the exact millisecond lead-in.
 
 Add a `song` block to the report object for levels only:
 
@@ -253,7 +275,7 @@ Add a `song` block to the report object for levels only:
 
 - `targets`: pre-master RMS target in dBFS per pattern, default -20.
 - Patterns may differ in segment length and bar length; the builder places each
-  stem at its own entry bar and needs no common grid.
+  stem at its own entry and needs no common grid.
 - Song length is fixed by the patterns, not chosen: it is the furthest entry
   time plus that pattern's whole region.
 
@@ -263,7 +285,7 @@ python3 song_builder.py --spec report-spec.json \
 ```
 
 The builder reads the report's `summary.js` and copied WAV, so it uses exactly
-the patterns, pass starts and segment grid the report shows.
+the patterns, pass lead-ins and segment grid the report shows.
 
 Output:
 
@@ -296,8 +318,8 @@ Song-level checks:
 
 - [ ] Builder exits 0; printed stem delta is 0 LSB; clipped is 0.
 - [ ] Each stem's audio is exactly its pattern's measured region
-      (`segments × length`) once, beginning at its pass-derived entry bar.
-- [ ] All stem rows draw in `song.html`, silent before their entry bar.
+      (`segments × length`) once, beginning at its pass-derived entry.
+- [ ] All stem rows draw in `song.html`, silent before their entry.
 - [ ] A deep zoom loads a finer `a*.js` level and Reset Zoom restores the view.
 - [ ] Click-to-seek starts playback; mute toggles one stem.
 
@@ -359,8 +381,8 @@ Builder-level:
 - [ ] Command exits 0.
 - [ ] `summary.js` parses; duration, sample rate, pattern count and segment
       count match the spec.
-- [ ] Every pattern's `start` equals a pass loop point; `pass` and `startBar`
-      are present and `entryBar` is the shifted start bar.
+- [ ] Every pattern has `pass`, `passStart`, `passLead` and `entry`; `entry` is
+      the raw lead shifted by the minimum lead.
 - [ ] Every pattern's segments are exactly `length` long; no partial tail
       segment exists.
 - [ ] Coarse min/max matches the WAV at sampled bins (the builder asserts a
@@ -402,43 +424,42 @@ include the zip inside itself. Report the final size and entry count.
 ## 8. Worked example
 
 **`palette_2026-11-10-18-16-29.wav`**, 609.10 s mono 44.1 kHz, with 29 passes.
-Every pass is an integer number of 1.826 s bars; the pass lengths grow from 5 to
-26 bars. Runs of equal-length passes are the patterns:
+The silence sections are 1.00–60.10, 69.10–182.10, 184.00–289.70, 291.80–293.30
+and 304.80–574.80 s. The 1.5 s fourth section is too short; the 270 s final
+section splits into three where its loop changes. Every pass is an integer
+number of 1.826 s bars.
 
-| Pattern | Passes | Start–End (s) | Loop (s) | Bars | Segments | Mean sim |
-|---|---|---:|---:|---:|---:|---:|
-| 1 | 2–5 | 9.59–46.12 | 3.652400 | 2 | 10 | 0.62 |
-| 2 | 6–9 | 46.20–90.02 | 1.826200 | 1 | 24 | 0.66 |
-| 3 | 10–13 | 90.04–148.48 | 3.652400 | 2 | 16 | 0.64 |
-| 4 | 14–15 | 148.50–185.02 | 3.652400 | 2 | 10 | 0.63 |
-| 5 | 16–17 | 185.03–228.86 | 7.304800 | 4 | 6 | 0.69 |
-| 6 | 18–19 | 228.87–280.00 | 7.304800 | 4 | 7 | 0.67 |
-| 7 | 20 | 280.00–309.22 | 3.652400 | 2 | 8 | 0.67 |
-| 8 | 21 | 309.23–338.45 | 7.304800 | 4 | 4 | 0.30 |
-| 9 | 22 | 342.12–378.64 | 7.304800 | 4 | 5 | 0.48 |
-| 10 | 23 | 378.64–418.82 | 3.652400 | 2 | 11 | 0.40 |
-| 11 | 24 | 418.82–462.65 | 3.652400 | 2 | 12 | 0.43 |
-| 12 | 25–27 | 462.66–605.10 | 5.478600 | 3 | 26 | 0.52 |
+| Pattern | Pass | Start–End (s) | Loop (s) | Bars | Lead (s) | Entry (s) | Segments |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1 | 6 | 1.00–60.10 | 3.652 | 2 | −45.194 | 34.201 | 16 |
+| 2 | 14 | 69.10–182.10 | 3.688 | 2 | −79.395 | 0.000 | 30 |
+| 3 | 19 | 184.00–289.70 | 7.300 | 4 | −70.430 | 8.965 | 14 |
+| 4 | 22 | 304.80–380.00 | 7.300 | 4 | −37.315 | 42.080 | 10 |
+| 5 | 24 | 380.00–470.00 | 7.288 | 4 | −38.822 | 40.573 | 12 |
+| 6 | 26 | 470.00–574.80 | 5.451 | 3 | −40.134 | 39.261 | 19 |
 
-The 8.53 s first pass (4.67 bars), the 1.06 s false-start pass, and the 4.0 s
-final tail are not patterns. All twelve patterns begin on their run's first
-pass loop point (`startBar` 0), so the song enters them together on bar 0 and
-its length is the longest region, 142.44 s (78 bars). Every pattern is used
-once and whole; the stem sum is 0 LSB and 0 samples clip.
+Pattern 2 has the lowest raw lead (−79.395 s), so it defines the song start at
+0; the others enter 8.965, 34.201, 39.261, 40.573 and 42.080 s in. The song is
+142.83 s (78 bars), peak −0.5 dBFS, RMS −17.8 dBFS, 0 clipped; all six stems
+sum to the master with 0 LSB, and each stem is silent before its entry and after
+its region.
 
 ## 9. Pitfalls and lessons
 
-- A passes file is required. Do not silently fall back to silence-delimited
-  starts or a staggered song plan; without the passes file the pattern starts
-  are guesses.
-- The pass loop point is a start, not necessarily the loop length. Measure the
-  loop inside the run; a 26-bar pass can hold a 3-bar loop.
-- Pattern starts must sit on the pass bar grid. The report builder rejects a
-  start more than 50 ms off it, so fix the spec rather than loosening the check.
-- `song.starts` is gone. Entries come from the passes file; do not reintroduce a
-  manual start list or a staggered default.
-- Do not name a helper `inspect.py`; it shadows the standard library. Use
-  `analyze_audio.py` or another distinct name.
+- Passes place patterns; they do not define them. Do not force a pattern start
+  onto a pass loop point. Doing so makes every lead-in zero and destroys the
+  alignment `analyze.c` produces.
+- Do not round the lead-in to bars. `analyze.c` pads stems by exact
+  milliseconds; the song builder starts stems at those seconds.
+- A negative raw lead-in is normal. Shift all leads by the minimum; never clamp
+  individual leads to zero before shifting.
+- A passes file is required. Do not guess a placement or use a staggered
+  default when it is missing.
+- `song.starts` is gone. Entries come from the passes file; do not reintroduce
+  a manual start list or a staggered plan.
+- The pass duration is not necessarily the loop length. A 26-bar pass can hold
+  a 3-bar loop; measure the loop inside the region.
+- Do not name a helper `inspect.py`; it shadows the standard library.
 - `scipy.io.wavfile` handles WAV; convert other formats first.
 - The analysis helper's STFT memory grows with duration. For very long files,
   analyze sections separately or downsample; the report data is chunked.
@@ -454,12 +475,9 @@ once and whole; the stem sum is 0 LSB and 0 samples clip.
 - With several stems, independently rounded int16 stems can differ from a
   separately rounded master by a few LSB. Write the master as the clipped sum
   of the quantized stems so the reconstruction is exact.
-- Do not change repository source, commit, or open a PR for artifact-only work
-  unless the user explicitly asks. Keep generated files under `artifacts/`.
 - The report server must support Range; otherwise WAV seeking can fail.
 - A chunk file holds `CHUNK_BINS` bins, which is `2 * CHUNK_BINS` interleaved
-  int16 values. Slice the interleaved min/max array by `2 * CHUNK_BINS`, not
-  `CHUNK_BINS`; otherwise chunk indices point at the wrong audio.
+  int16 values. Slice the interleaved min/max array by `2 * CHUNK_BINS`.
 - If a preview host rejects plain curl with 403, that may be the preview's
   authentication layer, not a broken app. Check loopback and use the preview
   panel.

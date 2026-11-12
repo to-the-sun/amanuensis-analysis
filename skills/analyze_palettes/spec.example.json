@@ -1,23 +1,23 @@
 {
   "title": "Analyze Palettes",
-  "description": "Patterns anchored to pass loop points, with segment grids, zooming and playback.",
+  "description": "Patterns from measured sections, placed by pass-derived lead-ins.",
   "reports": [
     {
       "file": "palette_2026-11-10.wav",
       "patterns": [
         {
-          "start": 9.594,
-          "end": 46.195,
-          "length": 3.652825,
+          "start": 1.00,
+          "end": 60.10,
+          "length": 3.652,
           "bars": 2,
           "name": "Pattern 1",
           "color": "#4dabf7"
         },
         {
-          "start": 46.195,
-          "end": 90.038,
-          "length": 1.826412,
-          "bars": 1,
+          "start": 69.10,
+          "end": 182.10,
+          "length": 3.688,
+          "bars": 2,
           "name": "Pattern 2",
           "color": "#ffa94d"
         }

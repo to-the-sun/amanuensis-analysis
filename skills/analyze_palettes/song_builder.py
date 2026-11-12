@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build a song, stems and player page from a finished pattern report.
 
-Each stem is the pattern's full measured region, placed once and never cut,
-gated or tiled. Its entry bar is the pattern's bar offset from its pass loop
+   Each stem is the pattern's full measured region, placed once and never cut,
+gated or tiled. Its lead-in is the pattern start relative to its pass loop
 point, as recorded in the report, so the passes file fixes the arrangement.
 
 Usage:
@@ -104,8 +104,8 @@ def build_song(report_dir, basename, spec_report):
     cfg = spec_report.get('song') or {}
     if cfg.get('starts'):
         raise ValueError('song.starts is not used; entries come from the passes file')
-    starts = [int(p['entryBar']) for p in pats]
-    start_s = [s * b for s, b in zip(starts, bar_of)]
+    starts = [float(p['entry']) for p in pats]
+    start_s = starts
 
     targets = cfg.get('targets') or [-20.0] * len(pats)
     if len(targets) != len(pats):
@@ -167,9 +167,8 @@ def build_song(report_dir, basename, spec_report):
             json.dumps(p.get('color', '#4dabf7')))
         for i, p in enumerate(pats))
     summary = ('%d patterns (%d:%04.1f), %d Hz mono. Each pattern plays its whole region once '
-               'from its pass loop point (%s); the %d stems sum to the master.'
-               % (len(pats), int(dur // 60), dur % 60, sr,
-                  ', '.join('%d' % s for s in starts), len(pats)))
+               'from its pass lead-in; the %d stems sum to the master.'
+               % (len(pats), int(dur // 60), dur % 60, sr, len(pats)))
     html_text = page_html('Song &mdash; ' + basename, summary, defs,
                           json.dumps(arr_meta, separators=(',', ':')), dur)
     with open(os.path.join(report_dir, 'song.html'), 'w') as f:
@@ -203,7 +202,7 @@ def build_song(report_dir, basename, spec_report):
         'clipped': int(np.sum(np.abs(song_pcm) >= 32767)),
         'stem_delta_lsb': delta,
         'gains_db': [round(20 * np.log10(g), 1) for g in gains],
-        'entries': [int(s) for s in starts],
+        'entries': [round(s, 6) for s in starts],
     }
     return out
 
@@ -232,7 +231,7 @@ def main():
           % (res['duration'], res['bars'], res['peak_db'], res['rms_db'], res['clipped']))
     print('stems  %d  sum delta %d LSB  gains %s'
           % (len(res['stems']), res['stem_delta_lsb'], res['gains_db']))
-    print('entries %s' % (', '.join('%d' % s for s in res['entries'])))
+    print('entries %s' % (', '.join('%.3f' % s for s in res['entries'])))
     print('page   %s' % res['page'])
 
 
