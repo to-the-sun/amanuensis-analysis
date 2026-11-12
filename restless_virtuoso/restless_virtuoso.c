@@ -1258,6 +1258,7 @@ static void print_sound(const char *prefix)
 {
     char name[160];
     sound_name(name, sizeof name);
+    g.soundNumber = 0;
     if (!name[0]) return;
 
     g.soundNumber = sound_number(name);
