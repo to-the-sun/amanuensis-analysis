@@ -256,6 +256,24 @@ typedef struct {
 static MidiEventList midiEvents;
 static AEffect *vstEffect;
 
+#define VST_NAME 128
+#define VST_MAX_OCTAVE 2
+
+typedef struct {
+    char name[VST_NAME];
+    int presets, low, high;
+} VstStats;
+
+static VstStats vstStats[VST_MAX_PLUGINS];
+static int vstStatsCount, vstRangeLow, vstRangeHigh = 127, vstOctave;
+
+static int vst_note(int note)
+{
+    int span = vstRangeHigh - vstRangeLow + 1;
+    note += vstOctave * 12;
+    return vstRangeLow + ((note - vstRangeLow) % span + span) % span;
+}
+
 static void queue_midi_event(uint32_t message)
 {
     if (midiEvents.numEvents == VST_MAX_EVENTS) return;
@@ -331,7 +349,11 @@ static void drain_midi(void)
         } else if (status == 0x80 || status == 0x90) {
             synth_note_off(note);
         }
-        if (vstEffect && status < 0xf0) queue_midi_event(message);
+        if (vstEffect && status < 0xf0) {
+            if (status == 0x80 || status == 0x90 || status == 0xa0)
+                message = (message & 0xffff00ffu) | (uint32_t)vst_note(note) << 8;
+            queue_midi_event(message);
+        }
     }
 }
 
@@ -968,7 +990,17 @@ static void render_drums(float *dst, int outputs, int frames)
 }
 
 static HMODULE vstLibraries[VST_MAX_PLUGINS];
-static int vstLibraryCount, vstActiveLibrary = -1, vstOutputCount, vstProgram;
+static char vstNames[VST_MAX_PLUGINS][VST_NAME];
+static int vstLibraryCount, vstActiveLibrary = -1, vstOutputCount, vstProgram, vstPresetCount;
+
+static VstStats *find_vst_stats(const char *name, const char *dll)
+{
+    for (int i = 0; i < vstStatsCount; i++)
+        if (!_stricmp(vstStats[i].name, name) || !_stricmp(vstStats[i].name, dll))
+            return &vstStats[i];
+    return NULL;
+}
+
 static float *vstZeros, *vstOutputMemory;
 static float **vstInputs, **vstOutputs;
 
@@ -1056,6 +1088,13 @@ static void vst_stop(void)
     vst_free_buffers();
 }
 
+static void effect_name(AEffect *effect, char *name, size_t size)
+{
+    name[0] = 0;
+    effect->dispatcher(effect, effGetEffectName, 0, 0, name, 0);
+    name[size - 1] = 0;
+}
+
 static int start_vst(int library)
 {
     AEffect *effect = create_effect(vstLibraries[library]);
@@ -1072,8 +1111,16 @@ static int start_vst(int library)
     vstEffect = effect;
     vstActiveLibrary = library;
     vstOutputCount = effect->numOutputs;
-    vstProgram = effect->numPrograms > 1 ? rand() % effect->numPrograms : 0;
-    if (effect->numPrograms > 1)
+
+    char name[VST_NAME];
+    effect_name(effect, name, sizeof name);
+    VstStats *stats = find_vst_stats(name, vstNames[library]);
+    vstPresetCount = stats && stats->presets > 0 ? stats->presets : effect->numPrograms;
+    vstRangeLow = stats ? stats->low : 0;
+    vstRangeHigh = stats ? stats->high : 127;
+    vstOctave = rand() % (2 * VST_MAX_OCTAVE + 1) - VST_MAX_OCTAVE;
+    vstProgram = vstPresetCount > 1 ? rand() % vstPresetCount : 0;
+    if (vstPresetCount > 1)
         effect->dispatcher(effect, effSetProgram, 0, vstProgram, NULL, 0);
 
     if (vst_start() != 0) {
@@ -1095,11 +1142,79 @@ static void add_vst(const wchar_t *path)
 
     HMODULE library = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!library) log_error("Could not load '%ls'.\n", path);
-    else if (GetProcAddress(library, "VSTPluginMain") || GetProcAddress(library, "main"))
+    else if (GetProcAddress(library, "VSTPluginMain") || GetProcAddress(library, "main")) {
+        const wchar_t *base = wcsrchr(path, L'\\');
+        wchar_t stem[VST_NAME];
+        wcsncpy(stem, base ? base + 1 : path, VST_NAME - 1);
+        stem[VST_NAME - 1] = 0;
+        wchar_t *dot = wcsrchr(stem, L'.');
+        if (dot) *dot = 0;
+        WideCharToMultiByte(CP_ACP, 0, stem, -1, vstNames[vstLibraryCount], VST_NAME, NULL, NULL);
         vstLibraries[vstLibraryCount++] = library;
-    else FreeLibrary(library);
+    } else FreeLibrary(library);
 
     free((void *)path);
+}
+
+static char *trim(char *text)
+{
+    while (*text == ' ' || *text == '\t') text++;
+    char *end = text + strlen(text);
+    while (end > text && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n'))
+        *--end = 0;
+    return text;
+}
+
+static void load_vst_stats(const wchar_t *folder)
+{
+    wchar_t file[32768];
+    swprintf(file, 32768, L"%ls\\vst_stats.txt", folder);
+    FILE *input = _wfopen(file, L"rb");
+    if (!input) return;
+
+    char line[512];
+    while (vstStatsCount < VST_MAX_PLUGINS && fgets(line, sizeof line, input)) {
+        char *text = line;
+        if (!memcmp(text, "\xef\xbb\xbf", 3)) text += 3;
+
+        char *comment = strchr(text, '#');
+        if (comment) *comment = 0;
+
+        char *colon = strchr(text, ':');
+        if (!colon) continue;
+        *colon = 0;
+
+        char *name = trim(text);
+        if (!name[0] || strlen(name) >= VST_NAME) continue;
+
+        char *end;
+        long presets = strtol(colon + 1, &end, 10);
+        if (end == colon + 1) continue;
+
+        int low = 0, high = 127;
+        while (*end == ' ' || *end == '\t') end++;
+        if (*end == ',') {
+            long first = strtol(end + 1, &end, 10);
+            while (*end == ' ' || *end == '\t') end++;
+            if (*end == '-') {
+                long second = strtol(end + 1, NULL, 10);
+                low = first < 0 ? 0 : first > 127 ? 127 : (int)first;
+                high = second < 0 ? 0 : second > 127 ? 127 : (int)second;
+                if (low > high) {
+                    int swap = low;
+                    low = high;
+                    high = swap;
+                }
+            }
+        }
+
+        VstStats *stats = &vstStats[vstStatsCount++];
+        memcpy(stats->name, name, strlen(name) + 1);
+        stats->presets = (int)presets;
+        stats->low = low;
+        stats->high = high;
+    }
+    fclose(input);
 }
 
 static void load_vsts(const char *folder)
@@ -1113,6 +1228,7 @@ static void load_vsts(const char *folder)
         return;
     }
 
+    load_vst_stats(path);
     scan_tree(path, L".dll", add_vst);
     free(path);
     if (!vstLibraryCount) {
@@ -1245,14 +1361,15 @@ static void sound_name(char *out, size_t size)
     out[0] = 0;
     if (g.samplesSound) snprintf(out, size, "%d drum samples", drumSampleCount);
     else if (vstEffect) {
-        char name[64] = "";
-        vstEffect->dispatcher(vstEffect, effGetEffectName, 0, 0, name, 0);
-        name[63] = 0;
-        if (vstEffect->numPrograms > 0)
-            snprintf(out, size, "VST %s, preset %d/%d", name[0] ? name : "plugin", vstProgram + 1,
-                     vstEffect->numPrograms);
+        char name[64];
+        effect_name(vstEffect, name, sizeof name);
+        char octave[24] = "";
+        if (vstOctave) snprintf(octave, sizeof octave, ", octave %+d", vstOctave);
+        if (vstPresetCount > 0)
+            snprintf(out, size, "VST %s, preset %d/%d%s", name[0] ? name : "plugin", vstProgram + 1,
+                     vstPresetCount, octave);
         else
-            snprintf(out, size, "VST %s, default preset", name[0] ? name : "plugin");
+            snprintf(out, size, "VST %s, default preset%s", name[0] ? name : "plugin", octave);
     }
 }
 
