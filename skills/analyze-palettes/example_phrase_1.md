@@ -3,7 +3,7 @@
 ![example_phrase_1](example_phrase_1.png)
 
 A pattern analysis of one recording: **78.9 s · 44.1 kHz · mono · four repeating
-patterns**. The panel is drawn from `pattern_8.wav` in this folder.
+patterns**. The panel is drawn from `example_phrase_1.wav` in this folder.
 
 ## Reading the panel
 
