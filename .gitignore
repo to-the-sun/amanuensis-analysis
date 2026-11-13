@@ -30,3 +30,8 @@ analysis/song_builder
 !analysis/analyze.exe
 !analysis/song_builder.exe
 *_pitch_stems/
+
+# Local state and log for palette_watcher.py
+github_token.txt
+palette_watcher.log
+palette_watcher_state.json
