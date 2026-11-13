@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+from urllib.parse import quote
 
 import numpy as np
 import scipy.io.wavfile as wavfile
@@ -83,16 +84,17 @@ def write_levels(stems_pcm, data_dir):
     return total, bins
 
 
-def page_html(title, summary, defs, arr_meta, duration):
+def page_html(title, summary, defs, arr_meta, duration, master):
     return PAGE_TEMPLATE \
         .replace('__TITLE__', title) \
         .replace('__HEAD__', summary) \
         .replace('__DEFS__', defs) \
         .replace('__ARR_META__', arr_meta) \
+        .replace('__MASTER__', master) \
         .replace('__DUR__', '%d:%04.1f' % (int(duration // 60), duration % 60))
 
 
-def build_song(report_dir, basename, spec_report):
+def build_song(report_dir, basename, spec_report, master_name='finished_song.wav'):
     meta = load_meta(report_dir, basename)
     pats = meta['patterns']
     sr = meta['sampleRate']
@@ -132,7 +134,7 @@ def build_song(report_dir, basename, spec_report):
     stem_dir = os.path.join(report_dir, '[stems]')
     stem_data = os.path.join(stem_dir, '[data]')
     os.makedirs(stem_data, exist_ok=True)
-    master_path = os.path.join(os.path.dirname(os.path.abspath(report_dir)), 'finished_song.wav')
+    master_path = os.path.join(os.path.dirname(os.path.abspath(report_dir)), master_name)
 
     def w(path, v):
         wavfile.write(path, sr, np.clip(np.round(v * 32767), -32768, 32767).astype('<i2'))
@@ -170,7 +172,8 @@ def build_song(report_dir, basename, spec_report):
                'from its pass lead-in; the %d stems sum to the master.'
                % (len(pats), int(dur // 60), dur % 60, sr, len(pats)))
     html_text = page_html('Song &mdash; ' + basename, summary, defs,
-                          json.dumps(arr_meta, separators=(',', ':')), dur)
+                          json.dumps(arr_meta, separators=(',', ':')), dur,
+                          '../' + quote(master_name))
     with open(os.path.join(report_dir, 'song.html'), 'w') as f:
         f.write(html_text)
 
@@ -212,6 +215,8 @@ def main():
     ap.add_argument('--spec', required=True, help='report spec used to build the report')
     ap.add_argument('--report-dir', required=True, help='directory holding the built report')
     ap.add_argument('--report', default=None, help='report basename (default: the only report)')
+    ap.add_argument('--archive', default=None,
+                    help='zip the palette and passes were extracted from; the master is named after it')
     args = ap.parse_args()
 
     with open(args.spec) as f:
@@ -226,7 +231,9 @@ def main():
         raise SystemExit('Spec has several reports; pass --report')
     r = reports[0]
     basename = os.path.splitext(os.path.basename(r['file']))[0]
-    res = build_song(args.report_dir, basename, r)
+    master = (os.path.splitext(os.path.basename(args.archive))[0] + '.wav'
+              if args.archive else 'finished_song.wav')
+    res = build_song(args.report_dir, basename, r, master)
     print('song   %.2f s  %d bars  peak %.1f dBFS  rms %.1f dBFS  clipped %d'
           % (res['duration'], res['bars'], res['peak_db'], res['rms_db'], res['clipped']))
     print('stems  %d  sum delta %d LSB  gains %s'
@@ -310,7 +317,7 @@ const DEFS = [
 __DEFS__
 ];
 
-const master = new Audio('../finished_song.wav');
+const master = new Audio('__MASTER__');
 master.preload = 'auto';
 const stems = DEFS.map(d => { const a = new Audio(d.file); a.preload = 'metadata'; return a; });
 [master, ...stems].forEach(a => { a.hidden = true; document.body.appendChild(a); });

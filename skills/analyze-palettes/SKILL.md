@@ -43,24 +43,32 @@ across patterns or across the file. Measure each region on its own terms.
 
 ## 0. Inputs and preparation
 
-1. Extract archives and list audio files. Preserve the originals.
-2. Probe duration, sample rate and channel count.
-3. Convert non-WAV input to mono 16-bit PCM WAV for the report builder:
+1. Extract archives into `artifacts/<batch>/source/` and list the audio files. Keep
+   the palette and its passes file together, and remember which archive they came
+   from: that archive names the song master. `palettes/[2026-11-12-19-7-9].zip`
+   yields the master `[2026-11-12-19-7-9].wav`. Pass the archive to
+   `song_builder.py --archive`; `finished_song.wav` is only the fallback for
+   audio that was not extracted from an archive.
+2. If the archive is tracked in this repository, delete it once it is extracted
+   (`git rm palettes/<archive>.zip`). The extracted palette and passes stay in
+   the batch folder; the archive does not.
+3. Probe duration, sample rate and channel count.
+4. Convert non-WAV input to mono 16-bit PCM WAV for the report builder:
 
    ```bash
    ffmpeg -v error -y -i input.mp3 -ac 1 -ar 44100 -c:a pcm_s16le output.wav
    ```
 
-4. **Find the passes file. It is required.** Keep it beside the audio:
+5. **Find the passes file. It is required.** Keep it beside the audio:
    - `palette_<stamp>.wav` pairs with `passes_<stamp>.txt`;
    - otherwise `passes*.txt` in the same folder.
 
    `passes.py` does this discovery for the scripts. If no passes file is found,
    stop and ask for it; do not fall back to a guessed song placement.
-5. Create a workspace output directory, for example
+6. Create a workspace output directory, for example
    `artifacts/<batch>/pattern_reports`. Keep generated data with the reports;
    the song master is written one level up, beside the report folder.
-6. Dependencies: Python 3, NumPy, SciPy. `ffmpeg` only for non-WAV input.
+7. Dependencies: Python 3, NumPy, SciPy. `ffmpeg` only for non-WAV input.
 
 ### 0a. The passes format
 
@@ -289,17 +297,20 @@ Add a `song` block to the report object for levels only:
 
 ```bash
 python3 song_builder.py --spec report-spec.json \
-  --report-dir artifacts/<batch>/pattern_reports
+  --report-dir artifacts/<batch>/pattern_reports \
+  --archive palettes/'[2026-11-12-19-7-9]'.zip
 ```
 
-The builder reads the report's `summary.js` and copied WAV, so it uses exactly
-the patterns, pass lead-ins and segment grid the report shows.
+`--archive` is the zip the palette and passes were extracted from. Its stem names
+the master WAV and the link in `song.html`; omitting it writes
+`finished_song.wav`. The builder reads the report's `summary.js` and copied WAV,
+so it uses exactly the patterns, pass lead-ins and segment grid the report shows.
 
 Output:
 
 ```
 artifacts/<batch>/
-  finished_song.wav
+  <archive-stem>.wav
   pattern_reports/
     song.html
     [stems]/
@@ -307,8 +318,8 @@ artifacts/<batch>/
       [data]/arr.js  a4096.js  a512.js  a64.js
 ```
 
-`song.html` reaches the master with `../finished_song.wav`, so the report
-folder and the master must stay siblings.
+`song.html` reaches the master with `../<archive-stem>.wav`, URL-quoted, so the
+report folder and the master must stay siblings.
 
 Guarantees:
 
@@ -376,8 +387,8 @@ bundled server, not a plain static server:
 python3 pattern_report_server.py --root artifacts/<batch> --port 8000
 ```
 
-Serve the batch folder holding both `pattern_reports/` and `finished_song.wav`;
-the reports are then at `http://127.0.0.1:8000/pattern_reports/index.html`. It
+Serve the batch folder holding both `pattern_reports/` and the master WAV; the
+reports are then at `http://127.0.0.1:8000/pattern_reports/index.html`. It
 binds `0.0.0.0` and answers `Range` requests with `206 Partial Content`.
 Verify:
 
@@ -426,12 +437,12 @@ not proof of playback or seeking.
 
 ```bash
 cd artifacts/<batch>
-zip -r analyze-palettes.zip finished_song.wav pattern_reports \
+zip -r analyze-palettes.zip '<archive-stem>.wav' pattern_reports \
   -x 'pattern_reports/analyze-palettes.zip'
 unzip -t analyze-palettes.zip
 ```
 
-The archive root holds `finished_song.wav` beside the `pattern_reports/` folder.
+The archive root holds the master WAV beside the `pattern_reports/` folder.
 Include the index, all HTML reports, the `[palettes]/` WAVs, the `[data]/`
 chunks, and when a song was built, `song.html` plus `[stems]/` (stems and
 `[stems]/[data]/`). Do not
@@ -491,6 +502,9 @@ its region.
 - With several stems, independently rounded int16 stems can differ from a
   separately rounded master by a few LSB. Write the master as the clipped sum
   of the quantized stems so the reconstruction is exact.
+- The master is named after the source archive, not after a fixed
+  `finished_song.wav`. Only audio that arrived outside an archive falls back to
+  that name.
 - The report server must support Range; otherwise WAV seeking can fail.
 - A chunk file holds `CHUNK_BINS` bins, which is `2 * CHUNK_BINS` interleaved
   int16 values. Slice the interleaved min/max array by `2 * CHUNK_BINS`.
