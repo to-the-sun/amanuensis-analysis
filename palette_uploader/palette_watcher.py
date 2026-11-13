@@ -23,7 +23,7 @@ REMOTE_DIR = "palettes"
 BRANCH = "main"
 POLL_SECONDS = 30
 SETTLE_SECONDS = 10
-PART_BYTES = 10 * 1024 * 1024
+PART_BYTES = 36 * 1024 * 1024
 
 HERE = Path(__file__).resolve().parent
 STATE = HERE / "palette_watcher_state.json"
