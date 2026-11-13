@@ -39,8 +39,7 @@ region, or a different length in each; both are normal, and neither is imposed
 by the tool. Uniform segment length is required only *within* a pattern, never
 across patterns or across the file. Measure each region on its own terms.
 
-`waveform_patterns.png` illustrates this vocabulary; `pattern_diagram.py` redraws
-it from `pattern_8.wav`.
+`waveform_patterns.png` illustrates this vocabulary
 
 ## 0. Inputs and preparation
 
