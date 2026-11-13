@@ -5,17 +5,20 @@ repo, not just the one that created this file.
 
 ## Communication 
 
-Be as concise, direct and to-the-point as possible. Address all the concerns of the user but do so in the least words possible. This is not so much about using incomplete sentences but about not being redundant or verbose. Don't explain things that aren't directly relevant, have already been explained or could reasonably be assumed to already be understood by the user. Don't use flowery language. 
-
-In general, the algorithms you're working with will be understood very well by the user at a high level. Your job is to handle the low-level implementation, which means that not every detail needs to be explained to the user. If the user does need more detail the user will explicitly ask. Humans cannot read things instantaneously like AIs, so it is much easier to just ask for more detail than to have to wade through a huge essay at every turn to find the relevant information. When it comes to corresponding with the user, brevity will be lauded, not thoroughness. Be thorough in your understanding of the project but brief in your explanations of it. 
-
-Don't describe things that haven't changed. That's just redundant and makes it sound like they have changed. If something is not mentioned then it can be assumed that it has not changed. This goes both ways and should be assumed by the agent as well as the user. 
-
-Testing and verification are important, of course, but the user doesn't need to be told about it. The user will assume if you submit something, you have tested it thoroughly enough to have verified it is working correctly. 
+- Be as concise, direct and to-the-point as possible.
+- Address all the concerns of the user but do so in the least words possible. This is not so much about using incomplete sentences but about not being redundant or verbose. Don't explain things that aren't directly relevant, have already been explained or could reasonably be assumed to already be understood by the user.
+- Use precise language. For example, if we've been discussing normalization, don't suddenly start calling the normalization "the divide". That's confusing. Our words are functional here, not poetic, and we're not going for high word count. 
+- In general, the algorithms you're working with will be understood very well by the user at a high level. Your job is to handle the low-level implementation, which means that not every detail needs to be explained to the user. If the user does need more detail the user will explicitly ask. Humans cannot read things instantaneously like AIs, so it is much easier to just ask for more detail than to have to wade through a huge essay at every turn to find the relevant information. When it comes to corresponding with the user, brevity will be lauded, not thoroughness. Be thorough in your understanding of the project but brief in your explanations of it. 
+- Don't describe things that haven't changed. That's just redundant and makes it sound like they have changed. If something is not mentioned then it can be assumed that it has not changed. This goes both ways and should be assumed by the agent as well as the user. 
+- Testing and verification are important, of course, but the user doesn't need to be told about it. The user will assume if you submit something, you have tested it thoroughly enough to have verified it is working correctly. 
 
 These things apply to messages sent to the user, reports and even comments in the code. 
 
-In regards to comments in the code, a human will almost never look at the code at all, so if you can just as easily understand the code by looking at it, there is no need to make a comment. Comments are for things that are not immediately obvious from just looking at the local code. This is one way to keep line count down which should be considered a goal. 
+- In regards to comments in the code, a human will almost never look at the code at all, so if you can just as easily understand the code by looking at it, there is no need to make a comment. Comments are for things that are not immediately obvious from just looking at the local code. This is one way to keep line count down which should be considered a goal.
+
+Use markdown. 
+- Bullet points help keep things organized
+- Put code (variables, functions, etc.) `in backticks` 
 
 ## The Code Itself 
 
