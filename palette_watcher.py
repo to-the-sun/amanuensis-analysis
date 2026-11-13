@@ -99,6 +99,10 @@ def bundle(entries):
     return buffer.getvalue()
 
 
+def modified(entry):
+    return datetime.fromtimestamp(entry.stat().st_mtime)
+
+
 def pairs(since, until):
     for folder in sorted(entry for entry in PROJECTS.iterdir() if entry.is_dir()):
         found = {}
@@ -107,11 +111,13 @@ def pairs(since, until):
             for prefix, extension in PAIR:
                 if name.startswith(prefix) and name.endswith(extension):
                     found.setdefault(name[len(prefix):-len(extension)], {})[prefix] = entry
-        for key, match in sorted(found.items()):
-            if len(match) == len(PAIR) and all(
-                since < datetime.fromtimestamp(entry.stat().st_mtime) <= until for entry in match.values()
-            ):
-                yield folder.name, key, [match[prefix] for prefix, _ in PAIR]
+        ready = []
+        for match in found.values():
+            entries = [match.get(prefix) for prefix, _ in PAIR]
+            if all(entries) and all(since < modified(entry) <= until for entry in entries):
+                ready.append(entries)
+        if ready:
+            yield folder.name, max(ready, key=lambda entries: max(map(modified, entries)))
 
 
 def load_state():
@@ -128,8 +134,8 @@ def save_state(moment):
 
 def sweep():
     until = datetime.now() - timedelta(seconds=SETTLE_SECONDS)
-    for folder, key, entries in pairs(load_state(), until):
-        name = f"{folder}_{key}.zip"
+    for folder, entries in pairs(load_state(), until):
+        name = f"{folder}.zip"
         if upload(name, bundle(entries), f"Add {folder} palette zip"):
             log(f"uploaded {REMOTE_DIR}/{name}")
         else:
