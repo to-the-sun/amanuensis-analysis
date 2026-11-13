@@ -24,14 +24,12 @@ POLL_SECONDS = 30
 SETTLE_SECONDS = 10
 
 HERE = Path(__file__).resolve().parent
-LOCAL = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "palette_watcher"
-STATE = LOCAL / "state.json"
-LOG = LOCAL / "watcher.log"
+STATE = HERE / "palette_watcher_state.json"
+LOG = HERE / "palette_watcher.log"
 PAIR = (("palette_", ".wav"), ("passes_", ".txt"))
 
 
 def log(message):
-    LOCAL.mkdir(parents=True, exist_ok=True)
     with LOG.open("a", encoding="utf-8") as handle:
         handle.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n")
 
@@ -138,7 +136,6 @@ def load_state():
 
 
 def save_state(moment):
-    LOCAL.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps({"last_check": moment.isoformat()}), encoding="utf-8")
 
 
