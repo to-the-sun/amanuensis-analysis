@@ -49,9 +49,23 @@ across patterns or across the file. Measure each region on its own terms.
    yields the master `[2026-11-12-19-7-9].wav`. Pass the archive to
    `song_builder.py --archive`; `finished_song.wav` is only the fallback for
    audio that was not extracted from an archive.
+   An archive over 36 MiB arrives split as `<stamp>.zip.001`, `.002`, …: one zip
+   cut into consecutive 36 MiB pieces, so the last piece holds the central
+   directory and no piece extracts alone. Join every piece of that stem, in
+   numeric order, before extracting:
+
+   ```bash
+   cat 'palettes/[2026-11-12-19-12-50].zip.001' 'palettes/[2026-11-12-19-12-50].zip.002' \
+     > 'palettes/[2026-11-12-19-12-50].zip'
+   ```
+
+   Every piece but the last is exactly 36 MiB, so a shorter one means a piece is
+   missing. The joined stem is the archive name, and it still names the master:
+   `[2026-11-12-19-12-50].wav`.
 2. If the archive is tracked in this repository, delete it once it is extracted
-   (`git rm palettes/<archive>.zip`). The extracted palette and passes stay in
-   the batch folder; the archive does not.
+   (`git rm palettes/<archive>.zip`, or `palettes/<archive>.zip.*` for a split
+   one). The extracted palette and passes stay in the batch folder; the archive
+   does not.
 3. Probe duration, sample rate and channel count.
 4. Convert non-WAV input to mono 16-bit PCM WAV for the report builder:
 
