@@ -30,3 +30,6 @@ analysis/song_builder
 !analysis/analyze.exe
 !analysis/song_builder.exe
 *_pitch_stems/
+
+# Local GitHub token for palette_watcher.py
+github_token.txt
