@@ -111,13 +111,13 @@ def pairs(since, until):
             for prefix, extension in PAIR:
                 if name.startswith(prefix) and name.endswith(extension):
                     found.setdefault(name[len(prefix):-len(extension)], {})[prefix] = entry
-        ready = []
-        for match in found.values():
-            entries = [match.get(prefix) for prefix, _ in PAIR]
-            if all(entries) and all(since < modified(entry) <= until for entry in entries):
-                ready.append(entries)
-        if ready:
-            yield folder.name, max(ready, key=lambda entries: max(map(modified, entries)))
+        settled = {
+            key: match
+            for key, match in found.items()
+            if len(match) == len(PAIR) and all(modified(match[prefix]) <= until for prefix, _ in PAIR)
+        }
+        if any(all(since < modified(match[prefix]) for prefix, _ in PAIR) for match in settled.values()):
+            yield folder.name, [settled[key][prefix] for key in sorted(settled) for prefix, _ in PAIR]
 
 
 def load_state():
