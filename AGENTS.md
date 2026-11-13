@@ -18,7 +18,7 @@ These things apply to messages sent to the user, reports and even comments in th
 
 Use markdown. 
 - Bullet points help keep things organized.
-- Put code (variables, functions, etc.) `in backticks`.
+- Put code (variable names, etc.) `in backticks`.
 
 ## The Code Itself 
 
