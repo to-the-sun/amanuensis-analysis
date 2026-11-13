@@ -22,11 +22,13 @@ REMOTE_DIR = "palettes"
 BRANCH = "main"
 POLL_SECONDS = 30
 SETTLE_SECONDS = 10
+MAX_BYTES = 100 * 1024 * 1024
 
 HERE = Path(__file__).resolve().parent
 STATE = HERE / "palette_watcher_state.json"
 LOG = HERE / "palette_watcher.log"
 PAIR = (("palette_", ".wav"), ("passes_", ".txt"))
+oversized = set()
 
 
 def log(message):
@@ -63,18 +65,20 @@ def token():
     fail(f"Save a fine-grained GitHub token with contents read/write on {REPO} as github_token.txt next to {Path(__file__).name}.")
 
 
-def remote(path, method="GET", payload=None):
+def call(path, method="GET", payload=None, accept="application/vnd.github+json"):
     request = urllib.request.Request(
         f"{API}/repos/{REPO}/{path}",
-        json.dumps(payload).encode() if payload else None,
+        json.dumps(payload).encode() if payload is not None else None,
         {
             "Authorization": f"Bearer {token()}",
-            "Accept": "application/vnd.github+json",
+            "Accept": accept,
             "User-Agent": "palette-watcher",
         },
         method=method,
     )
-    return urllib.request.urlopen(request, timeout=120)
+    with urllib.request.urlopen(request, timeout=120) as response:
+        body = response.read()
+    return json.loads(body) if body else None
 
 
 def blob_sha(data):
@@ -82,21 +86,28 @@ def blob_sha(data):
 
 
 def upload(name, data, message):
-    path = f"contents/{REMOTE_DIR}/{urllib.parse.quote(name)}"
-    sha = None
+    path = f"{REMOTE_DIR}/{name}"
     try:
-        with remote(path) as response:
-            sha = json.load(response)["sha"]
+        known = call(f"contents/{urllib.parse.quote(path)}", accept="application/vnd.github.object+json")["sha"]
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise
-    if sha == blob_sha(data):
-        return False
-    payload = {"message": message, "content": base64.b64encode(data).decode(), "branch": BRANCH}
-    if sha:
-        payload["sha"] = sha
-    remote(path, "PUT", payload).close()
-    return True
+        known = None
+    if known == blob_sha(data):
+        return "current"
+    if len(data) > MAX_BYTES:
+        return "oversized"
+    blob = call("git/blobs", "POST", {"content": base64.b64encode(data).decode(), "encoding": "base64"})["sha"]
+    head = call(f"git/ref/heads/{BRANCH}")["object"]["sha"]
+    base = call(f"git/commits/{head}")["tree"]["sha"]
+    tree = call(
+        "git/trees",
+        "POST",
+        {"base_tree": base, "tree": [{"path": path, "mode": "100644", "type": "blob", "sha": blob}]},
+    )["sha"]
+    commit = call("git/commits", "POST", {"message": message, "tree": tree, "parents": [head]})["sha"]
+    call(f"git/refs/heads/{BRANCH}", "PATCH", {"sha": commit, "force": False})
+    return "uploaded"
 
 
 def bundle(entries):
@@ -152,16 +163,26 @@ def sweep():
     uploaded = 0
     earliest_failure = None
     for folder, entries in pairs(since, until):
+        data = b""
         try:
+            if folder in oversized:
+                continue
+            data = bundle(entries)
             name = f"{folder}.zip"
-            if upload(name, bundle(entries), f"Add {folder} palette zip"):
-                say(f"uploaded {REMOTE_DIR}/{name}")
-                log(f"uploaded {REMOTE_DIR}/{name}")
+            outcome = upload(name, data, f"Add {folder} palette zip")
+            if outcome == "uploaded":
+                say(f"uploaded {REMOTE_DIR}/{name} ({len(data) / 1048576:.1f} MB)")
+                log(f"uploaded {REMOTE_DIR}/{name} ({len(data) / 1048576:.1f} MB)")
                 uploaded += 1
+            elif outcome == "oversized":
+                oversized.add(folder)
+                message = f"skipped {folder}.zip: {len(data) / 1048576:.1f} MB is over GitHub's 100 MB file limit"
+                say(message)
+                log(message)
             else:
                 say(f"already up to date: {REMOTE_DIR}/{name}")
         except Exception as error:
-            message = f"failed {folder}.zip: {describe(error)}"
+            message = f"failed {folder}.zip ({len(data) / 1048576:.1f} MB): {describe(error)}"
             say(message)
             log(message)
             stuck = min(modified(entry) for entry in entries)
