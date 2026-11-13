@@ -49,7 +49,8 @@ Use markdown.
   when the work is a genuinely different change, not for every commit.
 - One pull request per logical change. Keep unrelated drive-by edits out of it.
 - Do not merge, rebase, force-push, or push to `main`. The user merges the PR.
-- Don't dig through old repository states unless absolutely necessary. If something was deleted or rewritten it was for a reason. You can't assume old code or documents hold any relevant information to the current state. In fact, reading old obsolete files should be explicitly avoided so as not to taint your context. 
+- Test artifacts and scripts should be removed and not committed unless explicitly asked for. 
+- Don't dig through old repository states unless absolutely necessary. If something was deleted or rewritten it was for a reason. You can't assume old code or documents hold any information relevant to the current state. In fact, reading old obsolete files should be explicitly avoided so as not to taint your context.
 
 ## Commit messages
 
