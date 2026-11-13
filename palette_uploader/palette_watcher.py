@@ -30,6 +30,8 @@ STATE = HERE / "palette_watcher_state.json"
 LOG = HERE / "palette_watcher.log"
 PAIR = (("palette_", ".wav"), ("passes_", ".txt"))
 oversized = set()
+_trust = None
+current = ""
 
 
 def log(message):
@@ -45,7 +47,7 @@ def describe(error):
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP {error.code} {error.read().decode('utf-8', 'replace')[:300]}"
     if isinstance(error, urllib.error.URLError) and isinstance(error.reason, ssl.SSLCertVerificationError):
-        return f"TLS certificate rejected, so something here intercepts HTTPS (antivirus or proxy) without a trusted root: {error.reason}"
+        return f"TLS certificate rejected with and without a proxy during {current}, so this machine trusts no issuer for it: {error.reason}"
     return traceback.format_exc().strip().splitlines()[-1]
 
 
@@ -69,15 +71,33 @@ def token():
 
 
 def trust():
-    settings = ssl.create_default_context()
-    for store in ("ROOT", "CA"):
-        for cert, encoding, _ in getattr(ssl, "enum_certificates", lambda name: [])(store):
-            if encoding == "x509_asn":
-                settings.load_verify_locations(cadata=cert)
-    return settings
+    global _trust
+    if _trust is None:
+        try:
+            import certifi
+
+            _trust = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            _trust = ssl.create_default_context()
+        for store in ("ROOT", "CA"):
+            for cert, encoding, _ in getattr(ssl, "enum_certificates", lambda name: [])(store):
+                if encoding == "x509_asn":
+                    _trust.load_verify_locations(cadata=cert)
+    return _trust
+
+
+def fetch(request, direct):
+    handlers = [urllib.request.HTTPSHandler(context=trust())]
+    if direct:
+        handlers.append(urllib.request.ProxyHandler({}))
+    with urllib.request.build_opener(*handlers).open(request, timeout=120) as response:
+        body = response.read()
+    return json.loads(body) if body else None
 
 
 def call(path, method="GET", payload=None, accept="application/vnd.github+json"):
+    global current
+    current = f"{method} {path}"
     request = urllib.request.Request(
         f"{API}/repos/{REPO}/{path}",
         json.dumps(payload).encode() if payload is not None else None,
@@ -88,15 +108,12 @@ def call(path, method="GET", payload=None, accept="application/vnd.github+json")
         },
         method=method,
     )
-    for attempt in (0, 1):
-        try:
-            with urllib.request.urlopen(request, timeout=120, context=trust()) as response:
-                body = response.read()
-            return json.loads(body) if body else None
-        except urllib.error.URLError as error:
-            if attempt or isinstance(error.reason, ssl.SSLCertVerificationError):
-                raise
-            time.sleep(5)
+    try:
+        return fetch(request, False)
+    except urllib.error.URLError as error:
+        if not isinstance(error.reason, ssl.SSLCertVerificationError):
+            raise
+    return fetch(request, True)
 
 
 def blob_sha(data):
