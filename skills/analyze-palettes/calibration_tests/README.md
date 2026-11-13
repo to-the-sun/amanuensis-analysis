@@ -1,6 +1,6 @@
 ***Agents asked to use the analyze-palettes skill should ignore this document and everything in this directory entirely, using the algorithms as they exist in the skill itself.*** This directory is only for calibrating those algorithms beforehand. Agents tasked with doing this will be explicitly asked to work within this directory. 
 
-## Terms
+## Definitions
 
 - **Segment**: one iteration of a pattern — the audio between two adjacent
 dashed lines. Every segment in a pattern is the same length, but different patterns can have different segment lengths. The dashes mark that uniform grid; they are not
