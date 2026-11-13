@@ -33,6 +33,9 @@ measured, what is estimated, and where the uncertainty is.
 - **Lead-in**: `pattern start - pass loop point + pad`. It may be negative. The
   earliest lead-in is shifted to 0, and the shifted value is the pattern's entry
   in the song, in seconds. This is the `analyze.c` placement rule.
+- **Song**: one master assembled from the patterns of every palette in the
+  archive. Every palette contributes all of its patterns, once each. An archive
+  gets one song, never one song per palette.
 
 Patterns are independent of each other. A file may hold one loop length in every
 region, or a different length in each; both are normal, and neither is imposed
@@ -48,7 +51,8 @@ across patterns or across the file. Measure each region on its own terms.
    from: that archive names the song master. `palettes/[2026-11-12-19-7-9].zip`
    yields the master `[2026-11-12-19-7-9].wav`. Pass the archive to
    `song_builder.py --archive`; `finished_song.wav` is only the fallback for
-   audio that was not extracted from an archive.
+   audio that was not extracted from an archive. An archive may hold several
+   palettes; they stay in one batch and feed one song.
    An archive over 36 MiB arrives split as `<stamp>.zip.001`, `.002`, …: one zip
    cut into consecutive 36 MiB pieces, so the last piece holds the central
    directory and no piece extracts alone. Join every piece of that stem, in
@@ -246,6 +250,12 @@ truncates to the last complete segment.
 audio, assigns each pattern to its maximum-overlap pass, and records `pass`,
 `passStart`, `passLead` and `entry` in `summary.js`.
 
+Put **every** palette of the archive in the same spec: all of them go into one
+report folder and one song. `song` belongs to the whole song, so with several
+palettes place it at the top level of the spec, beside `reports`; a
+single-report spec may keep it inside its report object. `targets` has one
+value per pattern across all palettes, in report order.
+
 Build:
 
 ```bash
@@ -283,19 +293,26 @@ chunk against the PCM before finishing.
 
 ## 3. Build the song from the patterns
 
-A song is layered from the same patterns the report shows, and every pattern
+A song is layered from the same patterns the reports show, and every pattern
 used in it is used in its entirety. A stem is the pattern's whole measured
 region, first sample to last, placed once: no segment is dropped, no portion is
 silenced, gated or faded out early, and the region is never tiled or looped to
 fill more time.
 
+One song is built per archive, never per palette. If the archive holds several
+palettes, every pattern of every palette becomes a stem in the same master; do
+not build a separate song for each palette and do not leave one out.
+
 The passes file decides where each pattern begins relative to the song start.
 `summary.js` stores the shifted lead-in as `entry` in seconds; `song_builder.py`
-starts the stem at that time. There is no manual `starts` list, and adding
-`song.starts` to the spec is an error. Entries are seconds, not bars: the C
-analyzer pads each stem by the exact millisecond lead-in.
+starts the stem at that time. Each palette keeps its own passes file and its own
+lead shift, so its patterns are placed at the entries its `summary.js` records
+and every palette's earliest pattern starts at 0. There is no manual `starts`
+list, and adding `song.starts` to the spec is an error. Entries are seconds, not
+bars: the C analyzer pads each stem by the exact millisecond lead-in.
 
-Add a `song` block to the report object for levels only:
+Add a `song` block for levels only (at the top level of the spec when the archive
+holds several palettes):
 
 ```json
 "song": {
@@ -303,11 +320,12 @@ Add a `song` block to the report object for levels only:
 }
 ```
 
-- `targets`: pre-master RMS target in dBFS per pattern, default -20.
+- `targets`: pre-master RMS target in dBFS per pattern across every palette,
+  in report order, default -20.
 - Patterns may differ in segment length and bar length; the builder places each
   stem at its own entry and needs no common grid.
 - Song length is fixed by the patterns, not chosen: it is the furthest entry
-  time plus that pattern's whole region.
+  time plus that pattern's whole region, across every palette.
 
 ```bash
 python3 song_builder.py --spec report-spec.json \
@@ -333,10 +351,14 @@ artifacts/<batch>/
 ```
 
 `song.html` reaches the master with `../<archive-stem>.wav`, URL-quoted, so the
-report folder and the master must stay siblings.
+report folder and the master must stay siblings. One master is written per
+archive; with several palettes `[stems]/` holds one file per pattern across all
+of them, in report order: the first palette's patterns, then the next
+palette's.
 
 Guarantees:
 
+- every pattern of every palette is one stem; no palette is skipped;
 - each stem is the whole measured region, once, from first sample to last,
   with no truncation, muting, gating or tiling; the only attenuation is a 4 ms
   anti-click ramp at each end of the region;
@@ -354,6 +376,8 @@ right-click to zoom out, Reset Zoom to return, and click to jump and play.
 Song-level checks:
 
 - [ ] Builder exits 0; printed stem delta is 0 LSB; clipped is 0.
+- [ ] Stem count equals the sum of every report's pattern count; every palette
+      contributes all of its patterns to the one song.
 - [ ] Each stem's audio is exactly its pattern's measured region
       (`segments × length`) once, beginning at its pass-derived entry.
 - [ ] All stem rows draw in `song.html`, silent before their entry.
@@ -459,7 +483,8 @@ unzip -t analyze-palettes.zip
 The archive root holds the master WAV beside the `pattern_reports/` folder.
 Include the index, all HTML reports, the `[palettes]/` WAVs, the `[data]/`
 chunks, and when a song was built, `song.html` plus `[stems]/` (stems and
-`[stems]/[data]/`). Do not
+`[stems]/[data]/`). Several palettes change none of this: they share the folder
+and the one master. Do not
 include the zip inside itself. Report the final size and entry count.
 
 ## 8. Worked example
@@ -480,13 +505,17 @@ number of 1.826 s bars.
 | 6 | 26 | 470.00–574.80 | 5.451 | 3 | −40.134 | 39.261 | 19 |
 
 Pattern 2 has the lowest raw lead (−79.395 s), so it defines the song start at
-0; the others enter 8.965, 34.201, 39.261, 40.573 and 42.080 s in. The song is
+0; the others enter 8.965, 34.201, 39.261, 40.573 and 42.080 s in. An archive
+holding several palettes measures each the same way and places all their
+patterns in one song. The song is
 142.83 s (78 bars), peak −0.5 dBFS, RMS −17.8 dBFS, 0 clipped; all six stems
 sum to the master with 0 LSB, and each stem is silent before its entry and after
 its region.
 
 ## 9. Pitfalls and lessons
 
+- An archive with several palettes still makes one song. Do not build a song
+  per palette, and do not keep one palette and discard the rest.
 - Passes place patterns; they do not define them. Do not force a pattern start
   onto a pass loop point. Doing so makes every lead-in zero and destroys the
   alignment `analyze.c` produces.

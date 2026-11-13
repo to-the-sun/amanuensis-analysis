@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Build a song, stems and player page from a finished pattern report.
+"""Build one song, its stems and a player page from every report in the spec.
 
-   Each stem is the pattern's full measured region, placed once and never cut,
-gated or tiled. Its lead-in is the pattern start relative to its pass loop
-point, as recorded in the report, so the passes file fixes the arrangement.
+   All palettes of an archive share the song. Each stem is a pattern's full
+measured region, placed once and never cut, gated or tiled. Its lead-in is the
+pattern start relative to its own pass loop point, as recorded in the report, so
+each palette's passes file fixes its part of the arrangement.
 
 Usage:
     python3 song_builder.py --spec report-spec.json --report-dir artifacts/pattern_reports
@@ -94,30 +95,40 @@ def page_html(title, summary, defs, arr_meta, duration, master):
         .replace('__DUR__', '%d:%04.1f' % (int(duration // 60), duration % 60))
 
 
-def build_song(report_dir, basename, spec_report, master_name='finished_song.wav'):
-    meta = load_meta(report_dir, basename)
-    pats = meta['patterns']
-    sr = meta['sampleRate']
-    if len(pats) < 1:
-        raise ValueError('report has no patterns')
-    bar_of = [p['length'] / max(1, p['bars']) for p in pats]
-    region_bars = [len(p['segments']) * p['bars'] for p in pats]
+def palette_tag(basename):
+    return basename[8:] if basename.lower().startswith('palette_') else basename
 
-    cfg = spec_report.get('song') or {}
+
+def build_song(report_dir, reports, spec, master_name='finished_song.wav'):
+    metas = []
+    for r in reports:
+        base = os.path.splitext(os.path.basename(r['file']))[0]
+        metas.append((base, load_meta(report_dir, base)))
+    sr = metas[0][1]['sampleRate']
+    if any(m['sampleRate'] != sr for _, m in metas):
+        raise ValueError('palettes must share a sample rate')
+    pats = [(base, p) for base, m in metas for p in m['patterns']]
+    if not pats:
+        raise ValueError('reports have no patterns')
+    bar_of = [p['length'] / max(1, p['bars']) for _, p in pats]
+    region_bars = [len(p['segments']) * p['bars'] for _, p in pats]
+
+    cfg = spec.get('song') or next((r['song'] for r in reports if 'song' in r), {})
     if cfg.get('starts'):
         raise ValueError('song.starts is not used; entries come from the passes file')
-    starts = [float(p['entry']) for p in pats]
-    start_s = starts
+    start_s = [float(p['entry']) for _, p in pats]
 
     targets = cfg.get('targets') or [-20.0] * len(pats)
     if len(targets) != len(pats):
         raise ValueError('song.targets must have one value per pattern')
 
-    sr2, x = read_wav(os.path.join(report_dir, '[palettes]', basename + '.wav'))
-    if sr2 != sr:
-        raise ValueError('sample rate mismatch')
-    x = x.astype(np.float64) / 32768.0
-    regs = [fade_edges(region(x, sr, p), sr) for p in pats]
+    pcm = {}
+    for base, _ in metas:
+        sr2, x = read_wav(os.path.join(report_dir, '[palettes]', base + '.wav'))
+        if sr2 != sr:
+            raise ValueError('sample rate mismatch')
+        pcm[base] = x.astype(np.float64) / 32768.0
+    regs = [fade_edges(region(pcm[base], sr, p), sr) for base, p in pats]
     offs = [int(round(t * sr)) for t in start_s]
     song = max(o + len(r) for o, r in zip(offs, regs))
     dur = song / sr
@@ -161,17 +172,20 @@ def build_song(report_dir, basename, spec_report, master_name='finished_song.wav
     with open(os.path.join(stem_data, 'arr.js'), 'w') as f:
         f.write('window.ARR_META = ' + json.dumps(arr_meta, separators=(',', ':')) + ';\n')
 
+    labels = ['%s \u00b7 %s' % (palette_tag(base), p.get('name', 'Pattern %d' % (i + 1)))
+              if len(metas) > 1 else p.get('name', 'Pattern %d' % (i + 1))
+              for i, (base, p) in enumerate(pats)]
     defs = ',\n'.join(
         "  { file: '%%5Bstems%%5D/%s.wav', name: %s, meta: %s, color: %s }" % (
-            names[i],
-            json.dumps(p.get('name', 'Pattern %d' % (i + 1))),
+            names[i], json.dumps(labels[i]),
             json.dumps('%d bars &middot; %.3f s' % (region_bars[i], p['length'] * len(p['segments']))),
             json.dumps(p.get('color', '#4dabf7')))
-        for i, p in enumerate(pats))
-    summary = ('%d patterns (%d:%04.1f), %d Hz mono. Each pattern plays its whole region once '
-               'from its pass lead-in; the %d stems sum to the master.'
-               % (len(pats), int(dur // 60), dur % 60, sr, len(pats)))
-    html_text = page_html('Song &mdash; ' + basename, summary, defs,
+        for i, (base, p) in enumerate(pats))
+    summary = ('%d patterns from %d palette%s (%d:%04.1f), %d Hz mono. Each pattern plays its whole '
+               'region once from its pass lead-in; the %d stems sum to the master.'
+               % (len(pats), len(metas), '' if len(metas) == 1 else 's',
+                  int(dur // 60), dur % 60, sr, len(pats)))
+    html_text = page_html('Song &mdash; ' + os.path.splitext(master_name)[0], summary, defs,
                           json.dumps(arr_meta, separators=(',', ':')), dur,
                           '../' + quote(master_name))
     with open(os.path.join(report_dir, 'song.html'), 'w') as f:
@@ -185,7 +199,7 @@ def build_song(report_dir, basename, spec_report, master_name='finished_song.wav
             card = ('<a class="card" href="song.html"><strong>Song &mdash; %s</strong>'
                     '<span>Master plus %d stems &middot; %d:%04.1f &middot; arrangement view</span>'
                     '<span class="btn">Open song</span></a>\n'
-                    % (basename, len(pats), int(dur // 60), dur % 60))
+                    % (os.path.splitext(master_name)[0], len(pats), int(dur // 60), dur % 60))
             text = text.replace('<div class="list">', '<div class="list">\n' + card, 1)
             with open(idx, 'w') as f:
                 f.write(text)
@@ -205,7 +219,7 @@ def build_song(report_dir, basename, spec_report, master_name='finished_song.wav
         'clipped': int(np.sum(np.abs(song_pcm) >= 32767)),
         'stem_delta_lsb': delta,
         'gains_db': [round(20 * np.log10(g), 1) for g in gains],
-        'entries': [round(s, 6) for s in starts],
+        'entries': [round(s, 6) for s in start_s],
     }
     return out
 
@@ -214,26 +228,16 @@ def main():
     ap = argparse.ArgumentParser(description='Build a song, stems and player page from a pattern report.')
     ap.add_argument('--spec', required=True, help='report spec used to build the report')
     ap.add_argument('--report-dir', required=True, help='directory holding the built report')
-    ap.add_argument('--report', default=None, help='report basename (default: the only report)')
     ap.add_argument('--archive', default=None,
-                    help='zip the palette and passes were extracted from; the master is named after it')
+                    help='zip the palettes and passes were extracted from; the master is named after it')
     args = ap.parse_args()
 
     with open(args.spec) as f:
         spec = json.load(f)
     reports = spec.get('reports') or [spec]
-    if args.report:
-        reports = [r for r in reports
-                   if os.path.splitext(os.path.basename(r['file']))[0] == args.report]
-        if not reports:
-            raise SystemExit('No report named %s in spec' % args.report)
-    elif len(reports) != 1:
-        raise SystemExit('Spec has several reports; pass --report')
-    r = reports[0]
-    basename = os.path.splitext(os.path.basename(r['file']))[0]
     master = (os.path.splitext(os.path.basename(args.archive))[0] + '.wav'
               if args.archive else 'finished_song.wav')
-    res = build_song(args.report_dir, basename, r, master)
+    res = build_song(args.report_dir, reports, spec, master)
     print('song   %.2f s  %d bars  peak %.1f dBFS  rms %.1f dBFS  clipped %d'
           % (res['duration'], res['bars'], res['peak_db'], res['rms_db'], res['clipped']))
     print('stems  %d  sum delta %d LSB  gains %s'
