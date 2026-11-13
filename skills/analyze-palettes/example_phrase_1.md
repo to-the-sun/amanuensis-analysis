@@ -3,17 +3,38 @@
 ![example_phrase_1](example_phrase_1.png)
 
 A pattern analysis of one recording: **78.9 s · 44.1 kHz · mono · four repeating
-patterns**. The panel is drawn from `example_phrase_1.wav` in this folder.
+patterns**. The panel is drawn from `example_phrase_1.wav` in this folder. That
+file is a single stem: every row comes from the same audio, and nothing here is
+a stack of separate stems.
+
+## Terms
+
+- **Segment**: one iteration of a pattern — the audio between two adjacent
+dashed lines. Every segment in a pattern is the same length (1.07 s for the
+bass, 2.15 s for the others). The dashes mark that uniform grid; they are not
+measured beat positions.
+- **Pattern**: a region that repeats at one fixed loop length for at least three
+segments, running from its measured start to the end of its last complete
+segment. The thick rectangle bounds it. Patterns are independent of each other:
+two rows here share a loop length and still count separately because their
+regions differ.
+- **Phrase**: the full extent of the audio from the beginning to the end of all
+of its overlapping patterns. One clip is one phrase, and this clip is one
+phrase: 0.00 s to the end of its patterns at 78.11 s — the whole 78.9 s file,
+with the last 0.79 s left over past the bass's last complete segment. The four
+patterns run inside it together, not as a sequence of sections.
+- **Stem**: one recorded file. This example is one stem, `example_phrase_1.wav`,
+so the four rows are four patterns measured inside that single recording.
 
 ## Reading the panel
 
-- The gray trace is the waveform, repeated once per pattern so every pattern has
-  its own row against the same time axis.
+- The gray trace is the same waveform drawn once per pattern, so every pattern
+  has its own row against the shared time axis.
 - The **thick outer rectangle** is the whole pattern: from its measured start to
   the end of its last complete segment.
 - The **thin dashed verticals** divide the row into segments, one per loop
   iteration, at the pattern's loop length.
-- The row label gives the stem name (colored dot) and `loop × segments`.
+- The row label gives the pattern's name (colored dot) and `loop × segments`.
 
 ## Measurements
 
@@ -49,8 +70,9 @@ Starts and ends are read off the axis to about ±0.05 s; covered time is
    78.11 s and 35 × 2.15 = 75.25 s. The recording is 78.9 s, so 0.79 s and
    1.50 s of tail sit outside the regions: a pattern ends at its last complete
    segment.
-6. **The patterns are layers, not sections.** They overlap — all three stems run
-   together from 2.15 s to 77.40 s — which is what makes them stack in the song.
+6. **The patterns are layers inside the one phrase, not sections.** The bass,
+   cymbal and kick all run from 2.15 s to 77.40 s, which is what lets them stack
+   in the song.
 
 ## Not in this panel
 
