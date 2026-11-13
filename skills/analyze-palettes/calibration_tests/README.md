@@ -1,3 +1,19 @@
+***Agents asked to use the analyze-palettes skill should ignore this document and everything in this directory entirely, using the algorithms as they exist in the skill itself.*** This directory is only for calibrating those algorithms beforehand. Agents tasked with doing this will be explicitly asked to work within this directory. 
+
+## Terms
+
+- **Segment**: one iteration of a pattern — the audio between two adjacent
+dashed lines. Every segment in a pattern is the same length, but different patterns can have different segment lengths. The dashes mark that uniform grid; they are not
+measured beat positions.
+- **Pattern**: a region that repeats at one fixed loop length **for at least three
+segments**, running from its measured start to the end of its last complete
+segment. The thick rectangle bounds it. Patterns are independent of each other;
+two patterns can share a loop length and still count separately because they are tracking different contents in their repetitions, i.e. an onset in one position of the segment (and/or timbre or pitch) versus another.
+- **Phrase**: the full extent of the audio from the beginning to the end of all
+of its overlapping patterns. 
+- **Palette**: A full jam session recorded beginning to end with no editing. Palettes are analyzed for their patterns and have their phrases extracted before building the final song.
+- **Stem**: A single instrument track of the final song. Stems are not relevant during this analysis step and only come into play later when the song is constructed.
+
 # test_phrase_1
 
 ![test_phrase_1](test_phrase_1.png)
@@ -6,25 +22,6 @@ A pattern analysis of one recording: **78.9 s · 44.1 kHz · mono · four repeat
 patterns**. The panel is drawn from `test_phrase_1.wav` in this folder. That
 file is a single stem: every row comes from the same audio, and nothing here is
 a stack of separate stems.
-
-## Terms
-
-- **Segment**: one iteration of a pattern — the audio between two adjacent
-dashed lines. Every segment in a pattern is the same length (1.07 s for the
-bass, 2.15 s for the others). The dashes mark that uniform grid; they are not
-measured beat positions.
-- **Pattern**: a region that repeats at one fixed loop length for at least three
-segments, running from its measured start to the end of its last complete
-segment. The thick rectangle bounds it. Patterns are independent of each other:
-two rows here share a loop length and still count separately because their
-regions differ.
-- **Phrase**: the full extent of the audio from the beginning to the end of all
-of its overlapping patterns. One clip is one phrase, and this clip is one
-phrase: 0.00 s to the end of its patterns at 78.11 s — the whole 78.9 s file,
-with the last 0.79 s left over past the bass's last complete segment. The four
-patterns run inside it together, not as a sequence of sections.
-- **Stem**: one recorded file. This example is one stem, `test_phrase_1.wav`,
-so the four rows are four patterns measured inside that single recording.
 
 ## Reading the panel
 
