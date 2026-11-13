@@ -1,9 +1,9 @@
-# example_phrase_1
+# test_phrase_1
 
-![example_phrase_1](example_phrase_1.png)
+![test_phrase_1](test_phrase_1.png)
 
 A pattern analysis of one recording: **78.9 s · 44.1 kHz · mono · four repeating
-patterns**. The panel is drawn from `example_phrase_1.wav` in this folder. That
+patterns**. The panel is drawn from `test_phrase_1.wav` in this folder. That
 file is a single stem: every row comes from the same audio, and nothing here is
 a stack of separate stems.
 
@@ -23,7 +23,7 @@ of its overlapping patterns. One clip is one phrase, and this clip is one
 phrase: 0.00 s to the end of its patterns at 78.11 s — the whole 78.9 s file,
 with the last 0.79 s left over past the bass's last complete segment. The four
 patterns run inside it together, not as a sequence of sections.
-- **Stem**: one recorded file. This example is one stem, `example_phrase_1.wav`,
+- **Stem**: one recorded file. This example is one stem, `test_phrase_1.wav`,
 so the four rows are four patterns measured inside that single recording.
 
 ## Reading the panel
