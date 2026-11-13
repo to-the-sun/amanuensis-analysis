@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import json
 import os
+import ssl
 import time
 import traceback
 import urllib.error
@@ -43,6 +44,8 @@ def say(message):
 def describe(error):
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP {error.code} {error.read().decode('utf-8', 'replace')[:300]}"
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, ssl.SSLCertVerificationError):
+        return f"TLS certificate rejected, so something here intercepts HTTPS (antivirus or proxy) without a trusted root: {error.reason}"
     return traceback.format_exc().strip().splitlines()[-1]
 
 
@@ -65,6 +68,15 @@ def token():
     fail(f"Save a fine-grained GitHub token with contents read/write on {REPO} as github_token.txt next to {Path(__file__).name}.")
 
 
+def trust():
+    settings = ssl.create_default_context()
+    for store in ("ROOT", "CA"):
+        for cert, encoding, _ in getattr(ssl, "enum_certificates", lambda name: [])(store):
+            if encoding == "x509_asn":
+                settings.load_verify_locations(cadata=cert)
+    return settings
+
+
 def call(path, method="GET", payload=None, accept="application/vnd.github+json"):
     request = urllib.request.Request(
         f"{API}/repos/{REPO}/{path}",
@@ -76,9 +88,15 @@ def call(path, method="GET", payload=None, accept="application/vnd.github+json")
         },
         method=method,
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        body = response.read()
-    return json.loads(body) if body else None
+    for attempt in (0, 1):
+        try:
+            with urllib.request.urlopen(request, timeout=120, context=trust()) as response:
+                body = response.read()
+            return json.loads(body) if body else None
+        except urllib.error.URLError as error:
+            if attempt or isinstance(error.reason, ssl.SSLCertVerificationError):
+                raise
+            time.sleep(5)
 
 
 def blob_sha(data):
