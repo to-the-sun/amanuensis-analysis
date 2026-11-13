@@ -11,8 +11,8 @@ segment. The thick rectangle bounds it. Patterns are independent of each other;
 two patterns can share a loop length and still count separately because they are tracking different contents in their repetitions, i.e. an onset in one position of the segment (and/or timbre or pitch) versus another.
 - **Phrase**: the full extent of the audio from the beginning to the end of all
 of its overlapping patterns. 
-- **Palette**: A full jam session recorded beginning to end with no editing. Palettes are analyzed for their patterns and have their phrases extracted before building the final song.
-- **Stem**: A single instrument track of the final song. Stems are not relevant during this analysis step and only come into play later when the song is constructed.
+- **Palette**: a full jam session recorded beginning to end with no editing. Palettes are analyzed for their patterns and have their phrases extracted before building the final song.
+- **Stem**: a single instrument track of the final song. Stems are not relevant during this analysis step and only come into play later when the song is constructed.
 
 # test_phrase_1
 
