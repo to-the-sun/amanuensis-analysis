@@ -36,6 +36,16 @@ def log(message):
         handle.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n")
 
 
+def say(message):
+    print(f"{datetime.now():%H:%M:%S} {message}", flush=True)
+
+
+def describe(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code} {error.read().decode('utf-8', 'replace')[:300]}"
+    return traceback.format_exc().strip().splitlines()[-1]
+
+
 def fail(message):
     log(message)
     ctypes.windll.user32.MessageBoxW(None, message, "Palette watcher", 0x10)
@@ -116,7 +126,7 @@ def pairs(since, until):
             for key, match in found.items()
             if len(match) == len(PAIR) and all(modified(match[prefix]) <= until for prefix, _ in PAIR)
         }
-        if any(all(since < modified(match[prefix]) for prefix, _ in PAIR) for match in settled.values()):
+        if any(since < modified(entry) for match in settled.values() for entry in match.values()):
             yield folder.name, [settled[key][prefix] for key in sorted(settled) for prefix, _ in PAIR]
 
 
@@ -137,29 +147,47 @@ def sweep():
     if since is None:
         baseline = datetime.now()
         save_state(baseline)
-        log(f"no previous check time; nothing uploaded, next check starts at {baseline:%Y-%m-%d %H:%M:%S}")
+        message = f"no previous check time; nothing uploaded, next check starts at {baseline:%Y-%m-%d %H:%M:%S}"
+        say(message)
+        log(message)
         return
     until = datetime.now() - timedelta(seconds=SETTLE_SECONDS)
+    uploaded = 0
+    earliest_failure = None
     for folder, entries in pairs(since, until):
-        name = f"{folder}.zip"
-        if upload(name, bundle(entries), f"Add {folder} palette zip"):
-            log(f"uploaded {REMOTE_DIR}/{name}")
-        else:
-            log(f"already uploaded: {REMOTE_DIR}/{name}")
-    save_state(until)
+        try:
+            name = f"{folder}.zip"
+            if upload(name, bundle(entries), f"Add {folder} palette zip"):
+                say(f"uploaded {REMOTE_DIR}/{name}")
+                log(f"uploaded {REMOTE_DIR}/{name}")
+                uploaded += 1
+            else:
+                say(f"already up to date: {REMOTE_DIR}/{name}")
+        except Exception as error:
+            message = f"failed {folder}.zip: {describe(error)}"
+            say(message)
+            log(message)
+            stuck = min(modified(entry) for entry in entries)
+            earliest_failure = stuck if earliest_failure is None else min(earliest_failure, stuck)
+    if not uploaded:
+        say(f"nothing new up to {until:%H:%M:%S}")
+    save_state(until if earliest_failure is None else min(until, earliest_failure - timedelta(seconds=1)))
 
 
 def main():
+    say(f"watching {PROJECTS}")
+    say(f"log: {LOG}")
     log(f"watching {PROJECTS}")
     problem = None
     while True:
         try:
             sweep()
             problem = None
-        except Exception:
-            message = traceback.format_exc().strip().splitlines()[-1]
+        except Exception as error:
+            message = f"failed: {describe(error)}"
             if message != problem:
-                log(f"failed: {message}")
+                say(message)
+                log(message)
                 problem = message
         time.sleep(POLL_SECONDS)
 
