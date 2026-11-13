@@ -193,6 +193,7 @@ def sweep():
 
 
 def main():
+    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 6)
     say(f"watching {PROJECTS}")
     say(f"log: {LOG}")
     log(f"watching {PROJECTS}")
