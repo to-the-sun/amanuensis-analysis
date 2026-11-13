@@ -124,7 +124,7 @@ def load_state():
     try:
         return datetime.fromisoformat(json.loads(STATE.read_text(encoding="utf-8"))["last_check"])
     except (OSError, ValueError, KeyError):
-        return datetime.now()
+        return None
 
 
 def save_state(moment):
@@ -133,8 +133,14 @@ def save_state(moment):
 
 
 def sweep():
+    since = load_state()
+    if since is None:
+        baseline = datetime.now()
+        save_state(baseline)
+        log(f"no previous check time; nothing uploaded, next check starts at {baseline:%Y-%m-%d %H:%M:%S}")
+        return
     until = datetime.now() - timedelta(seconds=SETTLE_SECONDS)
-    for folder, entries in pairs(load_state(), until):
+    for folder, entries in pairs(since, until):
         name = f"{folder}.zip"
         if upload(name, bundle(entries), f"Add {folder} palette zip"):
             log(f"uploaded {REMOTE_DIR}/{name}")
