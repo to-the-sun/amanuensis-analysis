@@ -23,13 +23,12 @@ REMOTE_DIR = "palettes"
 BRANCH = "main"
 POLL_SECONDS = 30
 SETTLE_SECONDS = 10
-MAX_BYTES = 100 * 1024 * 1024
+PART_BYTES = 10 * 1024 * 1024
 
 HERE = Path(__file__).resolve().parent
 STATE = HERE / "palette_watcher_state.json"
 LOG = HERE / "palette_watcher.log"
 PAIR = (("palette_", ".wav"), ("passes_", ".txt"))
-oversized = set()
 _trust = None
 current = ""
 
@@ -120,29 +119,47 @@ def blob_sha(data):
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def upload(name, data, message):
-    path = f"{REMOTE_DIR}/{name}"
+def existing(path):
     try:
-        known = call(f"contents/{urllib.parse.quote(path)}", accept="application/vnd.github.object+json")["sha"]
+        return call(f"contents/{urllib.parse.quote(path)}", accept="application/vnd.github.object+json")["sha"]
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise
-        known = None
-    if known == blob_sha(data):
-        return "current"
-    if len(data) > MAX_BYTES:
-        return "oversized"
-    blob = call("git/blobs", "POST", {"content": base64.b64encode(data).decode(), "encoding": "base64"})["sha"]
+        return None
+
+
+def siblings(name):
+    try:
+        listing = call(f"contents/{urllib.parse.quote(REMOTE_DIR)}")
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return []
+        raise
+    return [entry["name"] for entry in listing if entry["name"].startswith(f"{name}.")]
+
+
+def store(name, data, message):
+    chunks = [data[index:index + PART_BYTES] for index in range(0, len(data), PART_BYTES)] or [b""]
+    names = [name] if len(chunks) == 1 else [f"{name}.{index:03d}" for index in range(1, len(chunks) + 1)]
+    changes = []
+    for part, chunk in zip(names, chunks):
+        path = f"{REMOTE_DIR}/{part}"
+        if existing(path) != blob_sha(chunk):
+            blob = call("git/blobs", "POST", {"content": base64.b64encode(chunk).decode(), "encoding": "base64"})["sha"]
+            changes.append({"path": path, "mode": "100644", "type": "blob", "sha": blob})
+    changes += [
+        {"path": f"{REMOTE_DIR}/{stale}", "mode": "100644", "type": "blob", "sha": None}
+        for stale in siblings(name)
+        if stale not in names
+    ]
+    if not changes:
+        return False
     head = call(f"git/ref/heads/{BRANCH}")["object"]["sha"]
     base = call(f"git/commits/{head}")["tree"]["sha"]
-    tree = call(
-        "git/trees",
-        "POST",
-        {"base_tree": base, "tree": [{"path": path, "mode": "100644", "type": "blob", "sha": blob}]},
-    )["sha"]
+    tree = call("git/trees", "POST", {"base_tree": base, "tree": changes})["sha"]
     commit = call("git/commits", "POST", {"message": message, "tree": tree, "parents": [head]})["sha"]
     call(f"git/refs/heads/{BRANCH}", "PATCH", {"sha": commit, "force": False})
-    return "uploaded"
+    return True
 
 
 def bundle(entries):
@@ -200,20 +217,15 @@ def sweep():
     for folder, entries in pairs(since, until):
         data = b""
         try:
-            if folder in oversized:
-                continue
             data = bundle(entries)
             name = f"{folder}.zip"
-            outcome = upload(name, data, f"Add {folder} palette zip")
-            if outcome == "uploaded":
-                say(f"uploaded {REMOTE_DIR}/{name} ({len(data) / 1048576:.1f} MB)")
-                log(f"uploaded {REMOTE_DIR}/{name} ({len(data) / 1048576:.1f} MB)")
-                uploaded += 1
-            elif outcome == "oversized":
-                oversized.add(folder)
-                message = f"skipped {folder}.zip: {len(data) / 1048576:.1f} MB is over GitHub's 100 MB file limit"
+            if store(name, data, f"Add {folder} palette zip"):
+                parts = (len(data) + PART_BYTES - 1) // PART_BYTES
+                detail = f", {parts} parts" if parts > 1 else ""
+                message = f"uploaded {REMOTE_DIR}/{name} ({len(data) / 1048576:.1f} MB{detail})"
                 say(message)
                 log(message)
+                uploaded += 1
             else:
                 say(f"already up to date: {REMOTE_DIR}/{name}")
         except Exception as error:
