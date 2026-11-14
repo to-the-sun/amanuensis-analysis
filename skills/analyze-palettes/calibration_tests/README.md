@@ -36,12 +36,12 @@ Each test phrase below will have a key with the "correct" stats that should be d
 
 ## Results 
 
-| Tracked element | Segment length (s) | Segments | Region (s) | Covered (s) |
-|---|---:|---:|---|---:|
-| bass | 1.07 | 73 | 0.00–78.11 | 78.11 |
-| cymbal | 2.15 | 35 | 2.15–77.40 | 75.25 |
-| kick | 2.15 | 35 | 2.15–77.40 | 75.25 |
-| kick | 2.15 | 12 | 2.15–15.05, 38.65–49.40 | 25.80 |
+| Tracked element | Segment length (s) | Segments | Region (s) |
+|---|---:|---:|---|
+| bass | 1.07 | 73 | 0.00–78.11 |
+| cymbal | 2.15 | 35 | 2.15–77.40 |
+| kick | 2.15 | 35 | 2.15–77.40 | 
+| kick | 2.15 | 12 | 2.15–15.05, 38.65–49.40 | 
 
 ## Discussion 
 
