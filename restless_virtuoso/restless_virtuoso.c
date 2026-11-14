@@ -1022,7 +1022,7 @@ static void load_drums(const char *folder)
 
 static void trigger_drum(int note)
 {
-    if (!drumCount) return;
+    if (!drumCount || !g.samplesSound) return;
     drumVoiceDrum[note] = drumNoteDrum[note];
     drumVoices[note] = drums[drumVoiceDrum[note]].track;
     drumVoices[note].position = 0;
