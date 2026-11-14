@@ -3,7 +3,7 @@
 ## Definitions
 
 - **Segment**: one iteration of a pattern — the audio between two adjacent
-dashed lines. Every segment in a pattern is the same length, but different patterns can have different segment lengths. The dashes mark that uniform grid; they are not
+dashed lines. Every segment in a pattern is the same length, but different patterns can have different segment lengths, not necessarily multiples of each other. The dashes mark that uniform grid; they are not
 measured beat positions.
 - **Pattern**: a region that repeats at one fixed loop length **for at least three
 segments**, running from its measured start to the end of its last complete
