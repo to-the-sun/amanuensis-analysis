@@ -95,11 +95,14 @@ When `instrument` is a MIDI input, two more keys add instruments to it:
 - `samples_ratio` is the percentage chance, 0 to 100 (default 50), that a new sound
   comes from `samples_path` instead of `vsts_path` when both are loaded. Only one of
   them plays.
-- `taste` holds, in seconds, how long each drum sample and each preset of each
-  plugin has sounded above -60 dBFS. Every entry starts at 1; `new sound` draws by
-  weighted lottery with one ticket per second of taste, once over all presets and
-  once per MIDI note over the drum samples. The instance writes the session's totals
-  back into the settings file when it closes.
+- `taste` holds, in whole seconds, how long each drum sample and each preset of
+  each plugin has sounded above -60 dBFS. A second counts in full if the sound
+  peaked above the gate anywhere in it. Every entry starts at 1; `new sound` draws
+  by weighted lottery with one ticket per second of taste, once over all presets
+  and once per MIDI note over the drum samples. Samples are keyed by their path
+  under `samples_path`, presets by their 1-based number under the plugin's `.dll`
+  name. The instance writes the session's totals back into the settings file when
+  it closes.
 
 The sine synth stays off in this mode; the loaded instrument is the sound source.
 A key that is not an existing folder is logged and ignored.

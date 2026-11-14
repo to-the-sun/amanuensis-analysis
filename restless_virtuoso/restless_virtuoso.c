@@ -29,7 +29,7 @@
 #define MAX_METERS 4
 #define MIDI_QUEUE 1024
 #define DEFAULT_DRIVER "Focusrite USB ASIO"
-#define TASTE_START 1.0
+#define TASTE_START 1
 #define TASTE_GATE 0.001f
 
 typedef struct {
@@ -927,14 +927,14 @@ static double random_unit(void)
     return ((double)rand() * (RAND_MAX + 1.0) + rand()) / ((RAND_MAX + 1.0) * (RAND_MAX + 1.0));
 }
 
-static int weighted_pick(const double *taste, int count)
+static int weighted_pick(const int *taste, int count)
 {
-    double total = 0.0;
+    long long total = 0;
     for (int i = 0; i < count; i++) total += taste[i];
 
-    double ticket = random_unit() * total;
+    long long ticket = (long long)(random_unit() * (double)total);
     for (int i = 0; i < count; i++)
-        if ((ticket -= taste[i]) < 0.0) return i;
+        if ((ticket -= taste[i]) < 0) return i;
     return count - 1;
 }
 
@@ -944,14 +944,15 @@ typedef struct {
 } Drum;
 
 static Drum *drums;
-static double *drumTaste;
+static int *drumTaste;
+static unsigned char *drumTasted;
 static int drumCount, drumCapacity;
 static int drumNoteDrum[128], drumVoiceDrum[128];
 static Track drumVoices[128];
 static float drumNotePeak[128], *drumPeaks;
 static size_t drumRootLength;
 
-static double saved_taste(const char *name);
+static int saved_taste(const char *name);
 
 static void add_sample(const wchar_t *path)
 {
@@ -963,7 +964,7 @@ static void add_sample(const wchar_t *path)
             return;
         }
         drums = grown;
-        double *tastes = realloc(drumTaste, (size_t)capacity * sizeof *tastes);
+        int *tastes = realloc(drumTaste, (size_t)capacity * sizeof *tastes);
         if (!tastes) {
             free((void *)path);
             return;
@@ -1015,6 +1016,7 @@ static void load_drums(const char *folder)
     }
 
     drumPeaks = calloc((size_t)drumCount, sizeof *drumPeaks);
+    drumTasted = calloc((size_t)drumCount, 1);
     assign_drums();
 }
 
@@ -1052,7 +1054,7 @@ static void render_drums(float *dst, int outputs, int frames)
         }
     }
 
-    if (!drumPeaks) return;
+    if (!drumPeaks || !drumTasted) return;
 
     int touched[128], count = 0;
     for (int note = 0; note < 128; note++) {
@@ -1064,7 +1066,7 @@ static void render_drums(float *dst, int outputs, int frames)
     }
 
     for (int i = 0; i < count; i++) {
-        if (drumPeaks[touched[i]] > TASTE_GATE) drumTaste[touched[i]] += (double)frames / g.rate;
+        if (drumPeaks[touched[i]] > TASTE_GATE) drumTasted[touched[i]] = 1;
         drumPeaks[touched[i]] = 0.0f;
     }
 }
@@ -1073,9 +1075,37 @@ static HMODULE vstLibraries[VST_MAX_PLUGINS];
 static char vstNames[VST_MAX_PLUGINS][VST_NAME];
 static int vstLibraryCount, vstActiveLibrary = -1, vstOutputCount, vstProgram, vstPresetCount;
 static int vstLibraryPresets[VST_MAX_PLUGINS], vstLibraryLow[VST_MAX_PLUGINS], vstLibraryHigh[VST_MAX_PLUGINS];
-static double *vstTastes[VST_MAX_PLUGINS];
+static int *vstTastes[VST_MAX_PLUGINS];
+static int vstTasted, vstTasteLibrary = -1, vstTasteProgram;
 
 static void init_vst_taste(int library);
+
+static void taste_flush(void)
+{
+    if (vstTasted) {
+        vstTasted = 0;
+        if (vstTasteLibrary >= 0 && vstTastes[vstTasteLibrary] &&
+            vstTasteProgram < vstLibraryPresets[vstTasteLibrary])
+            vstTastes[vstTasteLibrary][vstTasteProgram]++;
+    }
+
+    if (!drumTasted) return;
+    for (int i = 0; i < drumCount; i++) {
+        if (!drumTasted[i]) continue;
+        drumTasted[i] = 0;
+        drumTaste[i]++;
+    }
+}
+
+static void taste_tick(int frames)
+{
+    static long long tasteFrames;
+
+    tasteFrames += frames;
+    if (tasteFrames < (long long)g.rate) return;
+    tasteFrames -= (long long)g.rate;
+    taste_flush();
+}
 
 static VstStats *find_vst_stats(const char *name, const char *dll)
 {
@@ -1277,12 +1307,16 @@ static const char *json_text(const char *at, char *out, size_t size)
 
 typedef struct {
     char *name;
-    double taste;
+    int taste;
 } TasteEntry;
 
 typedef struct {
+    int number, taste;
+} PresetEntry;
+
+typedef struct {
     char *name;
-    double *taste;
+    PresetEntry *entries;
     int count;
 } PresetTaste;
 
@@ -1293,14 +1327,14 @@ static int filePresetCount, filePresetCapacity;
 static const char *settingsPath;
 static Options *settingsOptions;
 
-static double saved_taste(const char *name)
+static int saved_taste(const char *name)
 {
     for (int i = 0; i < fileDrumCount; i++)
         if (!strcmp(fileDrums[i].name, name)) return fileDrums[i].taste;
     return TASTE_START;
 }
 
-static void add_file_drum(const char *name, double taste)
+static void add_file_drum(const char *name, int taste)
 {
     if (fileDrumCount == fileDrumCapacity) {
         int capacity = fileDrumCapacity ? fileDrumCapacity * 2 : 64;
@@ -1317,13 +1351,13 @@ static void add_file_drum(const char *name, double taste)
     fileDrumCount++;
 }
 
-static void add_file_preset(const char *name, double *taste, int count)
+static void add_file_preset(const char *name, PresetEntry *entries, int count)
 {
     if (filePresetCount == filePresetCapacity) {
         int capacity = filePresetCapacity ? filePresetCapacity * 2 : 32;
         PresetTaste *grown = realloc(filePresets, (size_t)capacity * sizeof *grown);
         if (!grown) {
-            free(taste);
+            free(entries);
             return;
         }
         filePresets = grown;
@@ -1331,12 +1365,12 @@ static void add_file_preset(const char *name, double *taste, int count)
     }
     char *copy = malloc(strlen(name) + 1);
     if (!copy) {
-        free(taste);
+        free(entries);
         return;
     }
     strcpy(copy, name);
     filePresets[filePresetCount].name = copy;
-    filePresets[filePresetCount].taste = taste;
+    filePresets[filePresetCount].entries = entries;
     filePresets[filePresetCount].count = count;
     filePresetCount++;
 }
@@ -1354,9 +1388,9 @@ static void load_drum_tastes(const char *object)
         at = skip_space(at);
 
         char *end = NULL;
-        double taste = strtod(at, &end);
+        long taste = strtol(at, &end, 10);
         if (end == at) return;
-        add_file_drum(name, taste);
+        add_file_drum(name, (int)taste);
 
         at = skip_space(end);
         if (*at != ',') return;
@@ -1375,45 +1409,59 @@ static void load_preset_tastes(const char *object)
         at = skip_space(at);
         if (*at++ != ':') return;
         at = skip_space(at);
-        if (*at++ != '[') return;
+        if (*at++ != '{') return;
 
-        double *taste = NULL;
+        PresetEntry *entries = NULL;
         int count = 0, capacity = 0;
         for (;;) {
+            char number[16];
             at = skip_space(at);
-            if (*at == ']') {
+            if (*at == '}') {
                 at++;
                 break;
             }
 
+            at = json_text(at, number, sizeof number);
+            if (!at) {
+                free(entries);
+                return;
+            }
+            at = skip_space(at);
+            if (*at++ != ':') {
+                free(entries);
+                return;
+            }
+            at = skip_space(at);
+
             char *end = NULL;
-            double value = strtod(at, &end);
+            long taste = strtol(at, &end, 10);
             if (end == at) {
-                free(taste);
+                free(entries);
                 return;
             }
             if (count == capacity) {
                 int grown = capacity ? capacity * 2 : 16;
-                double *values = realloc(taste, (size_t)grown * sizeof *values);
+                PresetEntry *values = realloc(entries, (size_t)grown * sizeof *values);
                 if (!values) {
-                    free(taste);
+                    free(entries);
                     return;
                 }
-                taste = values;
+                entries = values;
                 capacity = grown;
             }
-            taste[count++] = value;
+            entries[count].number = atoi(number);
+            entries[count++].taste = (int)taste;
 
             at = skip_space(end);
             if (*at == ',') at++;
-            else if (*at != ']') {
-                free(taste);
+            else if (*at != '}') {
+                free(entries);
                 return;
             }
         }
 
-        if (count) add_file_preset(name, taste, count);
-        else free(taste);
+        if (count) add_file_preset(name, entries, count);
+        else free(entries);
 
         at = skip_space(at);
         if (*at != ',') return;
@@ -1426,11 +1474,11 @@ static void load_taste(const char *text)
     const char *taste = json_value(text, "taste");
     if (!taste || *taste != '{') return;
 
-    const char *drums = json_value(taste, "drums");
-    if (drums && *drums == '{') load_drum_tastes(drums);
+    const char *samples = json_value(taste, "samples");
+    if (samples && *samples == '{') load_drum_tastes(samples);
 
-    const char *presets = json_value(taste, "presets");
-    if (presets && *presets == '{') load_preset_tastes(presets);
+    const char *synths = json_value(taste, "synths");
+    if (synths && *synths == '{') load_preset_tastes(synths);
 }
 
 static void init_vst_taste(int library)
@@ -1455,7 +1503,7 @@ static void init_vst_taste(int library)
     int count = vstLibraryPresets[library];
     if (count <= 0) return;
 
-    double *taste = malloc((size_t)count * sizeof *taste);
+    int *taste = malloc((size_t)count * sizeof *taste);
     if (!taste) {
         vstLibraryPresets[library] = 0;
         return;
@@ -1464,8 +1512,10 @@ static void init_vst_taste(int library)
 
     for (int i = 0; i < filePresetCount; i++) {
         if (_stricmp(filePresets[i].name, vstNames[library])) continue;
-        int shared = filePresets[i].count < count ? filePresets[i].count : count;
-        for (int j = 0; j < shared; j++) taste[j] = filePresets[i].taste[j];
+        for (int j = 0; j < filePresets[i].count; j++) {
+            int number = filePresets[i].entries[j].number;
+            if (number >= 1 && number <= count) taste[number - 1] = filePresets[i].entries[j].taste;
+        }
         break;
     }
     vstTastes[library] = taste;
@@ -1487,7 +1537,7 @@ static int write_drums(FILE *file, int keep)
         for (int i = 0; i < fileDrumCount; i++) {
             fprintf(file, "%s\n      ", i ? "," : "");
             json_write_text(file, fileDrums[i].name);
-            fprintf(file, ": %.3f", fileDrums[i].taste);
+            fprintf(file, ": %d", fileDrums[i].taste);
         }
         return fileDrumCount;
     }
@@ -1495,9 +1545,22 @@ static int write_drums(FILE *file, int keep)
     for (int i = 0; i < drumCount; i++) {
         fprintf(file, "%s\n      ", i ? "," : "");
         json_write_text(file, drums[i].name);
-        fprintf(file, ": %.3f", drumTaste[i]);
+        fprintf(file, ": %d", drumTaste[i]);
     }
     return drumCount;
+}
+
+static void write_preset_entries(FILE *file, const PresetEntry *entries, int count)
+{
+    if (!count) {
+        fprintf(file, "{}");
+        return;
+    }
+
+    fprintf(file, "{ ");
+    for (int i = 0; i < count; i++)
+        fprintf(file, "%s\"%d\": %d", i ? ", " : "", entries[i].number, entries[i].taste);
+    fprintf(file, " }");
 }
 
 static int write_presets(FILE *file, int keep)
@@ -1506,23 +1569,22 @@ static int write_presets(FILE *file, int keep)
         for (int i = 0; i < filePresetCount; i++) {
             fprintf(file, "%s\n      ", i ? "," : "");
             json_write_text(file, filePresets[i].name);
-            fprintf(file, ": [");
-            for (int j = 0; j < filePresets[i].count; j++)
-                fprintf(file, "%s%.3f", j ? ", " : "", filePresets[i].taste[j]);
-            fprintf(file, "]");
+            fprintf(file, ": ");
+            write_preset_entries(file, filePresets[i].entries, filePresets[i].count);
         }
         return filePresetCount;
     }
 
     int written = 0;
     for (int i = 0; i < vstLibraryCount; i++) {
-        if (!vstLibraryPresets[i] || !vstTastes[i]) continue;
+        int count = vstLibraryPresets[i];
+        if (!count || !vstTastes[i]) continue;
         fprintf(file, "%s\n      ", written++ ? "," : "");
         json_write_text(file, vstNames[i]);
-        fprintf(file, ": [");
-        for (int j = 0; j < vstLibraryPresets[i]; j++)
-            fprintf(file, "%s%.3f", j ? ", " : "", vstTastes[i][j]);
-        fprintf(file, "]");
+        fprintf(file, ": { ");
+        for (int j = 0; j < count; j++)
+            fprintf(file, "%s\"%d\": %d", j ? ", " : "", j + 1, vstTastes[i][j]);
+        fprintf(file, " }");
     }
     return written;
 }
@@ -1535,6 +1597,7 @@ static int save_settings(const char *path, const Options *options)
         return -1;
     }
 
+    taste_flush();
     fprintf(file, "{\n  \"instrument\": ");
     json_write_text(file, options->instrument);
     fprintf(file, ",\n  \"input-channel\": %d,\n", options->inputChannel);
@@ -1548,10 +1611,10 @@ static int save_settings(const char *path, const Options *options)
         json_write_text(file, options->vstsPath);
         fprintf(file, ",\n");
     }
-    fprintf(file, "  \"samples_ratio\": %d,\n  \"taste\": {\n    \"drums\": {", options->samplesRatio);
+    fprintf(file, "  \"samples_ratio\": %d,\n  \"taste\": {\n    \"samples\": {", options->samplesRatio);
 
     int drumsWritten = write_drums(file, options->samplesPath[0] && !drumCount);
-    fprintf(file, "%s},\n    \"presets\": {", drumsWritten ? "\n    " : "");
+    fprintf(file, "%s},\n    \"synths\": {", drumsWritten ? "\n    " : "");
     int presetsWritten = write_presets(file, options->vstsPath[0] && !vstLibraryCount);
     fprintf(file, "%s}\n  }\n}\n", presetsWritten ? "\n    " : "");
 
@@ -1689,9 +1752,12 @@ static void render_vst(float *dst, int outputs, int frames)
         }
     }
 
-    if (peak > TASTE_GATE && vstActiveLibrary >= 0 && vstTastes[vstActiveLibrary] &&
-        vstProgram < vstLibraryPresets[vstActiveLibrary])
-        vstTastes[vstActiveLibrary][vstProgram] += (double)frames / g.rate;
+    if (!vstTasted && peak > TASTE_GATE && vstActiveLibrary >= 0 && vstTastes[vstActiveLibrary] &&
+        vstProgram < vstLibraryPresets[vstActiveLibrary]) {
+        vstTasted = 1;
+        vstTasteLibrary = vstActiveLibrary;
+        vstTasteProgram = vstProgram;
+    }
 }
 
 static void choose_sound(int samplesRatio)
@@ -1708,6 +1774,7 @@ static void render_instruments(float *dst, int outputs, int frames)
 
 static void close_vst_effect(void)
 {
+    taste_flush();
     vst_stop();
     if (vstEffect) {
         vstEffect->dispatcher(vstEffect, effClose, 0, 0, NULL, 0);
@@ -1718,15 +1785,15 @@ static void close_vst_effect(void)
 
 static int pick_vst_library(void)
 {
-    double total = 0.0;
+    long long total = 0;
     for (int i = 0; i < vstLibraryCount; i++)
         for (int j = 0; j < vstLibraryPresets[i]; j++) total += vstTastes[i][j];
-    if (total <= 0.0) return rand() % vstLibraryCount;
+    if (total <= 0) return rand() % vstLibraryCount;
 
-    double ticket = random_unit() * total;
+    long long ticket = (long long)(random_unit() * (double)total);
     for (int i = 0; i < vstLibraryCount; i++)
         for (int j = 0; j < vstLibraryPresets[i]; j++)
-            if ((ticket -= vstTastes[i][j]) < 0.0) return i;
+            if ((ticket -= vstTastes[i][j]) < 0) return i;
     return vstLibraryCount - 1;
 }
 
@@ -1933,7 +2000,10 @@ static void process_buffer(int32_t index)
     if (g.synthEnabled) synth_render(g.synthFloats, frames);
 
     if (playlistMode) render_playlist(g.fileFloats, g.nOut, frames);
-    else if (instrumentMode) render_instruments(g.fileFloats, g.nOut, frames);
+    else if (instrumentMode) {
+        render_instruments(g.fileFloats, g.nOut, frames);
+        taste_tick(frames);
+    }
 
     for (int j = 0; j < g.nOut; j++) {
         int source = g.nIn ? j % g.nIn : -1;
@@ -2627,11 +2697,13 @@ static void shutdown_monitor(void)
     free(drums);
     free(drumTaste);
     free(drumPeaks);
+    free(drumTasted);
+    drumTasted = NULL;
     for (int i = 0; i < fileDrumCount; i++) free(fileDrums[i].name);
     free(fileDrums);
     for (int i = 0; i < filePresetCount; i++) {
         free(filePresets[i].name);
-        free(filePresets[i].taste);
+        free(filePresets[i].entries);
     }
     free(filePresets);
     close_vst();
