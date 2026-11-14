@@ -42,7 +42,7 @@ a stack of separate stems.
 
 ## Measurements
 
-| Pattern | Loop (s) | Segments | Region (s) | Covered (s) |
+| Tracked element | Loop (s) | Segments | Region (s) | Covered (s) |
 |---|---:|---:|---|---:|
 | bass | 1.07 | 73 | 0.00–78.11 | 78.11 |
 | cymbal | 2.15 | 35 | 2.15–77.40 | 75.25 |
