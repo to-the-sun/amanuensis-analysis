@@ -64,8 +64,8 @@
 /* Noise Floor Ratio: 19.0% of signal peak amplitude (-14.43 dB) */
 double g_noise_floor_ratio = 0.19;
 
-/* Silence Threshold: Peak amplitude limit for silent boundary samples (0.009) */
-double g_silence_threshold = 0.009;
+/* Pitch Dominance Ratio: 89% of the per-frame max pitch flux */
+double g_pitch_dominance_ratio = 0.89;
 
 static pthread_mutex_t g_console_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -492,14 +492,6 @@ static int find_trough_right(const double *env, uint32_t n, int x) {
 }
 
 static void detect_all_peaks(const double *env, uint32_t n, int **out_peaks, int *out_count);
-
-void apply_flux_noise_gate(double *env, uint32_t total_samples, double threshold) {
-    for (uint32_t i = 0; i < total_samples; i++) {
-        if (env[i] < threshold) {
-            env[i] = 0.0;
-        }
-    }
-}
 
 void modify_flux_envelope_channel(double *env, uint32_t total_samples) {
     if (total_samples < 3) return;
@@ -2232,6 +2224,8 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
     clock_t stft_start_clock = clock();
 
     for (uint32_t c = 0; c < num_channels; c++) {
+        double prev_energy[FFT_SIZE / 2 + 1] = {0};
+
         for (uint32_t m = 0; m < num_frames; m++) {
             uint32_t offset = m * HOP_SIZE;
 
@@ -2251,16 +2245,31 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
             size_t frame_base = ((size_t)c * num_frames + m) * num_bins_per_frame;
             size_t frame_p_base = ((size_t)c * num_frames + m) * NUM_MIDI_PITCHES;
 
+            double pitch_flux[NUM_MIDI_PITCHES] = {0};
+
             for (int k = 0; k <= FFT_SIZE / 2; k++) {
                 stft_data[frame_base + k].r = (float)fft_frame[k].r;
                 stft_data[frame_base + k].i = (float)fft_frame[k].i;
 
-                double mag_sq = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
-                if (mag_sq > 1e-18) {
-                    int p = bin_pitch[k];
-                    if (p < 0) continue;
-                    pitch_active[p] = 1;
+                int p = bin_pitch[k];
+                if (p < 0) continue;
+
+                double energy = fft_frame[k].r * fft_frame[k].r + fft_frame[k].i * fft_frame[k].i;
+                double diff = energy - prev_energy[k];
+                if (diff > 0.0) pitch_flux[p] += diff;
+                prev_energy[k] = energy;
+            }
+
+            double frame_max_flux = 0.0;
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                if (pitch_flux[p] > frame_max_flux) frame_max_flux = pitch_flux[p];
+            }
+
+            double dominance_floor = frame_max_flux * g_pitch_dominance_ratio * g_pitch_dominance_ratio;
+            for (int p = 0; p < NUM_MIDI_PITCHES; p++) {
+                if (pitch_flux[p] > 1e-18 && pitch_flux[p] > dominance_floor) {
                     frame_pitch_active[frame_p_base + p] = 1;
+                    pitch_active[p] = 1;
                 }
             }
         }
@@ -2342,25 +2351,20 @@ int process_audio(const char *input_path, const char *stem_dir, FileBatchResult 
         }
         free(stem_buf);
 
-        // Evaluate stem energy and active duration against noise floor threshold
-        double stem_max_peak = 0.0;
         double stem_sum_sq = 0.0;
         uint32_t active_frames = 0;
 
         for (uint32_t i = 0; i < total_samples; i++) {
-            int frame_above_threshold = 0;
+            double amp = 0.0;
             for (uint32_t c = 0; c < num_channels; c++) {
                 double val = unpadded_data[i * num_channels + c];
-                double abs_val = fabs(val);
-                if (abs_val > stem_max_peak) stem_max_peak = abs_val;
                 stem_sum_sq += val * val;
 
-                if (abs_val >= noise_floor_threshold) {
-                    frame_above_threshold = 1;
-                }
+                double abs_val = fabs(val);
+                if (abs_val > amp) amp = abs_val;
             }
 
-            if (frame_above_threshold) {
+            if (amp >= noise_floor_threshold) {
                 active_frames++;
             }
         }
