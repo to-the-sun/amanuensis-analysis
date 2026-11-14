@@ -43,10 +43,7 @@ Each test phrase below will have a key with the "correct" stats that should be d
 | kick | 2.15 | 35 | 2.15–77.40 | 75.25 |
 | kick | 2.15 | 12 | 2.15–15.05, 38.65–49.40, 66.62–68.79 | 25.80 |
 
-Starts and ends are read off the axis to about ±0.05 s; covered time is
-`segments × loop`.
-
-## What the analysis shows
+## Discussion 
 
 1. **Two loop lengths, in a 1:2 ratio.** The bass repeats every 1.07 s, the
    cymbal and kick every 2.15 s, so the bass turns over twice per cymbal cycle.
