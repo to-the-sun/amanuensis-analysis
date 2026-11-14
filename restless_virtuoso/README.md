@@ -100,8 +100,8 @@ When `instrument` is a MIDI input, two more keys add instruments to it:
   peaked above the gate anywhere in it. Every entry starts at 1; `new sound` draws
   by weighted lottery with one ticket per second of taste, once over all presets
   and once per MIDI note over the drum samples. Samples are keyed by their path
-  under `samples_path`, presets by their 1-based number under the plugin's `.dll`
-  name. The instance writes the session's totals back into the settings file when
+  under `samples_path`, presets by their 1-based number under the plugin's file
+  name, e.g. `Dexed.dll`. The instance writes the session's totals back into the settings file when
   it closes.
 
 The sine synth stays off in this mode; the loaded instrument is the sound source.

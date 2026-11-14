@@ -1107,11 +1107,16 @@ static void taste_tick(int frames)
     taste_flush();
 }
 
-static VstStats *find_vst_stats(const char *name, const char *dll)
+static VstStats *find_vst_stats(const char *name, const char *file)
 {
-    for (int i = 0; i < vstStatsCount; i++)
-        if (!_stricmp(vstStats[i].name, name) || !_stricmp(vstStats[i].name, dll))
+    size_t length = strlen(file);
+    if (length > 4 && !_stricmp(file + length - 4, ".dll")) length -= 4;
+
+    for (int i = 0; i < vstStatsCount; i++) {
+        if (!_stricmp(vstStats[i].name, name)) return &vstStats[i];
+        if (strlen(vstStats[i].name) == length && !_strnicmp(vstStats[i].name, file, length))
             return &vstStats[i];
+    }
     return NULL;
 }
 
@@ -1255,12 +1260,10 @@ static void add_vst(const wchar_t *path)
     if (!library) log_error("Could not load '%ls'.\n", path);
     else if (GetProcAddress(library, "VSTPluginMain") || GetProcAddress(library, "main")) {
         const wchar_t *base = wcsrchr(path, L'\\');
-        wchar_t stem[VST_NAME];
-        wcsncpy(stem, base ? base + 1 : path, VST_NAME - 1);
-        stem[VST_NAME - 1] = 0;
-        wchar_t *dot = wcsrchr(stem, L'.');
-        if (dot) *dot = 0;
-        WideCharToMultiByte(CP_ACP, 0, stem, -1, vstNames[vstLibraryCount], VST_NAME, NULL, NULL);
+        wchar_t file[VST_NAME];
+        wcsncpy(file, base ? base + 1 : path, VST_NAME - 1);
+        file[VST_NAME - 1] = 0;
+        WideCharToMultiByte(CP_ACP, 0, file, -1, vstNames[vstLibraryCount], VST_NAME, NULL, NULL);
         vstLibraries[vstLibraryCount] = library;
         init_vst_taste(vstLibraryCount);
         vstLibraryCount++;
