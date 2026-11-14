@@ -45,13 +45,9 @@ Each test phrase below will have a key with the "correct" stats that should be d
 
 ## Discussion 
 
-1. **Two loop lengths, in a 1:2 ratio.** The bass repeats every 1.07 s, the
-   cymbal and kick every 2.15 s, so the bass turns over twice per cymbal cycle.
-   This is a nested period, and the shorter loop is the one reported for the
-   bass: its region genuinely repeats at half the others. If the bass loop is
-   one bar (~1.07 s), the cymbal and kick loops are two bars.
-2. **Patterns are per-region, not per-loop-length.** Two rows carry the same
-   2.15 s loop but different regions: the 35-segment kick runs unbroken, the
+1. **Unique tracked elements.** The most fundamental driver of any pattern is the unique element it is tracking. Again, these descriptions here (e.g., bass, etc.) are purely subjective. The point is that they are each uniquely characterizable by things like their onset, their timbre, their pitch, etc. For example, the bass and kick are both low frequency spectrally, but the kick has a much more staccato envelope and so both are distinct. Once a fundamental element has been characterized, it becomes a tracked pattern if it repeats at regular intervals throughout some portion of the recording.
+2. **Patterns are per-region, not per-segment-length.** Two rows carry the same
+   2.15 s segment length but different regions: the 35-segment kick runs unbroken, the
    12-segment kick appears only in three separated stretches (6 + 5 + 1
    segments). Same length, different region, separate pattern.
 3. **Starts are measured, not shared.** The bass begins at 0.00 s and the other
