@@ -66,10 +66,15 @@ across patterns or across the file. Measure each region on its own terms.
    Every piece but the last is exactly 36 MiB, so a shorter one means a piece is
    missing. The joined stem is the archive name, and it still names the master:
    `[2026-11-12-19-12-50].wav`.
-2. If the archive is tracked in this repository, delete it once it is extracted
-   (`git rm palettes/<archive>.zip`, or `palettes/<archive>.zip.*` for a split
-   one). The extracted palette and passes stay in the batch folder; the archive
-   does not.
+2. Remove the archive from this repository once it is extracted. This is
+   required, not optional: `git rm palettes/<archive>.zip`, or
+   `palettes/<archive>.zip.*` for a split one, and commit the deletions on a new
+   branch like any other change. Repository changes are expected here; do not
+   leave an archive in place to avoid a commit. Deleting the archive destroys
+   the repository's only copy of the source audio, and that is intended. The
+   extracted palette and passes stay in the batch folder, and the packaged
+   `analyze-palettes.zip` keeps a copy of every source WAV under
+   `pattern_reports/[palettes]/`, so the audio survives in the deliverables.
 3. Probe duration, sample rate and channel count.
 4. Convert non-WAV input to mono 16-bit PCM WAV for the report builder:
 
@@ -221,7 +226,10 @@ Write down a table before building anything:
 
 Create a JSON spec. Paths in `file` are relative to `--src` unless absolute.
 `start` is the measured pattern start; `end` is a search bound that the builder
-truncates to the last complete segment.
+truncates to the last complete segment. Pass the section's `bound` from the
+analysis helper as `end`, not its already-truncated `end`: rounding those to
+milliseconds can land a hair short of the last segment boundary and silently
+cost the region its final segment through `int((end - start) / length)`.
 
 ```json
 {
