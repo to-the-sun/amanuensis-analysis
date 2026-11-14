@@ -23,7 +23,7 @@ Each test phrase below will have a key with the "correct" stats that should be d
 ## Reading the panel
 
 - The gray trace is the same waveform drawn once per pattern, so every pattern
-  has its own row against the shared time axis. The waveform is from a single mono recording; every row comes from the same audio and nothing here is a stack of separate stems.
+  has its own row against the shared time axis. The waveform is a single mono recording; every row comes from the same audio and nothing here is a stack of separate stems.
 - The **thick outer rectangle** is the whole pattern: from its measured start to
   the end of its last complete segment.
 - The **thin dashed verticals** divide the row into segments, one per loop
