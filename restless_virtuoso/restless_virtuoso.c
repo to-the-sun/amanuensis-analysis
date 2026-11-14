@@ -1214,6 +1214,37 @@ static void effect_name(AEffect *effect, char *name, size_t size)
     name[size - 1] = 0;
 }
 
+/* Some plugins ignore effSetProgram, so the chosen preset also arrives as raw MIDI:
+   bank select MSB and LSB for presets past 127, then the program change. */
+static void send_vst_program_change(int program)
+{
+    VstMidiEvent midi[3];
+    struct {
+        VstInt32 numEvents;
+        VstIntPtr reserved;
+        VstEvent *events[3];
+    } events;
+    int bank = program / 128;
+
+    memset(midi, 0, sizeof midi);
+    for (int i = 0; i < 3; i++) {
+        midi[i].type = kVstMidiType;
+        midi[i].byteSize = sizeof midi[i];
+    }
+    midi[0].midiData[0] = (char)0xB0;
+    midi[0].midiData[2] = (char)(bank >> 7);
+    midi[1].midiData[0] = (char)0xB0;
+    midi[1].midiData[1] = 32;
+    midi[1].midiData[2] = (char)(bank & 0x7f);
+    midi[2].midiData[0] = (char)0xC0;
+    midi[2].midiData[1] = (char)(program % 128);
+
+    memset(&events, 0, sizeof events);
+    events.numEvents = 3;
+    for (int i = 0; i < 3; i++) events.events[i] = (VstEvent *)&midi[i];
+    vstEffect->dispatcher(vstEffect, effProcessEvents, 0, 0, &events, 0);
+}
+
 static int start_vst(int library)
 {
     AEffect *effect = create_effect(vstLibraries[library]);
@@ -1246,6 +1277,7 @@ static int start_vst(int library)
         vstActiveLibrary = -1;
         return -1;
     }
+    if (vstPresetCount > 1) send_vst_program_change(vstProgram);
     return 0;
 }
 
