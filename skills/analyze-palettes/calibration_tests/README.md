@@ -34,13 +34,7 @@ Each test phrase below will have a key with the "correct" stats that should be d
 
 ![test_phrase_1](test_phrase_1.png)
 
-A pattern analysis of one recording: **78.9 s · 44.1 kHz · mono · four repeating
-patterns**. The panel is drawn from `test_phrase_1.wav` in this folder. That
-file is a single stem: every row comes from the same audio, and nothing here is
-a stack of separate stems.
-
-
-## Measurements
+## Results 
 
 | Tracked element | Loop (s) | Segments | Region (s) | Covered (s) |
 |---|---:|---:|---|---:|
