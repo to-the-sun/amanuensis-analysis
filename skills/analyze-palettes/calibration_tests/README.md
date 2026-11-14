@@ -57,14 +57,4 @@ Each test phrase below will have a key with the "correct" stats that should be d
 6. **The cycle count is an integer and the remainder is dropped.** 73 × 1.07 =
    78.11 s and 35 × 2.15 = 75.25 s. The recording is 78.9 s, so 0.79 s and
    1.50 s of tail sit outside the regions: a pattern ends at its last complete
-   segment.
-7. **The patterns are layers inside the one phrase, not sections.** The bass,
-   cymbal and kick all run from 2.15 s to 77.40 s, which is what lets them stack
-   in the song.
-
-## Not in this panel
-
-Pass assignment, raw lead-in and shifted entry, bar count, mean similarity and
-confidence are recorded in the report's `summary.js` and the measurements table,
-not drawn here. The panel shows only what was measured: loop length, segment
-count and region.
+   segment
