@@ -1214,6 +1214,24 @@ static void effect_name(AEffect *effect, char *name, size_t size)
     name[size - 1] = 0;
 }
 
+/* Some plugins ignore effSetProgram, so the chosen preset also arrives as raw MIDI. */
+static void send_vst_program_change(int program)
+{
+    VstMidiEvent event;
+    VstEvents events;
+
+    memset(&event, 0, sizeof event);
+    event.type = kVstMidiType;
+    event.byteSize = sizeof event;
+    event.midiData[0] = (char)0xC0;
+    event.midiData[1] = (char)(program & 0x7f);
+
+    memset(&events, 0, sizeof events);
+    events.numEvents = 1;
+    events.events[0] = (VstEvent *)&event;
+    vstEffect->dispatcher(vstEffect, effProcessEvents, 0, 0, &events, 0);
+}
+
 static int start_vst(int library)
 {
     AEffect *effect = create_effect(vstLibraries[library]);
@@ -1246,6 +1264,7 @@ static int start_vst(int library)
         vstActiveLibrary = -1;
         return -1;
     }
+    if (vstPresetCount > 1) send_vst_program_change(vstProgram);
     return 0;
 }
 
