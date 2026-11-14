@@ -20,15 +20,6 @@ Outlined in this document are calibration tests which the algorithm implemented 
 
 Each test phrase below will have a key with the "correct" stats that should be derived from the audio. Floating point values such as segment lengths etc. do not need to match absolutely perfectly but they must be close. A discussion will also follow as to why the values in the key are the desired ones. It is essential to understand the intent and the purpose of these algorithms in order to build methods that will generalize to any palette seen in the future, and not just resort to any short-sighted solution that happens to generate the correct answers. 
 
-# test_phrase_1
-
-![test_phrase_1](test_phrase_1.png)
-
-A pattern analysis of one recording: **78.9 s · 44.1 kHz · mono · four repeating
-patterns**. The panel is drawn from `test_phrase_1.wav` in this folder. That
-file is a single stem: every row comes from the same audio, and nothing here is
-a stack of separate stems.
-
 ## Reading the panel
 
 - The gray trace is the same waveform drawn once per pattern, so every pattern
@@ -37,7 +28,17 @@ a stack of separate stems.
   the end of its last complete segment.
 - The **thin dashed verticals** divide the row into segments, one per loop
   iteration, at the pattern's loop length.
-- The row label gives the pattern's name (colored dot) and `loop × segments`.
+- The row label gives a subjective description of the element being tracked (these are by no means standard and could be anything that helps orient the listener to the pattern evident) and `loop × segments`.
+  
+# test_phrase_1.wav
+
+![test_phrase_1](test_phrase_1.png)
+
+A pattern analysis of one recording: **78.9 s · 44.1 kHz · mono · four repeating
+patterns**. The panel is drawn from `test_phrase_1.wav` in this folder. That
+file is a single stem: every row comes from the same audio, and nothing here is
+a stack of separate stems.
+
 
 ## Measurements
 
