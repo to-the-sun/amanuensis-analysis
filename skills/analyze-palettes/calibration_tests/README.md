@@ -46,22 +46,20 @@ Each test phrase below will have a key with the "correct" stats that should be d
 ## Discussion 
 
 1. **Unique tracked elements.** The most fundamental driver of any pattern is the unique element it is tracking. Again, these descriptions here (e.g., bass, etc.) are purely subjective. The point is that they are each uniquely characterizable by things like their onset, their timbre, their pitch, etc. For example, the bass and kick are both low frequency spectrally, but the kick has a much more staccato envelope and so both are distinct. Once a fundamental element has been characterized, it becomes a tracked pattern if it repeats at regular intervals throughout some portion of the recording.
-2. **Patterns are per-region, not per-segment-length.** Two rows carry the same
-   2.15 s segment length but different regions: the 35-segment kick runs unbroken, the
-   12-segment kick appears only in three separated stretches (6 + 5 + 1
-   segments). Same length, different region, separate pattern.
-3. **Starts are measured, not shared.** The bass begins at 0.00 s and the other
+2. **Even more defining than the tracked element itself is its position within the segment.** For example, we see there are two tracked elements labeled "kick". These are actually the exact same drum sample but they occur in different places within the segment length and therefore constitute distinct patterns. The first is on the downbeat and the second when it occurs is repeatedly a syncopated beat.
+3. **A single track element can have non-contiguous patterns.** We can see that the second kick (the syncopated one) occurs in two separate patterns throughout the phrase. The segments of the patterns must be contiguous but any break in them can divide it into multiple patterns without issue. Of note here is that there could actually be considered a third pattern in this row at approximately 67 seconds to 69 seconds. However, that pattern has been excluded because it is only one segment length long and all patterns are required to be at least three segments long. 
+4. **Starts are measured, not shared.** The bass begins at 0.00 s and the other
    two at 2.15 s, so the first 2.15 s hold the bass alone. Pattern starts come
    from the audio; they are not snapped to a common grid or to a pass loop
    point.
-4. **Each pattern has its own uniform grid.** The bass divides every 1.07 s from
+5. **Each pattern has its own uniform grid.** The bass divides every 1.07 s from
    0.00 s, the cymbal and kick every 2.15 s from 2.15 s; the rows' divisions do
    not line up, and no grid is imposed across patterns.
-5. **The cycle count is an integer and the remainder is dropped.** 73 × 1.07 =
+6. **The cycle count is an integer and the remainder is dropped.** 73 × 1.07 =
    78.11 s and 35 × 2.15 = 75.25 s. The recording is 78.9 s, so 0.79 s and
    1.50 s of tail sit outside the regions: a pattern ends at its last complete
    segment.
-6. **The patterns are layers inside the one phrase, not sections.** The bass,
+7. **The patterns are layers inside the one phrase, not sections.** The bass,
    cymbal and kick all run from 2.15 s to 77.40 s, which is what lets them stack
    in the song.
 
