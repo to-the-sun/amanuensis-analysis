@@ -53,7 +53,7 @@ Each test phrase below will have a key with the "correct" stats that should be d
    from the audio; they are not snapped to a common grid or to a pass loop
    point.
 5. **Each pattern has its own uniform grid.** The bass divides every 1.07 s from
-   0.00 s, the cymbal and kick every 2.15 s from 2.15 s. No grid is imposed across patterns; in reality, the start position of a pattern for a given element is arbitrary within its segment, but since they all come from the same phrase of audio, it can be assumed that their borders align where it makes sense. For example, the bass pattern has two preceding segments, but the cymbal when it starts begins exactly aligned with that third bass segment.
+   0.00 s, the cymbal and kick every 2.15 s from 2.15 s. No grid is imposed across patterns; in reality, the exact start position of a pattern within its segment for a given element is arbitrary, but since all patterns come from the same audio, it can be assumed that their borders should align where sensible. For example, the bass pattern has two preceding segments, but the cymbal when it starts begins exactly aligned with that third bass segment.
 6. **The cycle count is an integer and the remainder is dropped.** 73 × 1.07 =
    78.11 s and 35 × 2.15 = 75.25 s. The recording is 78.9 s, so 0.79 s and
    1.50 s of tail sit outside the regions: a pattern ends at its last complete
