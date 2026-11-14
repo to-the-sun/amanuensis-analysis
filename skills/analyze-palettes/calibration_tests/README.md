@@ -8,7 +8,7 @@ measured beat positions.
 - **Pattern**: a region that repeats at one fixed loop length **for at least three
 segments**, running from its measured start to the end of its last complete
 segment. The thick rectangle bounds it. Patterns are independent of each other;
-two patterns can share a loop length and still count separately because they are tracking different contents in their repetitions, i.e. an onset in one position of the segment (and/or timbre or pitch) versus another.
+two patterns can share a segment length and still count separately because they are tracking different contents in their repetitions, i.e. an onset in one position of the segment (and/or timbre or pitch) versus another.
 - **Phrase**: the full extent of the audio from the beginning to the end of all
 of its overlapping patterns. 
 - **Palette**: a full jam session recorded beginning to end with no editing. Palettes are analyzed for their patterns and have their phrases extracted before building the final song.
